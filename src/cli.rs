@@ -1,15 +1,17 @@
 use std::collections::HashSet;
 use std::env;
+use std::fmt::{Display, Formatter, Write as _};
 use std::fs::{self, File};
-use std::io::BufReader;
+use std::io::{BufReader, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
+use anstyle::{AnsiColor, Style};
 use anyhow::{Context, Result, bail};
 use cargo_metadata::{MetadataCommand, TargetKind};
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 
-use crate::graph::{FindingKind, Fragment, analyze};
+use crate::graph::{Finding, FindingKind, Fragment, Span, analyze};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -40,6 +42,33 @@ struct Args {
     /// Preserve serialized compiler fragments at this directory.
     #[arg(long)]
     graph_dir: Option<PathBuf>,
+
+    /// Control when colored output is used.
+    #[arg(long, value_enum, default_value_t, value_name = "WHEN")]
+    color: TerminalColor,
+}
+
+#[derive(Clone, Copy, Debug, Default, ValueEnum)]
+enum TerminalColor {
+    /// Display colors if the output goes to an interactive terminal.
+    #[default]
+    Auto,
+
+    /// Always display colors.
+    Always,
+
+    /// Never display colors.
+    Never,
+}
+
+impl From<TerminalColor> for anstream::ColorChoice {
+    fn from(color: TerminalColor) -> Self {
+        match color {
+            TerminalColor::Auto => Self::Auto,
+            TerminalColor::Always => Self::Always,
+            TerminalColor::Never => Self::Never,
+        }
+    }
 }
 
 pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
@@ -129,31 +158,168 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
     }
     let excluded: HashSet<String> = args.excluded_crates.into_iter().collect();
     let findings = analyze(&fragments, &excluded);
+    let mut diagnostics = String::new();
     for finding in &findings {
-        let location = finding
-            .definition
-            .span
-            .as_ref()
-            .map(|span| format!("{}:{}:{}", span.file, span.line, span.column))
-            .unwrap_or_else(|| finding.definition.crate_name.clone());
-        match finding.kind {
-            FindingKind::DeadPublic => println!(
-                "{location}: hawk::dead_public: `{}` is public but is not reachable from binary `{}`",
-                finding.definition.name, args.bin
-            ),
-            FindingKind::UnnecessaryPublic => println!(
-                "{location}: hawk::unnecessary_public: `{}` is public but all reachable uses are within `{}`; it can be `pub(crate)`",
-                finding.definition.name, finding.definition.crate_name
-            ),
-        }
+        write_diagnostic(&mut diagnostics, finding, &args.bin, &workspace_root)
+            .expect("formatting diagnostics into a string cannot fail");
     }
-    println!(
+    writeln!(
+        diagnostics,
         "hawk: {} finding(s) for `{} --bin {} --all-features` on the host target",
         findings.len(),
         args.package,
         args.bin
-    );
+    )
+    .expect("formatting diagnostics into a string cannot fail");
+    anstream::AutoStream::new(std::io::stdout(), args.color.into())
+        .write_all(diagnostics.as_bytes())
+        .context("write diagnostic output")?;
     Ok(ExitCode::SUCCESS)
+}
+
+const WARNING: Style = AnsiColor::Yellow.on_default().bold();
+const LOCATION: Style = AnsiColor::BrightBlue.on_default().bold();
+const SEPARATOR: Style = AnsiColor::Cyan.on_default();
+const HELP: Style = AnsiColor::BrightCyan.on_default().bold();
+const EMPHASIS: Style = Style::new().bold();
+
+fn write_diagnostic(
+    output: &mut String,
+    finding: &Finding<'_>,
+    binary: &str,
+    workspace_root: &Path,
+) -> std::fmt::Result {
+    let (code, message, help) = match finding.kind {
+        FindingKind::DeadPublic => (
+            "hawk::dead_public",
+            format!(
+                "`{}` is public but is not reachable from binary `{binary}`",
+                finding.definition.name
+            ),
+            "consider restricting this declaration's visibility or removing it",
+        ),
+        FindingKind::UnnecessaryPublic => (
+            "hawk::unnecessary_public",
+            format!(
+                "`{}` is public but all reachable uses are within `{}`; it can be `pub(crate)`",
+                finding.definition.name, finding.definition.crate_name
+            ),
+            "change this declaration to `pub(crate)`",
+        ),
+    };
+    writeln!(
+        output,
+        "{}: {}",
+        styled(format_args!("warning[{code}]"), WARNING),
+        styled(message, EMPHASIS)
+    )?;
+
+    if let Some(span) = &finding.definition.span {
+        writeln!(
+            output,
+            "  {} {}:{}:{}",
+            styled("-->", LOCATION),
+            span.file,
+            span.line,
+            span.column
+        )?;
+        let width = span.line.to_string().len();
+        if let Some(source_line) = source_line(workspace_root, span) {
+            writeln!(
+                output,
+                "{empty:>width$} {}",
+                styled("|", SEPARATOR),
+                empty = "",
+                width = width
+            )?;
+            writeln!(
+                output,
+                "{} {} {source_line}",
+                styled(format!("{:>width$}", span.line), LOCATION),
+                styled("|", SEPARATOR)
+            )?;
+            writeln!(
+                output,
+                "{empty:>width$} {} {}",
+                styled("|", SEPARATOR),
+                styled(
+                    format_args!(
+                        "{}^^^ public declaration",
+                        marker_indent(&source_line, span.column)
+                    ),
+                    WARNING
+                ),
+                empty = "",
+                width = width
+            )?;
+        }
+        writeln!(
+            output,
+            "{empty:>width$} {} {}: {help}",
+            styled("=", SEPARATOR),
+            styled("help", HELP),
+            empty = "",
+            width = width
+        )?;
+    } else {
+        writeln!(
+            output,
+            "  {} {}: declaration in crate `{}`",
+            styled("=", SEPARATOR),
+            styled("note", HELP),
+            finding.definition.crate_name
+        )?;
+        writeln!(
+            output,
+            "  {} {}: {help}",
+            styled("=", SEPARATOR),
+            styled("help", HELP)
+        )?;
+    }
+    writeln!(output)
+}
+
+fn styled(content: impl Display, style: Style) -> impl Display {
+    struct Styled<T> {
+        content: T,
+        style: Style,
+    }
+
+    impl<T: Display> Display for Styled<T> {
+        fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+            write!(
+                formatter,
+                "{}{}{}",
+                self.style.render(),
+                self.content,
+                self.style.render_reset()
+            )
+        }
+    }
+
+    Styled { content, style }
+}
+
+fn source_line(workspace_root: &Path, span: &Span) -> Option<String> {
+    let source_path = Path::new(&span.file);
+    let source_path = if source_path.is_absolute() {
+        source_path.to_path_buf()
+    } else {
+        workspace_root.join(source_path)
+    };
+    fs::read_to_string(source_path)
+        .ok()?
+        .lines()
+        .nth(span.line.checked_sub(1)?)
+        .map(str::to_owned)
+}
+
+fn marker_indent(source_line: &str, column: usize) -> String {
+    source_line
+        .chars()
+        .take(column.saturating_sub(1))
+        .map(|character| if character == '\t' { '\t' } else { ' ' })
+        .collect()
 }
 
 fn validate_product(
@@ -205,4 +371,48 @@ fn read_fragments(graph_dir: &Path) -> Result<Vec<Fragment>> {
         }
     }
     Ok(fragments)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use crate::graph::{Definition, DefinitionKind, Finding, FindingKind, Span};
+
+    use super::write_diagnostic;
+
+    #[test]
+    fn diagnostic_rendering_includes_terminal_styles() {
+        let definition = Definition {
+            id: "internal_helper".into(),
+            crate_name: "library".into(),
+            name: "internal_helper".into(),
+            kind: DefinitionKind::Function,
+            span: Some(Span {
+                file: "tests/fixtures/basic/library/src/lib.rs".into(),
+                line: 5,
+                column: 1,
+            }),
+            public_api: true,
+            allow_dead_code: false,
+        };
+        let finding = Finding {
+            kind: FindingKind::UnnecessaryPublic,
+            definition: &definition,
+        };
+        let mut output = String::new();
+
+        write_diagnostic(
+            &mut output,
+            &finding,
+            "app",
+            Path::new(env!("CARGO_MANIFEST_DIR")),
+        )
+        .expect("render diagnostic");
+
+        assert!(output.contains("\u{1b}[1m\u{1b}[33mwarning[hawk::unnecessary_public]"));
+        assert!(output.contains("\u{1b}[1m\u{1b}[94m-->\u{1b}[0m"));
+        assert!(output.contains("\u{1b}[1m\u{1b}[33m^^^ public declaration\u{1b}[0m"));
+        assert!(output.contains("\u{1b}[1m\u{1b}[96mhelp\u{1b}[0m"));
+    }
 }

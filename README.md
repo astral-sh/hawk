@@ -37,6 +37,8 @@ internal unless exempted:
 Instrumented Cargo artifacts are reused under `/private/tmp/codex-hawk-target`
 by default. Use `--target-dir` to override that location and `--graph-dir` to
 retain the compiler fragments in a run-specific subdirectory for investigation.
+Diagnostics are colored automatically in a terminal; use `--color=always` or
+`--color=never` to override terminal detection.
 
 ## License
 

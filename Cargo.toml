@@ -11,6 +11,8 @@ name = "cargo-hawk"
 path = "src/main.rs"
 
 [dependencies]
+anstream = "1.0.0"
+anstyle = "1.0.14"
 anyhow = "1.0.98"
 cargo_metadata = "0.20.0"
 clap = { version = "4.5.40", features = ["derive"] }
