@@ -29,29 +29,113 @@ fn diagnoses_public_surface_of_a_binary_product() {
     );
     assert!(unrelated_json.exists());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("warning[hawk::unnecessary_public]: `internal_helper`"));
-    assert!(stdout.contains("  --> library/src/lib.rs:5:1"));
-    assert!(stdout.contains("5 | pub fn internal_helper() {}"));
-    assert!(stdout.contains("| ^^^ public declaration"));
-    assert!(stdout.contains("= help: change this declaration to `pub(crate)`"));
-    assert!(stdout.contains("warning[hawk::dead_public]: `dead_entry`"));
-    assert!(stdout.contains("warning[hawk::dead_public]: `InternalNamespace::dead_method`"));
-    assert!(stdout.contains("warning[hawk::unnecessary_public]: `retained_helper`"));
-    assert!(stdout.contains("warning[hawk::unnecessary_public]: `ConstructedTuple`"));
-    assert!(stdout.contains("warning[hawk::unnecessary_public]: `ConstructedEnum`"));
-    assert!(stdout.contains("warning[hawk::dead_public]: `DeadUnion`"));
-    assert!(stdout.contains("warning[hawk::dead_public]: `ProductContext`"));
-    assert!(stdout.contains("warning[hawk::dead_public]: `ContextOptionsAlias`"));
-    assert!(stdout.contains("warning[hawk::unnecessary_public]: `PrivateContextOptions`"));
-    assert!(stdout.contains("warning[hawk::unnecessary_public]: `InternalRenderer`"));
-    assert!(stdout.contains("warning[hawk::unnecessary_public]: `InternalRenderResult`"));
-    assert!(!stdout.contains("`ProductValue`"));
-    assert!(!stdout.contains("`ContextOptions`"));
-    assert!(!stdout.contains("`RefinedBuildError`"));
-    assert!(!stdout.contains("exported::ReexportedValue"));
-    assert!(!stdout.contains("`TypeCheckedAcrossCrates`"));
-    assert!(!stdout.contains("`PublicRenderResult`"));
-    assert!(!stdout.contains("`passthrough`"));
-    assert!(!stdout.contains("{use#"));
-    assert!(stdout.contains("hawk: 15 finding(s)"));
+    let stdout = anstream::adapter::strip_str(&stdout);
+    insta::assert_snapshot!(stdout, @r###"
+    warning[hawk::unnecessary_public]: `internal_helper` is public but all reachable uses are within `library`; it can be `pub(crate)`
+      --> library/src/lib.rs:5:1
+      |
+    5 | pub fn internal_helper() {}
+      | ^^^ public declaration
+      = help: change this declaration to `pub(crate)`
+
+    warning[hawk::dead_public]: `ProductContext` is public but is not reachable from binary `app`
+      --> library/src/lib.rs:13:1
+       |
+    13 | pub trait ProductContext {
+       | ^^^ public declaration
+       = help: consider restricting this declaration's visibility or removing it
+
+    warning[hawk::dead_public]: `ContextOptionsAlias` is public but is not reachable from binary `app`
+      --> library/src/lib.rs:21:1
+       |
+    21 | pub type ContextOptionsAlias = ContextOptions;
+       | ^^^ public declaration
+       = help: consider restricting this declaration's visibility or removing it
+
+    warning[hawk::unnecessary_public]: `PrivateContextOptions` is public but all reachable uses are within `library`; it can be `pub(crate)`
+      --> library/src/lib.rs:57:1
+       |
+    57 | pub struct PrivateContextOptions;
+       | ^^^ public declaration
+       = help: change this declaration to `pub(crate)`
+
+    warning[hawk::unnecessary_public]: `InternalRenderer` is public but all reachable uses are within `library`; it can be `pub(crate)`
+      --> library/src/lib.rs:91:1
+       |
+    91 | pub trait InternalRenderer {
+       | ^^^ public declaration
+       = help: change this declaration to `pub(crate)`
+
+    warning[hawk::unnecessary_public]: `InternalRenderResult` is public but all reachable uses are within `library`; it can be `pub(crate)`
+      --> library/src/lib.rs:97:1
+       |
+    97 | pub struct InternalRenderResult;
+       | ^^^ public declaration
+       = help: change this declaration to `pub(crate)`
+
+    warning[hawk::unnecessary_public]: `InternalNamespace` is public but all reachable uses are within `library`; it can be `pub(crate)`
+      --> library/src/lib.rs:107:1
+        |
+    107 | pub struct InternalNamespace;
+        | ^^^ public declaration
+        = help: change this declaration to `pub(crate)`
+
+    warning[hawk::unnecessary_public]: `InternalNamespace::live_inside_crate` is public but all reachable uses are within `library`; it can be `pub(crate)`
+      --> library/src/lib.rs:110:5
+        |
+    110 |     pub fn live_inside_crate() {}
+        |     ^^^ public declaration
+        = help: change this declaration to `pub(crate)`
+
+    warning[hawk::dead_public]: `InternalNamespace::dead_method` is public but is not reachable from binary `app`
+      --> library/src/lib.rs:112:5
+        |
+    112 |     pub fn dead_method() {}
+        |     ^^^ public declaration
+        = help: consider restricting this declaration's visibility or removing it
+
+    warning[hawk::unnecessary_public]: `ConstructedTuple` is public but all reachable uses are within `library`; it can be `pub(crate)`
+      --> library/src/lib.rs:119:1
+        |
+    119 | pub struct ConstructedTuple(u8);
+        | ^^^ public declaration
+        = help: change this declaration to `pub(crate)`
+
+    warning[hawk::unnecessary_public]: `ConstructedEnum` is public but all reachable uses are within `library`; it can be `pub(crate)`
+      --> library/src/lib.rs:121:1
+        |
+    121 | pub enum ConstructedEnum {
+        | ^^^ public declaration
+        = help: change this declaration to `pub(crate)`
+
+    warning[hawk::dead_public]: `DeadUnion` is public but is not reachable from binary `app`
+      --> library/src/lib.rs:125:1
+        |
+    125 | pub union DeadUnion {
+        | ^^^ public declaration
+        = help: consider restricting this declaration's visibility or removing it
+
+    warning[hawk::dead_public]: `dead_entry` is public but is not reachable from binary `app`
+      --> library/src/lib.rs:142:1
+        |
+    142 | pub fn dead_entry() {
+        | ^^^ public declaration
+        = help: consider restricting this declaration's visibility or removing it
+
+    warning[hawk::dead_public]: `dead_helper` is public but is not reachable from binary `app`
+      --> library/src/lib.rs:146:1
+        |
+    146 | pub fn dead_helper() {}
+        | ^^^ public declaration
+        = help: consider restricting this declaration's visibility or removing it
+
+    warning[hawk::unnecessary_public]: `retained_helper` is public but all reachable uses are within `library`; it can be `pub(crate)`
+      --> library/src/lib.rs:153:1
+        |
+    153 | pub fn retained_helper() {}
+        | ^^^ public declaration
+        = help: change this declaration to `pub(crate)`
+
+    hawk: 15 finding(s) for `app --bin app --all-features` on the host target
+    "###);
 }

@@ -489,6 +489,6 @@ mod tests {
         let error = write_fragment(FailingWriter, &fragment, Path::new("fragment.json"))
             .expect_err("buffer flush should report the underlying write failure");
 
-        assert!(error.to_string().contains("flush fragment.json"));
+        insta::assert_snapshot!(error.to_string(), @"flush fragment.json");
     }
 }

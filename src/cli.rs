@@ -410,9 +410,16 @@ mod tests {
         )
         .expect("render diagnostic");
 
-        assert!(output.contains("\u{1b}[1m\u{1b}[33mwarning[hawk::unnecessary_public]"));
-        assert!(output.contains("\u{1b}[1m\u{1b}[94m-->\u{1b}[0m"));
-        assert!(output.contains("\u{1b}[1m\u{1b}[33m^^^ public declaration\u{1b}[0m"));
-        assert!(output.contains("\u{1b}[1m\u{1b}[96mhelp\u{1b}[0m"));
+        assert!(output.contains('\u{1b}'));
+        let output = anstream::adapter::strip_str(&output);
+        insta::assert_snapshot!(output, @r###"
+        warning[hawk::unnecessary_public]: `internal_helper` is public but all reachable uses are within `library`; it can be `pub(crate)`
+          --> tests/fixtures/basic/library/src/lib.rs:5:1
+          |
+        5 | pub fn internal_helper() {}
+          | ^^^ public declaration
+          = help: change this declaration to `pub(crate)`
+
+        "###);
     }
 }
