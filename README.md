@@ -42,6 +42,38 @@ retain the compiler fragments in a run-specific subdirectory for investigation.
 Diagnostics are colored automatically in a terminal; use `--color=always` or
 `--color=never` to override terminal detection.
 
+By default, Hawk reports diagnostics as warnings and exits successfully so it
+can be introduced without changing build status. To use it as a CI gate, deny
+the `warnings` group:
+
+```sh
+./target/debug/cargo-hawk \
+  --manifest-path /path/to/workspace/Cargo.toml \
+  --package app \
+  --bin app \
+  -D warnings
+```
+
+Hawk accepts Clippy-style `-A`/`--allow`, `-W`/`--warn`, and `-D`/`--deny`
+lint levels. Later options take precedence, so CI can enforce most diagnostics
+while introducing one incrementally:
+
+```sh
+./target/debug/cargo-hawk \
+  --manifest-path /path/to/workspace/Cargo.toml \
+  --package app \
+  --bin app \
+  -D warnings \
+  -W hawk::unnecessary_public
+```
+
+The supported selectors are `warnings`,
+`hawk::dead_public`, `hawk::unnecessary_public`,
+`hawk::unknown_item`, and `hawk::unfulfilled_expectation`. Denied
+diagnostics are printed as errors and cause a non-zero exit status. Invalid
+configuration or a failed instrumented Cargo build fails regardless of lint
+levels.
+
 ## Cross-compilation
 
 Hawk forwards `--target` to Cargo, but it does not install a target SDK or
@@ -137,6 +169,9 @@ For newly analyzed paths, `item` uses the exported alias name (for example
 Overrides filter diagnostics only; they do not add reachability roots or
 preserve visibility for referenced items. Use `--config PATH` to load a
 configuration file other than the workspace-root `hawk.toml`.
+With `-D warnings`, correctly suppressed diagnostics do not fail the command,
+while stale selectors and unfulfilled expectations do unless lowered or
+allowed explicitly.
 
 ## License
 

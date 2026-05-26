@@ -207,3 +207,40 @@ fn diagnoses_public_surface_of_a_binary_product() {
 
     "###);
 }
+
+#[test]
+fn ordered_lint_levels_control_severity_and_exit_status() {
+    let manifest =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/basic/Cargo.toml");
+    let target_dir = tempfile::tempdir().expect("temporary target directory");
+    let output = Command::new(env!("CARGO_BIN_EXE_cargo-hawk"))
+        .arg("--manifest-path")
+        .arg(manifest)
+        .arg("--package")
+        .arg("app")
+        .arg("--bin")
+        .arg("app")
+        .arg("-D")
+        .arg("warnings")
+        .arg("-W")
+        .arg("hawk::unnecessary_public")
+        .arg("-A")
+        .arg("hawk::unknown_item")
+        .arg("--target-dir")
+        .arg(target_dir.path())
+        .output()
+        .expect("run cargo-hawk");
+
+    assert!(
+        !output.status.success(),
+        "denied diagnostic did not fail:\n{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = anstream::adapter::strip_str(&stdout).to_string();
+    assert!(stdout.contains("error[hawk::dead_public]"));
+    assert!(stdout.contains("warning[hawk::unnecessary_public]"));
+    assert!(stdout.contains("error[hawk::unfulfilled_expectation]"));
+    assert!(!stdout.contains("hawk::unknown_item"));
+    assert!(stdout.contains("hawk: 21 finding(s)"));
+}
