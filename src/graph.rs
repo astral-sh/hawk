@@ -217,10 +217,8 @@ fn required_public_visibility<'a>(
     // selected product's runtime reachability graph.
     required.extend(edges.iter().filter_map(|edge| {
         let from = definitions.get(edge.from.as_str())?;
-        match definitions.get(edge.to.as_str()) {
-            Some(to) if from.crate_name == to.crate_name => None,
-            _ => Some(edge.to.as_str()),
-        }
+        let to = definitions.get(edge.to.as_str())?;
+        (from.crate_name != to.crate_name).then_some(edge.to.as_str())
     }));
 
     let mut interface_edges: HashMap<&str, Vec<&str>> = HashMap::new();
