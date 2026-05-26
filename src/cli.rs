@@ -410,9 +410,6 @@ mod tests {
         )
         .expect("render diagnostic");
 
-        assert!(output.contains("\u{1b}[1m\u{1b}[33mwarning[hawk::unnecessary_public]"));
-        assert!(output.contains("\u{1b}[1m\u{1b}[94m-->\u{1b}[0m"));
-        assert!(output.contains("\u{1b}[1m\u{1b}[33m^^^ public declaration\u{1b}[0m"));
-        assert!(output.contains("\u{1b}[1m\u{1b}[96mhelp\u{1b}[0m"));
+        insta::assert_debug_snapshot!(output);
     }
 }

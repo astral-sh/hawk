@@ -1,0 +1,5 @@
+---
+source: src/cli.rs
+expression: output
+---
+"\u{1b}[1m\u{1b}[33mwarning[hawk::unnecessary_public]\u{1b}[0m: \u{1b}[1m`internal_helper` is public but all reachable uses are within `library`; it can be `pub(crate)`\u{1b}[0m\n  \u{1b}[1m\u{1b}[94m-->\u{1b}[0m tests/fixtures/basic/library/src/lib.rs:5:1\n  \u{1b}[36m|\u{1b}[0m\n\u{1b}[1m\u{1b}[94m5\u{1b}[0m \u{1b}[36m|\u{1b}[0m pub fn internal_helper() {}\n  \u{1b}[36m|\u{1b}[0m \u{1b}[1m\u{1b}[33m^^^ public declaration\u{1b}[0m\n  \u{1b}[36m=\u{1b}[0m \u{1b}[1m\u{1b}[96mhelp\u{1b}[0m: change this declaration to `pub(crate)`\n\n"
