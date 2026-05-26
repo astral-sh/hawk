@@ -33,7 +33,7 @@ pub struct Edge {
     pub kind: EdgeKind,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EdgeKind {
     Body,
@@ -52,7 +52,6 @@ pub enum DefinitionKind {
     TypeAlias,
     Constant,
     Static,
-    Module,
     Reexport,
     Other,
 }

@@ -98,8 +98,7 @@ fn collect_fragment(tcx: TyCtxt<'_>, crate_name: String, is_product_root: bool) 
     for owner in crate_items.owners() {
         let def_id = owner.def_id;
         let kind = diagnostic_kind(tcx, def_id);
-        let public_api = kind.is_some()
-            && kind != Some(DefinitionKind::Reexport)
+        let public_api = kind.is_some_and(|kind| kind != DefinitionKind::Reexport)
             && is_publicly_exported(tcx, def_id);
         definitions.push(definition(
             tcx,
@@ -218,13 +217,15 @@ fn collect_fragment(tcx: TyCtxt<'_>, crate_name: String, is_product_root: bool) 
             })
             .map(|edge| edge.to.clone()),
     );
-    required_public_roots.extend(
-        crate_items
-            .owners()
-            .map(|owner| owner.def_id)
-            .filter(|def_id| is_proc_macro_export(tcx, *def_id, is_proc_macro_crate))
-            .map(|def_id| id(tcx, def_id.to_def_id())),
-    );
+    if is_proc_macro_crate {
+        // Public exports from a proc-macro crate can only be macro entry points.
+        required_public_roots.extend(
+            definitions
+                .iter()
+                .filter(|definition| definition.public_api)
+                .map(|definition| definition.id.clone()),
+        );
+    }
     required_public_roots.sort();
     required_public_roots.dedup();
     let roots = tcx
@@ -261,12 +262,6 @@ fn is_publicly_exported(tcx: TyCtxt<'_>, def_id: LocalDefId) -> bool {
     !tcx.def_span(def_id).from_expansion()
         && tcx.local_visibility(def_id).is_public()
         && tcx.effective_visibilities(()).is_exported(def_id)
-}
-
-fn is_proc_macro_export(tcx: TyCtxt<'_>, def_id: LocalDefId, is_proc_macro_crate: bool) -> bool {
-    is_proc_macro_crate
-        && diagnostic_kind(tcx, def_id).is_some_and(|kind| kind != DefinitionKind::Reexport)
-        && is_publicly_exported(tcx, def_id)
 }
 
 fn definition(
@@ -356,21 +351,11 @@ impl<'tcx> ReferenceVisitor<'tcx, '_> {
             Res::Def(DefKind::Variant, variant) => {
                 self.record_def(self.tcx.parent(variant));
             }
-            Res::Def(_, def_id) => self.edges.push(Edge {
-                from: self.source.clone(),
-                to: id(self.tcx, def_id),
-                kind: self.edge_kind,
-            }),
-            Res::SelfTyParam { trait_ } => self.edges.push(Edge {
-                from: self.source.clone(),
-                to: id(self.tcx, trait_),
-                kind: self.edge_kind,
-            }),
-            Res::SelfTyAlias { alias_to, .. } => self.edges.push(Edge {
-                from: self.source.clone(),
-                to: id(self.tcx, alias_to),
-                kind: self.edge_kind,
-            }),
+            Res::Def(_, def_id)
+            | Res::SelfTyParam { trait_: def_id }
+            | Res::SelfTyAlias {
+                alias_to: def_id, ..
+            } => self.record_def(def_id),
             _ => {}
         }
     }
@@ -421,11 +406,7 @@ impl<'tcx> Visitor<'tcx> for ReferenceVisitor<'tcx, '_> {
                 }
                 hir::ExprKind::MethodCall(..) => {
                     if let Some(def_id) = typeck_results.type_dependent_def_id(expression.hir_id) {
-                        self.edges.push(Edge {
-                            from: self.source.clone(),
-                            to: id(self.tcx, def_id),
-                            kind: self.edge_kind,
-                        });
+                        self.record_def(def_id);
                     }
                 }
                 _ => {}
