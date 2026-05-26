@@ -61,12 +61,22 @@ crate = "library"
 item = "generated_registration"
 level = "expect"
 reason = "called by generated registration that Hawk does not model"
+
+[[override]]
+lint = "hawk::dead_public"
+crate = "platform"
+item = "windows_only_api"
+level = "expect"
+target = "cfg(windows)"
+reason = "public API retained only in the Windows build"
 ```
 
 `allow` suppresses a matching finding. `expect` suppresses a matching finding
 and reports `hawk::unfulfilled_expectation` if that exact finding is no longer
 present. An entry whose `crate` and `item` selector no longer identifies a
-compiled item reports `hawk::unknown_item`.
+compiled item reports `hawk::unknown_item`. An optional `target` accepts the
+same named targets and `cfg(...)` platform expressions as Cargo target
+dependencies; the override is checked only while analyzing a matching target.
 
 Overrides filter diagnostics only; they do not add reachability roots or
 preserve visibility for referenced items. Use `--config PATH` to load a

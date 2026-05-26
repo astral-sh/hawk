@@ -86,6 +86,7 @@ dependencies = [
  "anstream",
  "anstyle",
  "anyhow",
+ "cargo-platform",
  "cargo_metadata",
  "clap",
  "insta",

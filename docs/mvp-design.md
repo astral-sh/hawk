@@ -54,11 +54,13 @@ because rustc privacy-checks dead items as well as production-reachable ones
 and `pub` is the narrowest Rust visibility available for those uses.
 
 An optional workspace-root `hawk.toml` configures diagnostic overrides by
-exact lint, crate, and item path. `allow` suppresses a matching finding;
+exact lint, crate, and item path, optionally scoped to a Cargo-style target
+name or `cfg(...)` platform expression. `allow` suppresses a matching finding;
 `expect` also produces an unfulfilled-expectation diagnostic when its finding
-disappears. Overrides that refer to an item absent from the compiled graph
-produce an unknown-item diagnostic so stale configuration is visible.
-Overrides do not change reachability or required-public analysis.
+disappears on an applicable target. Overrides that refer to an item absent
+from an applicable compiled graph produce an unknown-item diagnostic so stale
+configuration is visible. Overrides do not change reachability or
+required-public analysis.
 
 ## Implementation direction
 

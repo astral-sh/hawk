@@ -11,7 +11,7 @@ use anyhow::{Context, Result, bail};
 use cargo_metadata::{MetadataCommand, TargetKind};
 use clap::{Parser, ValueEnum};
 
-use crate::config::{Config, ConfigDiagnostic, ConfigDiagnosticKind};
+use crate::config::{AnalysisTarget, Config, ConfigDiagnostic, ConfigDiagnosticKind};
 use crate::graph::{Finding, FindingKind, Fragment, Span, analyze};
 
 #[derive(Debug, Parser)]
@@ -171,8 +171,9 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
             args.bin
         );
     }
+    let analysis_target = AnalysisTarget::from_rustc(args.target.as_deref())?;
     let excluded: HashSet<String> = args.excluded_crates.into_iter().collect();
-    let findings = config.apply(&fragments, analyze(&fragments, &excluded));
+    let findings = config.apply(&analysis_target, &fragments, analyze(&fragments, &excluded));
     let mut diagnostics = String::new();
     for finding in &findings.findings {
         write_diagnostic(&mut diagnostics, finding, &args.bin, &workspace_root)
