@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::env;
 use std::fs::File;
-use std::io::BufWriter;
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -85,8 +85,16 @@ fn emit_fragment(tcx: TyCtxt<'_>, root_crate: &str, output_dir: &Path) -> Result
         .collect();
     let path = output_dir.join(format!("{crate_name}-{suffix}.json"));
     let file = File::create(&path).with_context(|| format!("create {}", path.display()))?;
-    serde_json::to_writer(BufWriter::new(file), &fragment)
-        .with_context(|| format!("serialize {}", path.display()))
+    write_fragment(file, &fragment, &path)
+}
+
+fn write_fragment(writer: impl Write, fragment: &Fragment, path: &Path) -> Result<()> {
+    let mut writer = BufWriter::new(writer);
+    serde_json::to_writer(&mut writer, fragment)
+        .with_context(|| format!("serialize {}", path.display()))?;
+    writer
+        .flush()
+        .with_context(|| format!("flush {}", path.display()))
 }
 
 fn collect_fragment(tcx: TyCtxt<'_>, crate_name: String, is_product_root: bool) -> Fragment {
@@ -413,5 +421,44 @@ impl<'tcx> Visitor<'tcx> for ReferenceVisitor<'tcx, '_> {
             }
         }
         intravisit::walk_expr(self, expression);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{self, Write};
+    use std::path::Path;
+
+    use super::write_fragment;
+    use crate::graph::Fragment;
+
+    struct FailingWriter;
+
+    impl Write for FailingWriter {
+        fn write(&mut self, _buffer: &[u8]) -> io::Result<usize> {
+            Err(io::Error::other("simulated write failure"))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Err(io::Error::other("simulated flush failure"))
+        }
+    }
+
+    #[test]
+    fn fragment_emission_reports_buffered_write_failures() {
+        let fragment = Fragment {
+            crate_name: "library".into(),
+            is_product_root: false,
+            definitions: vec![],
+            edges: vec![],
+            roots: vec![],
+            conservative_roots: vec![],
+            required_public_roots: vec![],
+        };
+
+        let error = write_fragment(FailingWriter, &fragment, Path::new("fragment.json"))
+            .expect_err("buffer flush should report the underlying write failure");
+
+        assert!(error.to_string().contains("flush fragment.json"));
     }
 }
