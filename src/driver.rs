@@ -189,23 +189,13 @@ fn collect_fragment(tcx: TyCtxt<'_>, crate_name: String, is_product_root: bool) 
             edges: &mut edges,
         };
         visitor.visit_node(tcx.hir_node_by_def_id(def_id));
-        if diagnostic_kind(tcx, def_id) == Some(DefinitionKind::InherentMethod)
-            && let ty::Adt(adt, _) = tcx
-                .type_of(tcx.local_parent(def_id))
-                .instantiate_identity()
-                .kind()
-        {
-            edges.push(Edge {
-                from: id(tcx, def_id.to_def_id()),
-                to: id(tcx, adt.did()),
-                kind: EdgeKind::Interface,
-            });
-        }
-        if diagnostic_kind(tcx, def_id) == Some(DefinitionKind::InherentAssociatedConstant)
-            && let ty::Adt(adt, _) = tcx
-                .type_of(tcx.local_parent(def_id))
-                .instantiate_identity()
-                .kind()
+        if matches!(
+            diagnostic_kind(tcx, def_id),
+            Some(DefinitionKind::InherentMethod | DefinitionKind::InherentAssociatedConstant)
+        ) && let ty::Adt(adt, _) = tcx
+            .type_of(tcx.local_parent(def_id))
+            .instantiate_identity()
+            .kind()
         {
             edges.push(Edge {
                 from: id(tcx, def_id.to_def_id()),
