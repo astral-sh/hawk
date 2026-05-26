@@ -14,7 +14,8 @@ pub struct Config {
     path: Option<PathBuf>,
     source: String,
     overrides: Vec<LintOverride>,
-    roots: Vec<RetainedRoot>,
+    roots: Vec<RetainedItem>,
+    public_items: Vec<RetainedItem>,
 }
 
 #[derive(Clone, Debug)]
@@ -29,7 +30,7 @@ pub struct LintOverride {
 }
 
 #[derive(Clone, Debug)]
-pub struct RetainedRoot {
+pub struct RetainedItem {
     pub crate_name: String,
     pub item: String,
     pub reason: String,
@@ -71,7 +72,8 @@ pub struct ConfigDiagnostic<'a> {
 #[derive(Clone, Copy, Debug)]
 pub enum ConfigEntry<'a> {
     Override(&'a LintOverride),
-    Root(&'a RetainedRoot),
+    Root(&'a RetainedItem),
+    Public(&'a RetainedItem),
 }
 
 pub struct AppliedFindings<'findings, 'config> {
@@ -85,7 +87,9 @@ struct RawConfig {
     #[serde(default, rename = "override")]
     overrides: Vec<toml::Spanned<RawLintOverride>>,
     #[serde(default, rename = "root")]
-    roots: Vec<toml::Spanned<RawRetainedRoot>>,
+    roots: Vec<toml::Spanned<RawRetainedItem>>,
+    #[serde(default, rename = "public")]
+    public_items: Vec<toml::Spanned<RawRetainedItem>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -102,7 +106,7 @@ struct RawLintOverride {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RawRetainedRoot {
+struct RawRetainedItem {
     #[serde(rename = "crate")]
     crate_name: String,
     item: String,
@@ -172,44 +176,14 @@ impl Config {
                 span,
             });
         }
-        let mut roots = Vec::new();
-        for entry in raw.roots {
-            let span = config_span(&source, entry.span().start);
-            let entry = entry.into_inner();
-            if entry.reason.trim().is_empty() {
-                bail!(
-                    "root in {}:{}:{} must provide a non-empty reason",
-                    path.display(),
-                    span.line,
-                    span.column
-                );
-            }
-            let target = entry
-                .target
-                .map(|target| {
-                    target.parse::<Platform>().with_context(|| {
-                        format!(
-                            "parse target selector `{target}` in {}:{}:{}",
-                            path.display(),
-                            span.line,
-                            span.column
-                        )
-                    })
-                })
-                .transpose()?;
-            roots.push(RetainedRoot {
-                crate_name: entry.crate_name,
-                item: entry.item,
-                reason: entry.reason,
-                target,
-                span,
-            });
-        }
+        let roots = load_retained_items(raw.roots, "root", &source, &path)?;
+        let public_items = load_retained_items(raw.public_items, "public", &source, &path)?;
         Ok(Self {
             path: Some(path),
             source,
             overrides,
             roots,
+            public_items,
         })
     }
 
@@ -218,17 +192,15 @@ impl Config {
         target: &AnalysisTarget,
         fragments: &[Fragment],
     ) -> HashSet<String> {
-        self.roots
-            .iter()
-            .filter(|entry| entry.applies_to(target))
-            .flat_map(|entry| {
-                fragments
-                    .iter()
-                    .flat_map(|fragment| &fragment.definitions)
-                    .filter(|definition| entry.matches(definition))
-                    .map(|definition| definition.id.clone())
-            })
-            .collect()
+        retained_items(&self.roots, target, fragments)
+    }
+
+    pub fn retained_public(
+        &self,
+        target: &AnalysisTarget,
+        fragments: &[Fragment],
+    ) -> HashSet<String> {
+        retained_items(&self.public_items, target, fragments)
     }
 
     pub fn apply<'findings, 'config>(
@@ -269,6 +241,18 @@ impl Config {
                 config_diagnostics.push(ConfigDiagnostic {
                     kind: ConfigDiagnosticKind::UnknownItem,
                     entry: ConfigEntry::Root(entry),
+                });
+            }
+        }
+        for entry in self
+            .public_items
+            .iter()
+            .filter(|entry| entry.applies_to(target))
+        {
+            if !known_items.contains(&(entry.crate_name.as_str(), entry.item.as_str())) {
+                config_diagnostics.push(ConfigDiagnostic {
+                    kind: ConfigDiagnosticKind::UnknownItem,
+                    entry: ConfigEntry::Public(entry),
                 });
             }
         }
@@ -357,7 +341,7 @@ impl LintOverride {
     }
 }
 
-impl RetainedRoot {
+impl RetainedItem {
     fn applies_to(&self, target: &AnalysisTarget) -> bool {
         self.target
             .as_ref()
@@ -374,6 +358,7 @@ impl<'a> ConfigEntry<'a> {
         match self {
             Self::Override(entry) => &entry.crate_name,
             Self::Root(entry) => &entry.crate_name,
+            Self::Public(entry) => &entry.crate_name,
         }
     }
 
@@ -381,6 +366,7 @@ impl<'a> ConfigEntry<'a> {
         match self {
             Self::Override(entry) => &entry.item,
             Self::Root(entry) => &entry.item,
+            Self::Public(entry) => &entry.item,
         }
     }
 
@@ -388,6 +374,7 @@ impl<'a> ConfigEntry<'a> {
         match self {
             Self::Override(entry) => &entry.reason,
             Self::Root(entry) => &entry.reason,
+            Self::Public(entry) => &entry.reason,
         }
     }
 
@@ -395,8 +382,70 @@ impl<'a> ConfigEntry<'a> {
         match self {
             Self::Override(entry) => entry.span,
             Self::Root(entry) => entry.span,
+            Self::Public(entry) => entry.span,
         }
     }
+}
+
+fn load_retained_items(
+    entries: Vec<toml::Spanned<RawRetainedItem>>,
+    kind: &str,
+    source: &str,
+    path: &Path,
+) -> Result<Vec<RetainedItem>> {
+    entries
+        .into_iter()
+        .map(|entry| {
+            let span = config_span(source, entry.span().start);
+            let entry = entry.into_inner();
+            if entry.reason.trim().is_empty() {
+                bail!(
+                    "{kind} in {}:{}:{} must provide a non-empty reason",
+                    path.display(),
+                    span.line,
+                    span.column
+                );
+            }
+            let target = entry
+                .target
+                .map(|target| {
+                    target.parse::<Platform>().with_context(|| {
+                        format!(
+                            "parse target selector `{target}` in {}:{}:{}",
+                            path.display(),
+                            span.line,
+                            span.column
+                        )
+                    })
+                })
+                .transpose()?;
+            Ok(RetainedItem {
+                crate_name: entry.crate_name,
+                item: entry.item,
+                reason: entry.reason,
+                target,
+                span,
+            })
+        })
+        .collect()
+}
+
+fn retained_items(
+    entries: &[RetainedItem],
+    target: &AnalysisTarget,
+    fragments: &[Fragment],
+) -> HashSet<String> {
+    entries
+        .iter()
+        .filter(|entry| entry.applies_to(target))
+        .flat_map(|entry| {
+            fragments
+                .iter()
+                .flat_map(|fragment| &fragment.definitions)
+                .filter(|definition| entry.matches(definition))
+                .map(|definition| definition.id.clone())
+        })
+        .collect()
 }
 
 fn config_span(source: &str, offset: usize) -> ConfigSpan {
@@ -466,7 +515,12 @@ reason = "known retained public surface"
         .expect("write configuration");
         let config = Config::load(directory.path(), Some(&path)).expect("load configuration");
         let fragments = vec![fragment()];
-        let findings = analyze(&fragments, &HashSet::new(), &HashSet::new());
+        let findings = analyze(
+            &fragments,
+            &HashSet::new(),
+            &HashSet::new(),
+            &HashSet::new(),
+        );
 
         let applied = config.apply(
             &target("aarch64-apple-darwin", &["unix"]),
@@ -496,7 +550,12 @@ reason = "detect stale selectors"
         .expect("write configuration");
         let config = Config::load(directory.path(), Some(&path)).expect("load configuration");
         let fragments = vec![fragment()];
-        let findings = analyze(&fragments, &HashSet::new(), &HashSet::new());
+        let findings = analyze(
+            &fragments,
+            &HashSet::new(),
+            &HashSet::new(),
+            &HashSet::new(),
+        );
 
         let applied = config.apply(
             &target("aarch64-apple-darwin", &["unix"]),
@@ -536,7 +595,12 @@ reason = "only retained on Windows"
         let windows = config.apply(
             &target("x86_64-pc-windows-msvc", &["windows"]),
             &fragments,
-            analyze(&fragments, &HashSet::new(), &HashSet::new()),
+            analyze(
+                &fragments,
+                &HashSet::new(),
+                &HashSet::new(),
+                &HashSet::new(),
+            ),
         );
         assert!(windows.findings.is_empty());
         assert!(windows.config_diagnostics.is_empty());
@@ -544,7 +608,12 @@ reason = "only retained on Windows"
         let unix = config.apply(
             &target("aarch64-apple-darwin", &["unix"]),
             &fragments,
-            analyze(&fragments, &HashSet::new(), &HashSet::new()),
+            analyze(
+                &fragments,
+                &HashSet::new(),
+                &HashSet::new(),
+                &HashSet::new(),
+            ),
         );
         assert_eq!(unix.findings.len(), 1);
         assert!(unix.config_diagnostics.is_empty());
@@ -569,7 +638,12 @@ reason = "only compiled on Windows"
         .expect("write configuration");
         let config = Config::load(directory.path(), Some(&path)).expect("load configuration");
         let fragments = vec![fragment()];
-        let findings = analyze(&fragments, &HashSet::new(), &HashSet::new());
+        let findings = analyze(
+            &fragments,
+            &HashSet::new(),
+            &HashSet::new(),
+            &HashSet::new(),
+        );
 
         let applied = config.apply(
             &target("aarch64-apple-darwin", &["unix"]),
@@ -603,7 +677,7 @@ reason = "invoked by generated registration"
         let applied = config.apply(
             &target,
             &fragments,
-            analyze(&fragments, &HashSet::new(), &roots),
+            analyze(&fragments, &HashSet::new(), &roots, &HashSet::new()),
         );
 
         assert_eq!(roots, HashSet::from(["unused".to_owned()]));
@@ -635,7 +709,7 @@ reason = "retained only on Windows"
         let windows = config.apply(
             &windows,
             &fragments,
-            analyze(&fragments, &HashSet::new(), &roots),
+            analyze(&fragments, &HashSet::new(), &roots, &HashSet::new()),
         );
         assert!(windows.findings.is_empty());
         assert!(windows.config_diagnostics.is_empty());
@@ -644,10 +718,45 @@ reason = "retained only on Windows"
         let unix = config.apply(
             &unix,
             &fragments,
-            analyze(&fragments, &HashSet::new(), &roots),
+            analyze(&fragments, &HashSet::new(), &roots, &HashSet::new()),
         );
         assert_eq!(unix.findings.len(), 1);
         assert!(unix.config_diagnostics.is_empty());
+    }
+
+    #[test]
+    fn retained_public_item_keeps_its_visibility() {
+        let directory = tempfile::tempdir().expect("temporary configuration directory");
+        let path = directory.path().join("hawk.toml");
+        std::fs::write(
+            &path,
+            r#"
+[[public]]
+crate = "library"
+item = "unused"
+reason = "public API used by an excluded product"
+"#,
+        )
+        .expect("write configuration");
+        let config = Config::load(directory.path(), Some(&path)).expect("load configuration");
+        let fragments = vec![fragment()];
+        let target = target("aarch64-apple-darwin", &["unix"]);
+        let retained_public = config.retained_public(&target, &fragments);
+
+        let applied = config.apply(
+            &target,
+            &fragments,
+            analyze(
+                &fragments,
+                &HashSet::new(),
+                &HashSet::new(),
+                &retained_public,
+            ),
+        );
+
+        assert_eq!(retained_public, HashSet::from(["unused".to_owned()]));
+        assert!(applied.findings.is_empty());
+        assert!(applied.config_diagnostics.is_empty());
     }
 
     #[test]
@@ -672,7 +781,7 @@ reason = "detect stale roots"
         let applied = config.apply(
             &target,
             &fragments,
-            analyze(&fragments, &HashSet::new(), &roots),
+            analyze(&fragments, &HashSet::new(), &roots, &HashSet::new()),
         );
 
         assert!(roots.is_empty());
@@ -684,6 +793,48 @@ reason = "detect stale roots"
         assert!(matches!(
             applied.config_diagnostics[0].entry,
             ConfigEntry::Root(_)
+        ));
+    }
+
+    #[test]
+    fn missing_retained_public_item_reports_an_unknown_item() {
+        let directory = tempfile::tempdir().expect("temporary configuration directory");
+        let path = directory.path().join("hawk.toml");
+        std::fs::write(
+            &path,
+            r#"
+[[public]]
+crate = "library"
+item = "removed"
+reason = "detect stale public selectors"
+"#,
+        )
+        .expect("write configuration");
+        let config = Config::load(directory.path(), Some(&path)).expect("load configuration");
+        let fragments = vec![fragment()];
+        let target = target("aarch64-apple-darwin", &["unix"]);
+        let retained_public = config.retained_public(&target, &fragments);
+
+        let applied = config.apply(
+            &target,
+            &fragments,
+            analyze(
+                &fragments,
+                &HashSet::new(),
+                &HashSet::new(),
+                &retained_public,
+            ),
+        );
+
+        assert!(retained_public.is_empty());
+        assert_eq!(applied.config_diagnostics.len(), 1);
+        assert_eq!(
+            applied.config_diagnostics[0].kind,
+            ConfigDiagnosticKind::UnknownItem
+        );
+        assert!(matches!(
+            applied.config_diagnostics[0].entry,
+            ConfigEntry::Public(_)
         ));
     }
 }

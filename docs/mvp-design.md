@@ -88,19 +88,22 @@ positives. Any compiled cross-crate reference prevents a visibility diagnostic
 because rustc privacy-checks dead items as well as production-reachable ones
 and `pub` is the narrowest Rust visibility available for those uses.
 
-An optional workspace-root `hawk.toml` configures additional retained
-production roots and diagnostic overrides, optionally scoped to a Cargo-style
-target name or `cfg(...)` platform expression. A `root` names a compiled item
-whose public visibility and implementation reachability are retained even
-though the selected binary graph does not expose its caller; declarations
-called only from that root remain candidates for `pub(crate)`. An override
-selects an exact lint, crate, and item path. `allow` suppresses a matching
-finding; `expect` also produces an unfulfilled-expectation diagnostic when its
-finding disappears on an applicable target. Roots or overrides that refer to
-an item absent from an applicable compiled graph produce an unknown-item
-diagnostic so stale configuration is visible. Overrides do not change
-reachability or required-public analysis, and suppressed findings are not
-eligible for fixes.
+An optional workspace-root `hawk.toml` configures retained public surface,
+additional production roots, and diagnostic overrides, optionally scoped to a
+Cargo-style target name or `cfg(...)` platform expression. A `public` entry
+names a compiled item whose visibility and required public interface or module
+path are intentionally retained without treating its implementation as
+production-live. This represents APIs kept for tests, excluded products, or
+workspace policy. A `root` names a compiled item whose public visibility and
+implementation reachability are retained even though the selected binary
+graph does not expose its caller; declarations called only from that root
+remain candidates for `pub(crate)`. An override selects an exact lint, crate,
+and item path. `allow` suppresses a matching finding; `expect` also produces
+an unfulfilled-expectation diagnostic when its finding disappears on an
+applicable target. Public entries, roots, or overrides that refer to an item
+absent from an applicable compiled graph produce an unknown-item diagnostic so
+stale configuration is visible. Overrides do not change reachability or
+required-public analysis, and suppressed findings are not eligible for fixes.
 
 ## Implementation direction
 

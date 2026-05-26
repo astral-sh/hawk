@@ -168,10 +168,16 @@ export-path provenance is available.
 
 ## Configuration
 
-Add `hawk.toml` at the workspace root to retain an unmodeled production entry
-point, suppress an intentional finding, or pin one as an expected finding:
+Add `hawk.toml` at the workspace root to retain intentional public surface or
+an unmodeled production entry point, suppress a finding, or pin one as an
+expected finding:
 
 ```toml
+[[public]]
+crate = "library"
+item = "integration_test_support"
+reason = "public API for tests outside the selected product"
+
 [[root]]
 crate = "library"
 item = "generated_registration"
@@ -193,11 +199,16 @@ target = "cfg(windows)"
 reason = "public API retained only in the Windows build"
 ```
 
-`root` declares an additional production entry point that Hawk cannot discover
-from the selected binary. Its public visibility is retained and its
-implementation is traversed, so public helpers used only from that root can
-still be reduced to `pub(crate)`. `allow` suppresses a matching finding.
-`expect` suppresses a matching finding and reports
+`public` retains an item's public visibility and the public interface and
+module path required to expose it, without treating its implementation as
+production-live. Use it for APIs retained for tests, excluded products, or
+workspace policy. `root` declares an additional production entry point that
+Hawk cannot discover from the selected binary. Its public visibility is
+retained and its implementation is traversed, so public helpers used only
+from that root can still be reduced to `pub(crate)`.
+
+`allow` suppresses a matching finding. `expect` suppresses a matching finding
+and reports
 `hawk::unfulfilled_expectation` if that exact finding is no longer present. An
 entry whose `crate` and `item` selector no longer identifies a compiled item
 reports `hawk::unknown_item`. An optional `target` accepts the same named
@@ -207,13 +218,15 @@ For newly analyzed paths, `item` uses the exported alias name (for example
 `PublicAlias`) or module path (for example `api::internal`).
 
 Overrides filter diagnostics only; they do not add reachability roots or
-preserve visibility for referenced items. Use a root when the implementation
-behind an otherwise unmodeled entry point must participate in the analysis.
+preserve visibility for referenced items. Use `public` when visibility is
+intentional but implementation reachability is not part of the selected
+product; use `root` when the implementation behind an otherwise unmodeled
+production entry point must participate in the analysis.
 Use `--config PATH` to load a configuration file other than the workspace-root
 `hawk.toml`.
-With `-D warnings`, correctly suppressed diagnostics do not fail the command,
-while stale selectors and unfulfilled expectations do unless lowered or
-allowed explicitly.
+With `-D warnings`, retained or correctly suppressed diagnostics do not fail
+the command, while stale selectors and unfulfilled expectations do unless
+lowered or allowed explicitly.
 
 ## License
 

@@ -289,10 +289,11 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
     let excluded: HashSet<String> = args.excluded_crates.iter().cloned().collect();
     if args.fix {
         let retained_roots = config.retained_roots(&analysis_target, &fragments);
+        let retained_public = config.retained_public(&analysis_target, &fragments);
         let initial_findings = config.apply(
             &analysis_target,
             &fragments,
-            analyze(&fragments, &excluded, &retained_roots),
+            analyze(&fragments, &excluded, &retained_roots, &retained_public),
         );
         let fix_plan = FixPlan {
             targets: initial_findings
@@ -324,10 +325,11 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
         }
     }
     let retained_roots = config.retained_roots(&analysis_target, &fragments);
+    let retained_public = config.retained_public(&analysis_target, &fragments);
     let findings = config.apply(
         &analysis_target,
         &fragments,
-        analyze(&fragments, &excluded, &retained_roots),
+        analyze(&fragments, &excluded, &retained_roots, &retained_public),
     );
     let mut diagnostics = String::new();
     let mut diagnostic_count = 0;
@@ -620,6 +622,11 @@ fn write_config_diagnostic(
             "no matching item was found",
             "remove this root or update its `crate` and `item` selectors",
         ),
+        (ConfigDiagnosticKind::UnknownItem, ConfigEntry::Public(_)) => (
+            format!("configured public item references unknown item `{item}`"),
+            "no matching item was found",
+            "remove this public entry or update its `crate` and `item` selectors",
+        ),
         (ConfigDiagnosticKind::UnfulfilledExpectation, ConfigEntry::Override(entry)) => (
             format!(
                 "expected `{}` for `{item}`, but no finding was produced",
@@ -630,6 +637,9 @@ fn write_config_diagnostic(
         ),
         (ConfigDiagnosticKind::UnfulfilledExpectation, ConfigEntry::Root(_)) => {
             unreachable!("roots cannot produce expectation diagnostics")
+        }
+        (ConfigDiagnosticKind::UnfulfilledExpectation, ConfigEntry::Public(_)) => {
+            unreachable!("public entries cannot produce expectation diagnostics")
         }
     };
     write_diagnostic_header(
