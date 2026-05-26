@@ -202,11 +202,35 @@ fn collect_fragment(tcx: TyCtxt<'_>, crate_name: String, is_product_root: bool) 
         })
         .map(|def_id| id(tcx, def_id.to_def_id()))
         .collect();
-    let mut required_public_roots: Vec<String> = edges
+    // Type aliases are transparent for privacy: preserve their exposed target
+    // types, but do not suppress a visibility finding for the alias itself.
+    let type_aliases: HashSet<&str> = definitions
+        .iter()
+        .filter(|definition| definition.kind == DefinitionKind::TypeAlias)
+        .map(|definition| definition.id.as_str())
+        .collect();
+    let mut pending_required_public_roots: Vec<String> = edges
         .iter()
         .filter(|edge| edge.kind == EdgeKind::Interface && trait_impl_sources.contains(&edge.from))
         .map(|edge| edge.to.clone())
         .collect();
+    let mut required_public_roots = Vec::new();
+    let mut examined_required_public_roots = HashSet::new();
+    while let Some(target) = pending_required_public_roots.pop() {
+        if !examined_required_public_roots.insert(target.clone()) {
+            continue;
+        }
+        if type_aliases.contains(target.as_str()) {
+            pending_required_public_roots.extend(
+                edges
+                    .iter()
+                    .filter(|edge| edge.kind == EdgeKind::Interface && edge.from == target)
+                    .map(|edge| edge.to.clone()),
+            );
+        } else {
+            required_public_roots.push(target);
+        }
+    }
     // Lowering the local target of a public reexport fails with E0365 while
     // the reexport remains part of the crate interface.
     let public_reexport_sources: HashSet<String> = crate_items

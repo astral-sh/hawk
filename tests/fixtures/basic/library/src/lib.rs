@@ -18,8 +18,10 @@ pub struct Context;
 
 pub struct ContextOptions;
 
+pub type ContextOptionsAlias = ContextOptions;
+
 impl ProductContext for Context {
-    type Options = ContextOptions;
+    type Options = ContextOptionsAlias;
 }
 
 pub fn product_context() -> Context {

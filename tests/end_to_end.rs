@@ -34,6 +34,7 @@ fn diagnoses_public_surface_of_a_binary_product() {
     assert!(stdout.contains("hawk::unnecessary_public: `ConstructedEnum`"));
     assert!(stdout.contains("hawk::dead_public: `DeadUnion`"));
     assert!(stdout.contains("hawk::dead_public: `ProductContext`"));
+    assert!(stdout.contains("hawk::dead_public: `ContextOptionsAlias`"));
     assert!(stdout.contains("hawk::unnecessary_public: `PrivateContextOptions`"));
     assert!(stdout.contains("hawk::unnecessary_public: `InternalRenderer`"));
     assert!(stdout.contains("hawk::unnecessary_public: `InternalRenderResult`"));
@@ -44,5 +45,5 @@ fn diagnoses_public_surface_of_a_binary_product() {
     assert!(!stdout.contains("`PublicRenderResult`"));
     assert!(!stdout.contains("`passthrough`"));
     assert!(!stdout.contains("{use#"));
-    assert!(stdout.contains("hawk: 14 finding(s)"));
+    assert!(stdout.contains("hawk: 15 finding(s)"));
 }
