@@ -25,14 +25,14 @@ diagnostics. Compiled workspace library dependencies can produce:
 - unnecessary public visibility: a live public declaration has no live
   cross-crate consumer and can be restricted to `pub(crate)`.
 
-Hawk defaults to a report-only `--mode=warn`, which emits warning diagnostics
-and exits successfully. For CI enforcement, `--mode=deny` emits errors and
-exits unsuccessfully whenever any diagnostic remains after overrides are
-applied. This applies to visibility findings and to configuration diagnostics
-for stale selectors or unfulfilled expectations. Invalid configuration and
-instrumented build failures fail independently of the selected mode. Hawk
-retains declaration spans and reasoning needed for follow-up machine-applicable
-fixes.
+Hawk emits warnings and exits successfully by default. Clippy-style ordered
+`-A`/`-W`/`-D` options control lint levels; `-D warnings` enforces all Hawk
+diagnostics in CI, while a later per-diagnostic option can incrementally lower
+or allow one lint. The options apply after `hawk.toml` overrides and cover both
+visibility findings and configuration diagnostics for stale selectors or
+unfulfilled expectations. Invalid configuration and instrumented build
+failures fail independently of lint levels. Hawk retains declaration spans and
+reasoning needed for follow-up machine-applicable fixes.
 
 ## Initial scope
 

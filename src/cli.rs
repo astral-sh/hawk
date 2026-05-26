@@ -9,7 +9,7 @@ use std::process::{Command, ExitCode};
 use anstyle::{AnsiColor, Style};
 use anyhow::{Context, Result, bail};
 use cargo_metadata::{MetadataCommand, TargetKind};
-use clap::{Parser, ValueEnum};
+use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser, ValueEnum};
 
 use crate::config::{AnalysisTarget, Config, ConfigDiagnostic, ConfigDiagnosticKind};
 use crate::graph::{Finding, FindingKind, Fragment, Span, analyze};
@@ -52,28 +52,40 @@ struct Args {
     #[arg(long, value_name = "PATH")]
     config: Option<PathBuf>,
 
-    /// Control whether emitted diagnostics are reported or fail the command.
-    #[arg(long, value_enum, default_value_t, value_name = "MODE")]
-    mode: EnforcementMode,
+    /// Suppress a Hawk diagnostic or warning group.
+    #[arg(short = 'A', long = "allow", value_name = "LINT")]
+    allow: Vec<String>,
+
+    /// Emit a Hawk diagnostic or warning group without failing.
+    #[arg(short = 'W', long = "warn", value_name = "LINT")]
+    warn: Vec<String>,
+
+    /// Emit a Hawk diagnostic or warning group as an error.
+    #[arg(short = 'D', long = "deny", value_name = "LINT")]
+    deny: Vec<String>,
 
     /// Control when colored output is used.
     #[arg(long, value_enum, default_value_t, value_name = "WHEN")]
     color: TerminalColor,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
-enum EnforcementMode {
-    /// Report diagnostics as warnings and exit successfully.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum LintLevel {
+    /// Do not emit a diagnostic.
+    Allow,
+
+    /// Report a diagnostic without failing.
     #[default]
     Warn,
 
-    /// Report diagnostics as errors and exit unsuccessfully.
+    /// Report a diagnostic as an error and fail.
     Deny,
 }
 
-impl EnforcementMode {
+impl LintLevel {
     fn severity(self) -> &'static str {
         match self {
+            Self::Allow => unreachable!("allowed diagnostics are not rendered"),
             Self::Warn => "warning",
             Self::Deny => "error",
         }
@@ -81,16 +93,73 @@ impl EnforcementMode {
 
     fn style(self) -> Style {
         match self {
+            Self::Allow => unreachable!("allowed diagnostics are not rendered"),
             Self::Warn => WARNING,
             Self::Deny => ERROR,
         }
     }
 
-    fn exit_code(self, diagnostic_count: usize) -> ExitCode {
-        match self {
-            Self::Deny if diagnostic_count > 0 => ExitCode::FAILURE,
-            Self::Warn | Self::Deny => ExitCode::SUCCESS,
+    fn is_emitted(self) -> bool {
+        self != Self::Allow
+    }
+}
+
+#[derive(Debug, Default)]
+struct LintLevels {
+    overrides: Vec<(String, LintLevel)>,
+}
+
+impl LintLevels {
+    fn from_matches(matches: &ArgMatches) -> Result<Self> {
+        let mut indexed_overrides = Vec::new();
+        for (argument, level) in [
+            ("allow", LintLevel::Allow),
+            ("warn", LintLevel::Warn),
+            ("deny", LintLevel::Deny),
+        ] {
+            let Some(values) = matches.get_many::<String>(argument) else {
+                continue;
+            };
+            let indices = matches
+                .indices_of(argument)
+                .expect("present lint-level values have argument indices");
+            for (index, selector) in indices.zip(values) {
+                Self::validate_selector(selector)?;
+                indexed_overrides.push((index, selector.clone(), level));
+            }
         }
+        indexed_overrides.sort_unstable_by_key(|(index, _, _)| *index);
+        Ok(Self {
+            overrides: indexed_overrides
+                .into_iter()
+                .map(|(_, selector, level)| (selector, level))
+                .collect(),
+        })
+    }
+
+    fn validate_selector(selector: &str) -> Result<()> {
+        if matches!(
+            selector,
+            "warnings"
+                | "hawk::dead_public"
+                | "hawk::unnecessary_public"
+                | "hawk::unknown_item"
+                | "hawk::unfulfilled_expectation"
+        ) {
+            return Ok(());
+        }
+        bail!(
+            "unknown lint selector `{selector}`; expected `warnings` or a `hawk::...` diagnostic name"
+        );
+    }
+
+    fn level(&self, code: &str) -> LintLevel {
+        self.overrides
+            .iter()
+            .filter(|(selector, _)| selector == "warnings" || selector == code)
+            .map(|(_, level)| *level)
+            .next_back()
+            .unwrap_or_default()
     }
 }
 
@@ -121,14 +190,20 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
     if raw_args.get(1).is_some_and(|argument| argument == "hawk") {
         raw_args.remove(1);
     }
-    let args = match Args::try_parse_from(raw_args) {
-        Ok(args) => args,
+    let matches = match Args::command().try_get_matches_from(&raw_args) {
+        Ok(matches) => matches,
         Err(error) => {
             let exit_code = error.exit_code();
             error.print().context("print command-line help")?;
             return Ok(ExitCode::from(exit_code as u8));
         }
     };
+    let lint_levels = LintLevels::from_matches(&matches)?;
+    let args = Args::from_arg_matches(&matches).context("read command-line arguments")?;
+    debug_assert_eq!(
+        lint_levels.overrides.len(),
+        args.allow.len() + args.warn.len() + args.deny.len()
+    );
     let metadata = MetadataCommand::new()
         .manifest_path(&args.manifest_path)
         .no_deps()
@@ -212,27 +287,32 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
     let excluded: HashSet<String> = args.excluded_crates.into_iter().collect();
     let findings = config.apply(&analysis_target, &fragments, analyze(&fragments, &excluded));
     let mut diagnostics = String::new();
+    let mut diagnostic_count = 0;
+    let mut has_denied_diagnostic = false;
     for finding in &findings.findings {
-        write_diagnostic(
-            &mut diagnostics,
-            finding,
-            &args.bin,
-            &workspace_root,
-            args.mode,
-        )
-        .expect("formatting diagnostics into a string cannot fail");
+        let level = lint_levels.level(finding.kind.code());
+        if level.is_emitted() {
+            diagnostic_count += 1;
+            has_denied_diagnostic |= level == LintLevel::Deny;
+            write_diagnostic(&mut diagnostics, finding, &args.bin, &workspace_root, level)
+                .expect("formatting diagnostics into a string cannot fail");
+        }
     }
     for diagnostic in &findings.config_diagnostics {
-        write_config_diagnostic(
-            &mut diagnostics,
-            diagnostic,
-            &config,
-            &workspace_root,
-            args.mode,
-        )
-        .expect("formatting diagnostics into a string cannot fail");
+        let level = lint_levels.level(config_diagnostic_code(diagnostic.kind));
+        if level.is_emitted() {
+            diagnostic_count += 1;
+            has_denied_diagnostic |= level == LintLevel::Deny;
+            write_config_diagnostic(
+                &mut diagnostics,
+                diagnostic,
+                &config,
+                &workspace_root,
+                level,
+            )
+            .expect("formatting diagnostics into a string cannot fail");
+        }
     }
-    let diagnostic_count = findings.findings.len() + findings.config_diagnostics.len();
     let compilation_target = args.target.as_deref().map_or_else(
         || "the host target".to_owned(),
         |target| format!("target `{target}`"),
@@ -246,7 +326,11 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
     anstream::AutoStream::new(std::io::stdout(), args.color.into())
         .write_all(diagnostics.as_bytes())
         .context("write diagnostic output")?;
-    Ok(args.mode.exit_code(diagnostic_count))
+    Ok(if has_denied_diagnostic {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    })
 }
 
 const WARNING: Style = AnsiColor::Yellow.on_default().bold();
@@ -261,7 +345,7 @@ fn write_diagnostic(
     finding: &Finding<'_>,
     binary: &str,
     workspace_root: &Path,
-    mode: EnforcementMode,
+    level: LintLevel,
 ) -> std::fmt::Result {
     let (message, help) = match finding.kind {
         FindingKind::DeadPublic => (
@@ -279,7 +363,7 @@ fn write_diagnostic(
             "change this declaration to `pub(crate)`",
         ),
     };
-    write_diagnostic_header(output, finding.kind.code(), message, mode)?;
+    write_diagnostic_header(output, finding.kind.code(), message, level)?;
 
     if let Some(span) = &finding.definition.span {
         let source_line = source_line(workspace_root, span);
@@ -290,7 +374,7 @@ fn write_diagnostic(
             span.column,
             source_line.as_deref(),
             "public declaration",
-            mode.style(),
+            level.style(),
         )?;
         writeln!(
             output,
@@ -323,13 +407,12 @@ fn write_config_diagnostic(
     diagnostic: &ConfigDiagnostic<'_>,
     config: &Config,
     workspace_root: &Path,
-    mode: EnforcementMode,
+    level: LintLevel,
 ) -> std::fmt::Result {
     let entry = diagnostic.entry;
     let item = format!("{}::{}", entry.crate_name, entry.item);
-    let (code, message, marker, help) = match diagnostic.kind {
+    let (message, marker, help) = match diagnostic.kind {
         ConfigDiagnosticKind::UnknownItem => (
-            "hawk::unknown_item",
             format!(
                 "override for `{}` references unknown item `{item}`",
                 entry.lint.code()
@@ -338,7 +421,6 @@ fn write_config_diagnostic(
             "remove this override or update its `crate` and `item` selectors",
         ),
         ConfigDiagnosticKind::UnfulfilledExpectation => (
-            "hawk::unfulfilled_expectation",
             format!(
                 "expected `{}` for `{item}`, but no finding was produced",
                 entry.lint.code()
@@ -347,7 +429,12 @@ fn write_config_diagnostic(
             "remove this expectation or update its `lint` selector",
         ),
     };
-    write_diagnostic_header(output, code, message, mode)?;
+    write_diagnostic_header(
+        output,
+        config_diagnostic_code(diagnostic.kind),
+        message,
+        level,
+    )?;
 
     let config_path = config.path().expect("diagnostic requires a loaded config");
     let display_path = config_path
@@ -361,7 +448,7 @@ fn write_config_diagnostic(
         entry.span.column,
         config.source_line(entry.span.line),
         marker,
-        mode.style(),
+        level.style(),
     )?;
     writeln!(
         output,
@@ -379,16 +466,23 @@ fn write_config_diagnostic(
     writeln!(output)
 }
 
+fn config_diagnostic_code(kind: ConfigDiagnosticKind) -> &'static str {
+    match kind {
+        ConfigDiagnosticKind::UnknownItem => "hawk::unknown_item",
+        ConfigDiagnosticKind::UnfulfilledExpectation => "hawk::unfulfilled_expectation",
+    }
+}
+
 fn write_diagnostic_header(
     output: &mut String,
     code: &str,
     message: impl Display,
-    mode: EnforcementMode,
+    level: LintLevel,
 ) -> std::fmt::Result {
     writeln!(
         output,
         "{}: {}",
-        styled(format_args!("{}[{code}]", mode.severity()), mode.style()),
+        styled(format_args!("{}[{code}]", level.severity()), level.style()),
         styled(message, EMPHASIS)
     )
 }
@@ -535,9 +629,11 @@ fn read_fragments(graph_dir: &Path) -> Result<Vec<Fragment>> {
 mod tests {
     use std::path::Path;
 
+    use clap::CommandFactory;
+
     use crate::graph::{Definition, DefinitionKind, Finding, FindingKind, Span};
 
-    use super::{EnforcementMode, write_diagnostic};
+    use super::{Args, LintLevel, LintLevels, write_diagnostic};
 
     #[test]
     fn diagnostic_rendering_includes_terminal_styles() {
@@ -564,7 +660,7 @@ mod tests {
             &finding,
             "app",
             Path::new(env!("CARGO_MANIFEST_DIR")),
-            EnforcementMode::Warn,
+            LintLevel::Warn,
         )
         .expect("render diagnostic");
 
@@ -582,18 +678,29 @@ mod tests {
     }
 
     #[test]
-    fn deny_mode_fails_only_when_a_diagnostic_is_emitted() {
+    fn later_lint_levels_override_the_warnings_group() {
+        let matches = Args::command()
+            .try_get_matches_from([
+                "cargo-hawk",
+                "--package",
+                "app",
+                "--bin",
+                "app",
+                "-Dwarnings",
+                "--warn",
+                "hawk::unnecessary_public",
+                "-A",
+                "hawk::unknown_item",
+            ])
+            .expect("parse lint-level arguments");
+        let levels = LintLevels::from_matches(&matches).expect("valid lint selectors");
+
+        assert_eq!(levels.level("hawk::dead_public"), LintLevel::Deny);
+        assert_eq!(levels.level("hawk::unnecessary_public"), LintLevel::Warn);
+        assert_eq!(levels.level("hawk::unknown_item"), LintLevel::Allow);
         assert_eq!(
-            EnforcementMode::Warn.exit_code(1),
-            std::process::ExitCode::SUCCESS
-        );
-        assert_eq!(
-            EnforcementMode::Deny.exit_code(0),
-            std::process::ExitCode::SUCCESS
-        );
-        assert_eq!(
-            EnforcementMode::Deny.exit_code(1),
-            std::process::ExitCode::FAILURE
+            levels.level("hawk::unfulfilled_expectation"),
+            LintLevel::Deny
         );
     }
 }
