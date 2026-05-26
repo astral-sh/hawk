@@ -189,15 +189,18 @@ fn collect_fragment(tcx: TyCtxt<'_>, crate_name: String, is_product_root: bool) 
     edges.dedup_by(|left, right| {
         left.from == right.from && left.to == right.to && left.kind == right.kind
     });
-    // Lowering an associated type in a public trait impl can fail with E0446
-    // even when the selected product never calls through that impl.
-    let trait_impl_sources: HashSet<String> = crate_items
+    // Lowering a type exposed by a public trait impl can fail privacy checking
+    // even when the selected product does not otherwise reference that type.
+    // This includes concrete types exposed by refined `impl Trait` methods.
+    let trait_impl_interface_sources: HashSet<String> = crate_items
         .impl_items()
         .map(|item| item.owner_id.def_id)
         .filter(|def_id| {
             let impl_def_id = tcx.local_parent(*def_id);
-            tcx.def_kind(*def_id) == DefKind::AssocTy
-                && matches!(tcx.def_kind(impl_def_id), DefKind::Impl { of_trait: true })
+            matches!(
+                tcx.def_kind(*def_id),
+                DefKind::AssocFn | DefKind::AssocConst | DefKind::AssocTy
+            ) && matches!(tcx.def_kind(impl_def_id), DefKind::Impl { of_trait: true })
                 && tcx.effective_visibilities(()).is_reachable(impl_def_id)
         })
         .map(|def_id| id(tcx, def_id.to_def_id()))
@@ -211,7 +214,9 @@ fn collect_fragment(tcx: TyCtxt<'_>, crate_name: String, is_product_root: bool) 
         .collect();
     let mut pending_required_public_roots: Vec<String> = edges
         .iter()
-        .filter(|edge| edge.kind == EdgeKind::Interface && trait_impl_sources.contains(&edge.from))
+        .filter(|edge| {
+            edge.kind == EdgeKind::Interface && trait_impl_interface_sources.contains(&edge.from)
+        })
         .map(|edge| edge.to.clone())
         .collect();
     let mut required_public_roots = Vec::new();

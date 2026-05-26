@@ -2,6 +2,7 @@ fn main() {
     library::entry();
     let _ = library::product_value();
     let _ = library::product_context();
+    let _ = library::RefinedBuildContext::resolve(&library::refined_build_dispatch());
     library::exercise_private_context();
     library::exercise_reexported_value();
     library::use_namespace();

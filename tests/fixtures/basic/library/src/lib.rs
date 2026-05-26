@@ -28,6 +28,26 @@ pub fn product_context() -> Context {
     Context
 }
 
+pub trait RefinedBuildContext {
+    fn resolve(&self) -> impl std::fmt::Debug;
+}
+
+pub struct RefinedBuildDispatch;
+
+#[derive(Debug)]
+pub struct RefinedBuildError;
+
+#[allow(refining_impl_trait)]
+impl RefinedBuildContext for RefinedBuildDispatch {
+    fn resolve(&self) -> Result<(), RefinedBuildError> {
+        Err(RefinedBuildError)
+    }
+}
+
+pub fn refined_build_dispatch() -> RefinedBuildDispatch {
+    RefinedBuildDispatch
+}
+
 trait PrivateContext {
     type Options;
 }
