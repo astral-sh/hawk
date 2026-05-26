@@ -1,4 +1,19 @@
+use std::fs;
+use std::path::Path;
 use std::process::Command;
+
+fn copy_directory(source: &Path, destination: &Path) {
+    fs::create_dir_all(destination).expect("create fixture copy directory");
+    for entry in fs::read_dir(source).expect("read fixture directory") {
+        let entry = entry.expect("read fixture entry");
+        let destination = destination.join(entry.file_name());
+        if entry.file_type().expect("read fixture entry type").is_dir() {
+            copy_directory(&entry.path(), &destination);
+        } else {
+            fs::copy(entry.path(), destination).expect("copy fixture file");
+        }
+    }
+}
 
 #[test]
 fn diagnoses_public_surface_of_a_binary_product() {
@@ -327,4 +342,47 @@ fn ordered_lint_levels_control_severity_and_exit_status() {
     assert!(stdout.contains("error[hawk::unfulfilled_expectation]"));
     assert!(!stdout.contains("hawk::unknown_item"));
     assert!(stdout.contains("hawk: 33 finding(s)"));
+}
+
+#[test]
+fn applies_visibility_fixes_through_cargo_fix() {
+    let source_workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/basic");
+    let workspace = tempfile::tempdir().expect("temporary fixture workspace");
+    copy_directory(&source_workspace, workspace.path());
+    let target_dir = tempfile::tempdir().expect("temporary target directory");
+    let output = Command::new(env!("CARGO_BIN_EXE_cargo-hawk"))
+        .arg("--manifest-path")
+        .arg(workspace.path().join("Cargo.toml"))
+        .arg("--package")
+        .arg("app")
+        .arg("--bin")
+        .arg("app")
+        .arg("--fix")
+        .arg("--allow-no-vcs")
+        .arg("--target-dir")
+        .arg(target_dir.path())
+        .arg("--color=never")
+        .output()
+        .expect("run cargo-hawk with fixes");
+
+    assert!(
+        output.status.success(),
+        "cargo-hawk fix failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("hawk: 3 finding(s)"));
+    assert!(stdout.contains("`ProductEnum::Unused`"));
+    assert!(!stdout.contains("`internal_helper`"));
+
+    let library =
+        fs::read_to_string(workspace.path().join("library/src/lib.rs")).expect("read fixed source");
+    assert!(library.contains("pub(crate) fn internal_helper() {}"));
+    assert!(library.contains("pub(crate) use exported::ReexportedValue;"));
+    assert!(library.contains("pub(crate) const DEAD_VALUE: u8 = 2;"));
+    assert!(library.contains("pub(crate) constructed: u8,"));
+    assert!(library.contains("pub(crate) mod dead_outer {"));
+    assert!(library.contains("pub fn dead_code_allowed_entry() {"));
+    assert!(library.contains("pub(crate) fn dead_code_allowed_helper() {}"));
+    assert!(library.contains("pub enum ProductEnum {"));
 }

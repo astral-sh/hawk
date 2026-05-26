@@ -12,7 +12,9 @@ use cargo_metadata::{MetadataCommand, TargetKind};
 use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser, ValueEnum};
 
 use crate::config::{AnalysisTarget, Config, ConfigDiagnostic, ConfigDiagnosticKind};
-use crate::graph::{DefinitionKind, Finding, FindingKind, Fragment, Span, analyze};
+use crate::graph::{
+    DefinitionKind, Finding, FindingKind, FixPlan, FixTarget, Fragment, Span, analyze,
+};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -63,6 +65,22 @@ struct Args {
     /// Emit a Hawk diagnostic or warning group as an error.
     #[arg(short = 'D', long = "deny", value_name = "LINT")]
     deny: Vec<String>,
+
+    /// Automatically apply machine-applicable visibility fixes.
+    #[arg(long)]
+    fix: bool,
+
+    /// Apply fixes despite uncommitted changes in the workspace.
+    #[arg(long, requires = "fix")]
+    allow_dirty: bool,
+
+    /// Apply fixes despite staged changes in the workspace.
+    #[arg(long, requires = "fix")]
+    allow_staged: bool,
+
+    /// Apply fixes when the workspace is not under version control.
+    #[arg(long, requires = "fix")]
+    allow_no_vcs: bool,
 
     /// Control when colored output is used.
     #[arg(long, value_enum, default_value_t, value_name = "WHEN")]
@@ -211,7 +229,7 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
         .with_context(|| format!("read Cargo metadata from {}", args.manifest_path.display()))?;
     validate_product(&metadata, &args.package, &args.bin)?;
 
-    let workspace_root = metadata.workspace_root.into_std_path_buf();
+    let workspace_root = metadata.workspace_root.clone().into_std_path_buf();
     let config = Config::load(&workspace_root, args.config.as_deref())?;
     let manifest_path = args
         .manifest_path
@@ -220,18 +238,19 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
     let crate_name = args.bin.replace('-', "_");
     let target_dir = args
         .target_dir
+        .clone()
         .unwrap_or_else(|| default_target_dir(&workspace_root, &args.package, &args.bin));
     fs::create_dir_all(&target_dir)
         .with_context(|| format!("create target directory {}", target_dir.display()))?;
 
     let temporary_graph_dir;
-    let graph_dir = match args.graph_dir {
+    let graph_dir = match &args.graph_dir {
         Some(path) => {
-            fs::create_dir_all(&path)
+            fs::create_dir_all(path)
                 .with_context(|| format!("create graph directory {}", path.display()))?;
             tempfile::Builder::new()
                 .prefix("run-")
-                .tempdir_in(&path)
+                .tempdir_in(path)
                 .with_context(|| format!("create graph run directory {}", path.display()))?
                 .keep()
         }
@@ -248,35 +267,18 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
         .into_owned();
 
     let executable = env::current_exe().context("locate hawk executable")?;
-    let mut cargo = Command::new("cargo");
-    cargo
-        .current_dir(&workspace_root)
-        .arg("check")
-        .arg("--manifest-path")
-        .arg(&manifest_path)
-        .arg("--package")
-        .arg(&args.package)
-        .arg("--bin")
-        .arg(&args.bin)
-        .arg("--all-features")
-        .arg("--locked")
-        .arg("--target-dir")
-        .arg(&target_dir);
-    if let Some(target) = &args.target {
-        cargo.arg("--target").arg(target);
-    }
-    let status = cargo
-        .env("RUSTC_WORKSPACE_WRAPPER", executable)
-        .env("HAWK_OUTPUT_DIR", &graph_dir)
-        .env("HAWK_ROOT_CRATE", &crate_name)
-        .env("HAWK_RUN_ID", run_id)
-        .status()
-        .context("run instrumented Cargo check")?;
-    if !status.success() {
-        bail!("instrumented Cargo check failed with {status}");
-    }
+    let cargo = InstrumentedCargo {
+        args: &args,
+        workspace_root: &workspace_root,
+        manifest_path: &manifest_path,
+        target_dir: &target_dir,
+        graph_dir: &graph_dir,
+        crate_name: &crate_name,
+        executable: &executable,
+    };
+    cargo.run("check", &run_id, None)?;
 
-    let fragments = read_fragments(&graph_dir)?;
+    let mut fragments = read_fragments(&graph_dir)?;
     if !fragments.iter().any(|fragment| fragment.is_product_root) {
         bail!(
             "no instrumented fragment was emitted for binary `{}`; rerun with a fresh --target-dir",
@@ -284,7 +286,39 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
         );
     }
     let analysis_target = AnalysisTarget::from_rustc(args.target.as_deref())?;
-    let excluded: HashSet<String> = args.excluded_crates.into_iter().collect();
+    let excluded: HashSet<String> = args.excluded_crates.iter().cloned().collect();
+    if args.fix {
+        let initial_findings =
+            config.apply(&analysis_target, &fragments, analyze(&fragments, &excluded));
+        let fix_plan = FixPlan {
+            targets: initial_findings
+                .findings
+                .iter()
+                .filter(|finding| lint_levels.level(finding.kind.code()).is_emitted())
+                .filter(|finding| finding.definition.kind != DefinitionKind::EnumVariant)
+                .map(|finding| FixTarget {
+                    id: finding.definition.id.clone(),
+                    crate_name: finding.definition.crate_name.clone(),
+                    kind: finding.kind,
+                })
+                .collect(),
+        };
+        if !fix_plan.targets.is_empty() {
+            let fix_packages = fix_packages(&metadata, &fix_plan)?;
+            let fix_plan_path = graph_dir.join("fix-plan");
+            write_fix_plan(&fix_plan_path, &fix_plan)?;
+            cargo.run(
+                "fix",
+                &format!("{run_id}-fix"),
+                Some(FixRequest {
+                    plan: &fix_plan_path,
+                    packages: &fix_packages,
+                }),
+            )?;
+            cargo.run("check", &format!("{run_id}-post-fix"), None)?;
+            fragments = read_fragments(&graph_dir)?;
+        }
+    }
     let findings = config.apply(&analysis_target, &fragments, analyze(&fragments, &excluded));
     let mut diagnostics = String::new();
     let mut diagnostic_count = 0;
@@ -331,6 +365,113 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
     } else {
         ExitCode::SUCCESS
     })
+}
+
+struct InstrumentedCargo<'a> {
+    args: &'a Args,
+    workspace_root: &'a Path,
+    manifest_path: &'a Path,
+    target_dir: &'a Path,
+    graph_dir: &'a Path,
+    crate_name: &'a str,
+    executable: &'a Path,
+}
+
+#[derive(Clone, Copy)]
+struct FixRequest<'a> {
+    plan: &'a Path,
+    packages: &'a [String],
+}
+
+impl InstrumentedCargo<'_> {
+    fn run(
+        &self,
+        subcommand: &str,
+        run_id: &str,
+        fix_request: Option<FixRequest<'_>>,
+    ) -> Result<()> {
+        let mut command = Command::new("cargo");
+        command
+            .current_dir(self.workspace_root)
+            .arg(subcommand)
+            .arg("--manifest-path")
+            .arg(self.manifest_path)
+            .arg("--all-features")
+            .arg("--locked")
+            .arg("--target-dir")
+            .arg(self.target_dir);
+        if let Some(fix_request) = fix_request {
+            for package in fix_request.packages {
+                command.arg("--package").arg(package);
+            }
+            command.arg("--lib");
+        } else {
+            command
+                .arg("--package")
+                .arg(&self.args.package)
+                .arg("--bin")
+                .arg(&self.args.bin);
+        }
+        if let Some(target) = &self.args.target {
+            command.arg("--target").arg(target);
+        }
+        if fix_request.is_some() {
+            if self.args.allow_dirty {
+                command.arg("--allow-dirty");
+            }
+            if self.args.allow_staged {
+                command.arg("--allow-staged");
+            }
+            if self.args.allow_no_vcs {
+                command.arg("--allow-no-vcs");
+            }
+        }
+        command
+            .env("RUSTC_WORKSPACE_WRAPPER", self.executable)
+            .env("HAWK_OUTPUT_DIR", self.graph_dir)
+            .env("HAWK_ROOT_CRATE", self.crate_name)
+            .env("HAWK_RUN_ID", run_id);
+        if let Some(fix_request) = fix_request {
+            command.env("HAWK_FIX_PLAN", fix_request.plan);
+        }
+        let status = command
+            .status()
+            .with_context(|| format!("run instrumented Cargo {subcommand}"))?;
+        if !status.success() {
+            bail!("instrumented Cargo {subcommand} failed with {status}");
+        }
+        Ok(())
+    }
+}
+
+fn write_fix_plan(path: &Path, fix_plan: &FixPlan) -> Result<()> {
+    let file = File::create(path).with_context(|| format!("create {}", path.display()))?;
+    serde_json::to_writer(file, fix_plan).with_context(|| format!("serialize {}", path.display()))
+}
+
+fn fix_packages(metadata: &cargo_metadata::Metadata, fix_plan: &FixPlan) -> Result<Vec<String>> {
+    let mut remaining: std::collections::BTreeSet<String> = fix_plan
+        .targets
+        .iter()
+        .map(|target| target.crate_name.clone())
+        .collect();
+    let mut packages = Vec::new();
+    for package in &metadata.packages {
+        for target in &package.targets {
+            if target.kind.contains(&TargetKind::Lib)
+                && remaining.remove(&target.name.replace('-', "_"))
+            {
+                packages.push(package.name.to_string());
+            }
+        }
+    }
+    if !remaining.is_empty() {
+        bail!(
+            "could not identify Cargo library package(s) for fixes in crate(s): {}",
+            remaining.into_iter().collect::<Vec<_>>().join(", ")
+        );
+    }
+    Ok(packages)
 }
 
 const WARNING: Style = AnsiColor::Yellow.on_default().bold();

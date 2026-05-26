@@ -74,6 +74,30 @@ diagnostics are printed as errors and cause a non-zero exit status. Invalid
 configuration or a failed instrumented Cargo build fails regardless of lint
 levels.
 
+## Fixes
+
+Pass `--fix` to apply visibility reductions through Cargo's `fix` machinery:
+
+```sh
+./target/debug/cargo-hawk \
+  --manifest-path /path/to/workspace/Cargo.toml \
+  --package app \
+  --bin app \
+  --fix
+```
+
+Hawk emits machine-applicable `pub` to `pub(crate)` suggestions for findings
+that are not suppressed and are enabled at the command line. It delegates edit
+application and validation to `cargo fix`, including Cargo's source-control
+safety checks; pass `--allow-dirty`, `--allow-staged`, or `--allow-no-vcs` with
+`--fix` when the corresponding Cargo override is appropriate.
+
+Unlike `cargo clippy --fix`, Hawk applies fixes only to library targets in the
+selected production product, then rechecks that selected binary. Enum variants
+are report-only because they have no independent visibility modifier; a
+variant finding disappears after fixing its containing enum only when the
+entire enum no longer needs to be public.
+
 ## Cross-compilation
 
 Hawk forwards `--target` to Cargo, but it does not install a target SDK or

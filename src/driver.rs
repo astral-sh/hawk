@@ -7,6 +7,7 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result};
 use rustc_driver::{Callbacks, Compilation};
+use rustc_errors::Applicability;
 use rustc_hir as hir;
 use rustc_hir::Node;
 use rustc_hir::def::{CtorOf, DefKind, Res};
@@ -20,7 +21,9 @@ use rustc_span::Symbol;
 use rustc_span::def_id::LOCAL_CRATE;
 use rustc_span::hygiene::{ExpnKind, MacroKind};
 
-use crate::graph::{Definition, DefinitionKind, Edge, EdgeKind, Fragment, Span};
+use crate::graph::{
+    Definition, DefinitionKind, Edge, EdgeKind, FindingKind, FixPlan, Fragment, Span,
+};
 
 pub fn is_wrapper_invocation(args: &[String]) -> bool {
     env::var_os("HAWK_OUTPUT_DIR").is_some()
@@ -34,9 +37,21 @@ pub fn run_wrapper(mut args: Vec<String>) -> ExitCode {
     args.remove(1);
     let output_dir = PathBuf::from(env::var_os("HAWK_OUTPUT_DIR").expect("HAWK_OUTPUT_DIR set"));
     let root_crate = env::var("HAWK_ROOT_CRATE").expect("HAWK_ROOT_CRATE set");
+    let fix_plan = match env::var_os("HAWK_FIX_PLAN")
+        .map(PathBuf::from)
+        .map(|path| read_fix_plan(&path))
+        .transpose()
+    {
+        Ok(fix_plan) => fix_plan,
+        Err(error) => {
+            eprintln!("hawk: could not read fix plan: {error:#}");
+            return ExitCode::FAILURE;
+        }
+    };
     let mut callbacks = HawkCallbacks {
         output_dir,
         root_crate,
+        fix_plan,
     };
 
     rustc_driver::catch_with_exit_code(move || {
@@ -47,6 +62,7 @@ pub fn run_wrapper(mut args: Vec<String>) -> ExitCode {
 struct HawkCallbacks {
     output_dir: PathBuf,
     root_crate: String,
+    fix_plan: Option<FixPlan>,
 }
 
 impl Callbacks for HawkCallbacks {
@@ -65,12 +81,75 @@ impl Callbacks for HawkCallbacks {
         _compiler: &interface::Compiler,
         tcx: TyCtxt<'tcx>,
     ) -> Compilation {
-        if let Err(error) = emit_fragment(tcx, &self.root_crate, &self.output_dir) {
+        if let Some(fix_plan) = &self.fix_plan {
+            emit_fixes(tcx, fix_plan);
+        } else if let Err(error) = emit_fragment(tcx, &self.root_crate, &self.output_dir) {
             tcx.dcx()
                 .fatal(format!("hawk could not emit analysis graph: {error:#}"));
         }
         Compilation::Continue
     }
+}
+
+fn read_fix_plan(path: &Path) -> Result<FixPlan> {
+    let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
+    serde_json::from_reader(file).with_context(|| format!("deserialize {}", path.display()))
+}
+
+fn emit_fixes(tcx: TyCtxt<'_>, fix_plan: &FixPlan) {
+    let targets: std::collections::HashMap<&str, FindingKind> = fix_plan
+        .targets
+        .iter()
+        .map(|target| (target.id.as_str(), target.kind))
+        .collect();
+    let crate_items = tcx.hir_crate_items(());
+    for owner in crate_items.owners() {
+        let def_id = owner.def_id;
+        let Some(kind) = targets.get(id(tcx, def_id.to_def_id()).as_str()) else {
+            continue;
+        };
+        if !tcx.local_visibility(def_id).is_public() {
+            continue;
+        }
+        let visibility_span = match tcx.hir_node_by_def_id(def_id) {
+            Node::Item(item) => Some(item.vis_span),
+            Node::ImplItem(item) => item.vis_span(),
+            _ => None,
+        };
+        if let Some(visibility_span) = visibility_span {
+            emit_fix(tcx, visibility_span, *kind);
+        }
+    }
+    for item_id in crate_items.free_items() {
+        let item = tcx.hir_item(item_id);
+        let fields = match item.kind {
+            hir::ItemKind::Struct(_, _, data) | hir::ItemKind::Union(_, _, data) => data.fields(),
+            _ => continue,
+        };
+        for field in fields {
+            let Some(kind) = targets.get(id(tcx, field.def_id.to_def_id()).as_str()) else {
+                continue;
+            };
+            if tcx.local_visibility(field.def_id).is_public() {
+                emit_fix(tcx, field.vis_span, *kind);
+            }
+        }
+    }
+}
+
+fn emit_fix(tcx: TyCtxt<'_>, visibility_span: rustc_span::Span, kind: FindingKind) {
+    let mut diagnostic = tcx.dcx().struct_span_warn(
+        visibility_span,
+        "public visibility can be restricted for the selected Hawk product",
+    );
+    diagnostic.is_lint(kind.code().to_owned(), false);
+    diagnostic.span_suggestion(
+        visibility_span,
+        "change this visibility to",
+        "pub(crate)",
+        Applicability::MachineApplicable,
+    );
+    diagnostic.emit();
 }
 
 fn emit_fragment(tcx: TyCtxt<'_>, root_crate: &str, output_dir: &Path) -> Result<()> {

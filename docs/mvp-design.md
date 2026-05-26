@@ -31,8 +31,9 @@ diagnostics in CI, while a later per-diagnostic option can incrementally lower
 or allow one lint. The options apply after `hawk.toml` overrides and cover both
 visibility findings and configuration diagnostics for stale selectors or
 unfulfilled expectations. Invalid configuration and instrumented build
-failures fail independently of lint levels. Hawk retains declaration spans and
-reasoning needed for follow-up machine-applicable fixes.
+failures fail independently of lint levels. With `--fix`, Hawk converts
+enabled, unsuppressed visibility findings to machine-applicable `pub(crate)`
+suggestions and delegates editing and validation to `cargo fix`.
 
 ## Initial scope
 
@@ -94,7 +95,7 @@ name or `cfg(...)` platform expression. `allow` suppresses a matching finding;
 disappears on an applicable target. Overrides that refer to an item absent
 from an applicable compiled graph produce an unknown-item diagnostic so stale
 configuration is visible. Overrides do not change reachability or
-required-public analysis.
+required-public analysis, and suppressed findings are not eligible for fixes.
 
 ## Implementation direction
 
@@ -115,3 +116,12 @@ that a compiled external item may access. Public re-export candidates are
 checked against this required-visibility closure and are reported only when
 the target kind and absence of potential external consumers make narrowing
 provably type-checking-safe.
+
+Fixing is a second compilation phase because findings are determined only
+after Hawk merges graph fragments for the selected binary. Hawk first builds
+a fix plan from emitted findings, then runs `cargo fix --lib` for the
+workspace library packages that own planned edits while its compiler wrapper
+emits rustc `MachineApplicable` suggestions. It finishes with another
+instrumented check of the selected binary, preserving the production-only
+product model rather than compiling tests or unrelated workspace products as
+additional roots.

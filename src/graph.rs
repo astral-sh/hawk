@@ -16,6 +16,18 @@ pub struct Fragment {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct FixPlan {
+    pub targets: Vec<FixTarget>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct FixTarget {
+    pub id: String,
+    pub crate_name: String,
+    pub kind: FindingKind,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Definition {
     pub id: String,
     pub crate_name: String,
@@ -69,7 +81,8 @@ pub struct Span {
     pub column: usize,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum FindingKind {
     DeadPublic,
     UnnecessaryPublic,
