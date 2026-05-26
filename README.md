@@ -75,6 +75,21 @@ Platform-specific expectations can be scoped in `hawk.toml`, for example with
 `target = "cfg(windows)"` or `target = "cfg(not(windows))"`, so a run on one
 platform does not validate an item that is only compiled on another.
 
+## Coverage
+
+Hawk diagnoses public free functions, inherent methods and associated
+constants, traits, named types (including unions and type aliases), constants,
+statics, struct and union fields, and enum variants. Field construction,
+projection, patterns, and `offset_of!` uses, as well as enum variant
+construction and matching, participate in reachability and cross-crate
+visibility analysis.
+
+For fields and inherent associated constants, a live item used only inside its
+defining crate can be changed to `pub(crate)`. Enum variants have no
+independent Rust visibility modifier: Hawk diagnoses unreachable variants for
+removal, but does not report reachable variants as unnecessary public surface.
+Public re-export paths and public module visibility are not diagnosed yet.
+
 ## Configuration
 
 Add `hawk.toml` at the workspace root to suppress an intentional finding or

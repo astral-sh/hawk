@@ -12,7 +12,7 @@ use cargo_metadata::{MetadataCommand, TargetKind};
 use clap::{Parser, ValueEnum};
 
 use crate::config::{AnalysisTarget, Config, ConfigDiagnostic, ConfigDiagnosticKind};
-use crate::graph::{Finding, FindingKind, Fragment, Span, analyze};
+use crate::graph::{DefinitionKind, Finding, FindingKind, Fragment, Span, analyze};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -214,19 +214,33 @@ fn write_diagnostic(
     binary: &str,
     workspace_root: &Path,
 ) -> std::fmt::Result {
-    let (message, help) = match finding.kind {
-        FindingKind::DeadPublic => (
+    let is_variant = finding.definition.kind == DefinitionKind::EnumVariant;
+    let (message, marker, help) = match (finding.kind, is_variant) {
+        (FindingKind::DeadPublic, true) => (
+            format!(
+                "`{}` is a public enum variant but is not reachable from binary `{binary}`",
+                finding.definition.name
+            ),
+            "public enum variant",
+            "remove this variant",
+        ),
+        (FindingKind::UnnecessaryPublic, true) => {
+            unreachable!("live enum variants do not have actionable visibility findings")
+        }
+        (FindingKind::DeadPublic, false) => (
             format!(
                 "`{}` is public but is not reachable from binary `{binary}`",
                 finding.definition.name
             ),
+            "public declaration",
             "consider restricting this declaration's visibility or removing it",
         ),
-        FindingKind::UnnecessaryPublic => (
+        (FindingKind::UnnecessaryPublic, false) => (
             format!(
                 "`{}` is public but all reachable uses are within `{}`; it can be `pub(crate)`",
                 finding.definition.name, finding.definition.crate_name
             ),
+            "public declaration",
             "change this declaration to `pub(crate)`",
         ),
     };
@@ -240,7 +254,7 @@ fn write_diagnostic(
             span.line,
             span.column,
             source_line.as_deref(),
-            "public declaration",
+            marker,
         )?;
         writeln!(
             output,
@@ -524,5 +538,39 @@ mod tests {
           = help: change this declaration to `pub(crate)`
 
         "###);
+    }
+
+    #[test]
+    fn dead_enum_variant_diagnostic_suggests_a_valid_remediation() {
+        let definition = Definition {
+            id: "InternalState::Active".into(),
+            crate_name: "library".into(),
+            name: "InternalState::Active".into(),
+            kind: DefinitionKind::EnumVariant,
+            span: None,
+            public_api: true,
+        };
+        let finding = Finding {
+            kind: FindingKind::DeadPublic,
+            definition: &definition,
+        };
+        let mut output = String::new();
+
+        write_diagnostic(
+            &mut output,
+            &finding,
+            "app",
+            Path::new(env!("CARGO_MANIFEST_DIR")),
+        )
+        .expect("render diagnostic");
+
+        let output = anstream::adapter::strip_str(&output).to_string();
+        insta::assert_snapshot!(output, @r###"
+        warning[hawk::dead_public]: `InternalState::Active` is a public enum variant but is not reachable from binary `app`
+          = note: declaration in crate `library`
+          = help: remove this variant
+
+        "###);
+        assert!(!output.contains("pub(crate)"));
     }
 }

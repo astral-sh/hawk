@@ -107,19 +107,56 @@ pub fn exercise_internal_trait() {
 pub struct InternalNamespace;
 
 impl InternalNamespace {
+    pub const LIVE_VALUE: u8 = 1;
+
+    pub const DEAD_VALUE: u8 = 2;
+
     pub fn live_inside_crate() {}
 
     pub fn dead_method() {}
 }
 
 pub fn use_namespace() {
+    let _ = InternalNamespace::LIVE_VALUE;
     InternalNamespace::live_inside_crate();
+}
+
+pub struct InternalFields {
+    pub constructed: u8,
+    pub projected: u8,
+}
+
+pub struct InternalTupleFields(pub u8);
+
+pub struct DeadFields {
+    pub unused: u8,
+}
+
+pub fn exercise_fields() {
+    let fields = InternalFields {
+        constructed: 1,
+        projected: 2,
+    };
+    let InternalFields { constructed, .. } = fields;
+    let _ = (constructed, fields.projected);
+    let _ = InternalTupleFields(3);
+}
+
+pub struct ProductFields {
+    pub used_across_crates: u8,
+}
+
+pub struct ProductConstants;
+
+impl ProductConstants {
+    pub const USED_ACROSS_CRATES: u8 = 1;
 }
 
 pub struct ConstructedTuple(u8);
 
 pub enum ConstructedEnum {
     Active,
+    Dead,
 }
 
 pub union DeadUnion {
@@ -131,6 +168,17 @@ pub fn exercise_constructors() {
     let ConstructedTuple(value) = tuple;
     let _ = value;
     let _ = ConstructedEnum::Active;
+}
+
+pub enum ProductEnum {
+    UsedAcrossCrates,
+    UsedInternally,
+    Unused,
+}
+
+pub fn product_enum() -> ProductEnum {
+    let _ = ProductEnum::UsedInternally;
+    ProductEnum::UsedAcrossCrates
 }
 
 mod export_target {
@@ -151,3 +199,32 @@ pub fn dead_code_allowed_entry() {
 }
 
 pub fn dead_code_allowed_helper() {}
+
+pub struct OffsetFields {
+    pub used_by_offset_of: u8,
+}
+
+pub struct FieldPayload;
+
+pub struct ExposedPayloadField {
+    pub payload: FieldPayload,
+}
+
+pub fn exposed_payload_field() -> ExposedPayloadField {
+    ExposedPayloadField {
+        payload: FieldPayload,
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct UnionFieldPayload;
+
+pub union ExposedPayloadUnion {
+    pub payload: UnionFieldPayload,
+}
+
+pub fn exposed_payload_union() -> ExposedPayloadUnion {
+    ExposedPayloadUnion {
+        payload: UnionFieldPayload,
+    }
+}

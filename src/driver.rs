@@ -98,6 +98,7 @@ fn write_fragment(writer: impl Write, fragment: &Fragment, path: &Path) -> Resul
 fn collect_fragment(tcx: TyCtxt<'_>, crate_name: String, is_product_root: bool) -> Fragment {
     let mut definitions = Vec::new();
     let mut defined = HashSet::new();
+    let mut adt_members = Vec::new();
     let crate_items = tcx.hir_crate_items(());
     let is_proc_macro_crate = tcx.crate_types().contains(&CrateType::ProcMacro);
 
@@ -114,6 +115,38 @@ fn collect_fragment(tcx: TyCtxt<'_>, crate_name: String, is_product_root: bool) 
             public_api,
         ));
         defined.insert(def_id);
+    }
+    for item_id in crate_items.free_items() {
+        let item = tcx.hir_item(item_id);
+        match item.kind {
+            hir::ItemKind::Struct(_, _, data) | hir::ItemKind::Union(_, _, data) => {
+                for field in data.fields() {
+                    definitions.push(definition(
+                        tcx,
+                        field.def_id,
+                        &crate_name,
+                        DefinitionKind::Field,
+                        is_publicly_exported(tcx, field.def_id),
+                    ));
+                    defined.insert(field.def_id);
+                    adt_members.push((field.def_id, item.owner_id.def_id));
+                }
+            }
+            hir::ItemKind::Enum(_, _, enumeration) => {
+                for variant in enumeration.variants {
+                    definitions.push(definition(
+                        tcx,
+                        variant.def_id,
+                        &crate_name,
+                        DefinitionKind::EnumVariant,
+                        is_public_variant(tcx, variant.def_id),
+                    ));
+                    defined.insert(variant.def_id);
+                    adt_members.push((variant.def_id, item.owner_id.def_id));
+                }
+            }
+            _ => {}
+        }
     }
 
     for def_id in tcx.hir_body_owners() {
@@ -168,6 +201,18 @@ fn collect_fragment(tcx: TyCtxt<'_>, crate_name: String, is_product_root: bool) 
                 kind: EdgeKind::Interface,
             });
         }
+        if diagnostic_kind(tcx, def_id) == Some(DefinitionKind::InherentAssociatedConstant)
+            && let ty::Adt(adt, _) = tcx
+                .type_of(tcx.local_parent(def_id))
+                .instantiate_identity()
+                .kind()
+        {
+            edges.push(Edge {
+                from: id(tcx, def_id.to_def_id()),
+                to: id(tcx, adt.did()),
+                kind: EdgeKind::Interface,
+            });
+        }
         if matches!(
             tcx.def_kind(def_id),
             DefKind::AssocFn | DefKind::AssocConst | DefKind::AssocTy
@@ -180,6 +225,29 @@ fn collect_fragment(tcx: TyCtxt<'_>, crate_name: String, is_product_root: bool) 
             });
         }
     }
+    for item_id in crate_items.free_items() {
+        let item = tcx.hir_item(item_id);
+        let data = match item.kind {
+            hir::ItemKind::Struct(_, _, data) | hir::ItemKind::Union(_, _, data) => data,
+            _ => continue,
+        };
+        for field in data.fields() {
+            let mut visitor = ReferenceVisitor {
+                tcx,
+                source: id(tcx, field.def_id.to_def_id()),
+                edge_kind: EdgeKind::Interface,
+                typeck_results: None,
+                traverse_bodies: false,
+                edges: &mut edges,
+            };
+            visitor.visit_field_def(field);
+        }
+    }
+    edges.extend(adt_members.into_iter().map(|(member, adt)| Edge {
+        from: id(tcx, member.to_def_id()),
+        to: id(tcx, adt.to_def_id()),
+        kind: EdgeKind::Interface,
+    }));
 
     edges.sort_by(|left, right| {
         (&left.from, &left.to, left.kind as u8).cmp(&(&right.from, &right.to, right.kind as u8))
@@ -299,6 +367,10 @@ fn is_publicly_exported(tcx: TyCtxt<'_>, def_id: LocalDefId) -> bool {
         && tcx.effective_visibilities(()).is_exported(def_id)
 }
 
+fn is_public_variant(tcx: TyCtxt<'_>, def_id: LocalDefId) -> bool {
+    !tcx.def_span(def_id).from_expansion() && tcx.effective_visibilities(()).is_exported(def_id)
+}
+
 fn definition(
     tcx: TyCtxt<'_>,
     def_id: LocalDefId,
@@ -334,6 +406,14 @@ fn diagnostic_kind(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Option<DefinitionKind
             ) =>
         {
             Some(DefinitionKind::InherentMethod)
+        }
+        DefKind::AssocConst
+            if matches!(
+                tcx.def_kind(tcx.local_parent(def_id)),
+                DefKind::Impl { of_trait: false }
+            ) =>
+        {
+            Some(DefinitionKind::InherentAssociatedConstant)
         }
         _ => None,
     }
@@ -373,13 +453,17 @@ impl<'tcx> ReferenceVisitor<'tcx, '_> {
     fn record(&mut self, resolution: Res) {
         match resolution {
             Res::Def(DefKind::Ctor(CtorOf::Struct, ..), constructor) => {
-                self.record_def(self.tcx.parent(constructor));
+                let adt = self.tcx.parent(constructor);
+                self.record_def(adt);
+                for field in &self.tcx.adt_def(adt).non_enum_variant().fields {
+                    self.record_def(field.did);
+                }
             }
             Res::Def(DefKind::Ctor(CtorOf::Variant, ..), constructor) => {
-                self.record_def(self.tcx.parent(self.tcx.parent(constructor)));
+                self.record_def(self.tcx.parent(constructor));
             }
             Res::Def(DefKind::Variant, variant) => {
-                self.record_def(self.tcx.parent(variant));
+                self.record_def(variant);
             }
             Res::Def(_, def_id)
             | Res::SelfTyParam { trait_: def_id }
@@ -396,6 +480,14 @@ impl<'tcx> ReferenceVisitor<'tcx, '_> {
             to: id(self.tcx, def_id),
             kind: self.edge_kind,
         });
+    }
+
+    fn record_non_enum_field(&mut self, adt: ty::AdtDef<'tcx>, hir_id: hir::HirId) {
+        if let Some(typeck_results) = self.typeck_results
+            && let Some(index) = typeck_results.opt_field_index(hir_id)
+        {
+            self.record_def(adt.non_enum_variant().fields[index].did);
+        }
     }
 
     fn visit_node(&mut self, node: Node<'tcx>) {
@@ -431,8 +523,41 @@ impl<'tcx> Visitor<'tcx> for ReferenceVisitor<'tcx, '_> {
                 hir::ExprKind::Path(ref qpath @ hir::QPath::TypeRelative(..)) => {
                     self.record(typeck_results.qpath_res(qpath, expression.hir_id));
                 }
-                hir::ExprKind::Struct(qpath @ hir::QPath::TypeRelative(..), ..) => {
-                    self.record(typeck_results.qpath_res(qpath, expression.hir_id));
+                hir::ExprKind::Struct(qpath, fields, tail) => {
+                    let resolution = typeck_results.qpath_res(qpath, expression.hir_id);
+                    if matches!(qpath, hir::QPath::TypeRelative(..)) {
+                        self.record(resolution);
+                    }
+                    if let Some(adt) = typeck_results.expr_ty(expression).ty_adt_def()
+                        && !adt.is_enum()
+                    {
+                        for field in fields {
+                            self.record_non_enum_field(adt, field.hir_id);
+                        }
+                        if !matches!(tail, hir::StructTailExpr::None) {
+                            for field in &adt.non_enum_variant().fields {
+                                self.record_def(field.did);
+                            }
+                        }
+                    }
+                }
+                hir::ExprKind::Field(base, _) => {
+                    if let Some(adt) = typeck_results.expr_ty_adjusted(base).ty_adt_def()
+                        && !adt.is_enum()
+                    {
+                        self.record_non_enum_field(adt, expression.hir_id);
+                    }
+                }
+                hir::ExprKind::OffsetOf(..) => {
+                    if let Some(fields) = typeck_results.offset_of_data().get(expression.hir_id) {
+                        for (container, variant, field) in fields {
+                            if let ty::Adt(adt, _) = container.kind()
+                                && !adt.is_enum()
+                            {
+                                self.record_def(adt.variant(*variant).fields[*field].did);
+                            }
+                        }
+                    }
                 }
                 hir::ExprKind::MethodCall(..) => {
                     if let Some(def_id) = typeck_results.type_dependent_def_id(expression.hir_id) {
@@ -443,6 +568,42 @@ impl<'tcx> Visitor<'tcx> for ReferenceVisitor<'tcx, '_> {
             }
         }
         intravisit::walk_expr(self, expression);
+    }
+
+    fn visit_pat(&mut self, pattern: &'tcx hir::Pat<'tcx>) {
+        if let Some(typeck_results) = self.typeck_results {
+            match pattern.kind {
+                hir::PatKind::Struct(ref qpath, fields, _) => {
+                    if matches!(qpath, hir::QPath::TypeRelative(..)) {
+                        self.record(typeck_results.qpath_res(qpath, pattern.hir_id));
+                    }
+                    if let Some(adt) = typeck_results.pat_ty(pattern).ty_adt_def()
+                        && !adt.is_enum()
+                    {
+                        for field in fields {
+                            self.record_non_enum_field(adt, field.hir_id);
+                        }
+                    }
+                }
+                hir::PatKind::TupleStruct(ref qpath, ..)
+                    if matches!(qpath, hir::QPath::TypeRelative(..)) =>
+                {
+                    self.record(typeck_results.qpath_res(qpath, pattern.hir_id));
+                }
+                _ => {}
+            }
+        }
+        intravisit::walk_pat(self, pattern);
+    }
+
+    fn visit_pat_expr(&mut self, expression: &'tcx hir::PatExpr<'tcx>) {
+        if let Some(typeck_results) = self.typeck_results
+            && let hir::PatExprKind::Path(ref qpath @ hir::QPath::TypeRelative(..)) =
+                expression.kind
+        {
+            self.record(typeck_results.qpath_res(qpath, expression.hir_id));
+        }
+        intravisit::walk_pat_expr(self, expression);
     }
 }
 

@@ -30,28 +30,40 @@ for follow-up machine-applicable fixes.
 
 ## Initial scope
 
-The MVP includes free functions, inherent methods and associated functions,
-traits, named types, constants, and statics. Public re-exports are recorded in graph
-fragments but do not produce diagnostics yet: rustc resolves downstream paths
-to the underlying declaration, so an export-path diagnostic cannot yet prove
-which `use` was consumed. Targets of public re-exports are treated as
-required-public roots because narrowing only the declaration fails with
-`E0365`. Proc-macro entry points are also treated as required-public roots
-because rustc requires those attributed functions to remain public. The MVP
-suggests no visibility narrower than `pub(crate)`.
+The MVP includes free functions, inherent methods and associated constants,
+traits, named types, constants, statics, public struct and union fields, and
+enum variants. Public re-exports are recorded in graph fragments but do not
+produce diagnostics yet: rustc resolves downstream paths to the underlying
+declaration, so an export-path diagnostic cannot yet prove which `use` was
+consumed. Targets of public re-exports are treated as required-public roots
+because narrowing only the declaration fails with `E0365`. Proc-macro entry
+points are also treated as required-public roots because rustc requires those
+attributed functions to remain public. For declarations that carry
+visibility, the MVP suggests no visibility narrower than `pub(crate)`.
 
-Fields, enum variants, and public module visibility are deferred. Direct
-trait-associated item diagnostics are represented by the containing trait,
-because trait items do not carry their own visibility. Types assigned by
-associated type definitions in publicly reachable trait implementations are
-treated as required-public roots because restricting them can make the crate
-fail to compile (`E0446`) even without a product call path. Trait method
-interface edges are recorded so a type returned across a compiled crate
-boundary also remains public. Trait implementation bodies are conservatively
-rooted so indirect trait dispatch does not turn into dead-public false
-positives. Any compiled cross-crate reference prevents a visibility diagnostic
-because rustc privacy-checks dead items as well as production-reachable ones
-and `pub` is the narrowest Rust visibility available for those uses.
+Field construction, projection, named-pattern, and `offset_of!` uses are
+reference edges, including tuple-struct constructors whose accessibility
+depends on their fields. A field interface edge preserves any type exposed
+through a public field that remains required across a crate boundary. Enum
+variant constructors and paths are edges to the specific variant, and fields
+and variants preserve their containing type. Unlike fields and inherent
+associated constants, enum variants cannot be changed to `pub(crate)`. Hawk
+reports unreachable variants as removable dead public surface, but does not
+emit an unnecessary-public finding for a reachable variant because it has no
+independent actionable visibility change.
+
+Public module visibility is deferred. Direct trait-associated item diagnostics
+are represented by the containing trait, because trait items do not carry
+their own visibility. Types assigned by associated type definitions in
+publicly reachable trait implementations are treated as required-public roots
+because restricting them can make the crate fail to compile (`E0446`) even
+without a product call path. Trait method interface edges are recorded so a
+type returned across a compiled crate boundary also remains public. Trait
+implementation bodies are conservatively rooted so indirect trait dispatch
+does not turn into dead-public false positives. Any compiled cross-crate
+reference prevents a visibility diagnostic because rustc privacy-checks dead
+items as well as production-reachable ones and `pub` is the narrowest Rust
+visibility available for those uses.
 
 An optional workspace-root `hawk.toml` configures diagnostic overrides by
 exact lint, crate, and item path, optionally scoped to a Cargo-style target

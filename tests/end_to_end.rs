@@ -43,7 +43,7 @@ fn diagnoses_public_surface_of_a_binary_product() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stdout = anstream::adapter::strip_str(&stdout).to_string();
     let summary = format!(
-        "hawk: 16 finding(s) for `app --bin app --all-features` on target `{host_target}`\n"
+        "hawk: 28 finding(s) for `app --bin app --all-features` on target `{host_target}`\n"
     );
     let diagnostics = stdout
         .strip_suffix(&summary)
@@ -91,59 +91,143 @@ fn diagnoses_public_surface_of_a_binary_product() {
         | ^^^ public declaration
         = help: change this declaration to `pub(crate)`
 
-    warning[hawk::unnecessary_public]: `InternalNamespace::live_inside_crate` is public but all reachable uses are within `library`; it can be `pub(crate)`
+    warning[hawk::unnecessary_public]: `InternalNamespace::LIVE_VALUE` is public but all reachable uses are within `library`; it can be `pub(crate)`
       --> library/src/lib.rs:110:5
         |
-    110 |     pub fn live_inside_crate() {}
+    110 |     pub const LIVE_VALUE: u8 = 1;
+        |     ^^^ public declaration
+        = help: change this declaration to `pub(crate)`
+
+    warning[hawk::dead_public]: `InternalNamespace::DEAD_VALUE` is public but is not reachable from binary `app`
+      --> library/src/lib.rs:112:5
+        |
+    112 |     pub const DEAD_VALUE: u8 = 2;
+        |     ^^^ public declaration
+        = help: consider restricting this declaration's visibility or removing it
+
+    warning[hawk::unnecessary_public]: `InternalNamespace::live_inside_crate` is public but all reachable uses are within `library`; it can be `pub(crate)`
+      --> library/src/lib.rs:114:5
+        |
+    114 |     pub fn live_inside_crate() {}
         |     ^^^ public declaration
         = help: change this declaration to `pub(crate)`
 
     warning[hawk::dead_public]: `InternalNamespace::dead_method` is public but is not reachable from binary `app`
-      --> library/src/lib.rs:112:5
+      --> library/src/lib.rs:116:5
         |
-    112 |     pub fn dead_method() {}
+    116 |     pub fn dead_method() {}
+        |     ^^^ public declaration
+        = help: consider restricting this declaration's visibility or removing it
+
+    warning[hawk::unnecessary_public]: `InternalFields` is public but all reachable uses are within `library`; it can be `pub(crate)`
+      --> library/src/lib.rs:124:1
+        |
+    124 | pub struct InternalFields {
+        | ^^^ public declaration
+        = help: change this declaration to `pub(crate)`
+
+    warning[hawk::unnecessary_public]: `InternalFields::constructed` is public but all reachable uses are within `library`; it can be `pub(crate)`
+      --> library/src/lib.rs:125:5
+        |
+    125 |     pub constructed: u8,
+        |     ^^^ public declaration
+        = help: change this declaration to `pub(crate)`
+
+    warning[hawk::unnecessary_public]: `InternalFields::projected` is public but all reachable uses are within `library`; it can be `pub(crate)`
+      --> library/src/lib.rs:126:5
+        |
+    126 |     pub projected: u8,
+        |     ^^^ public declaration
+        = help: change this declaration to `pub(crate)`
+
+    warning[hawk::unnecessary_public]: `InternalTupleFields` is public but all reachable uses are within `library`; it can be `pub(crate)`
+      --> library/src/lib.rs:129:1
+        |
+    129 | pub struct InternalTupleFields(pub u8);
+        | ^^^ public declaration
+        = help: change this declaration to `pub(crate)`
+
+    warning[hawk::unnecessary_public]: `InternalTupleFields::0` is public but all reachable uses are within `library`; it can be `pub(crate)`
+      --> library/src/lib.rs:129:32
+        |
+    129 | pub struct InternalTupleFields(pub u8);
+        |                                ^^^ public declaration
+        = help: change this declaration to `pub(crate)`
+
+    warning[hawk::dead_public]: `DeadFields` is public but is not reachable from binary `app`
+      --> library/src/lib.rs:131:1
+        |
+    131 | pub struct DeadFields {
+        | ^^^ public declaration
+        = help: consider restricting this declaration's visibility or removing it
+
+    warning[hawk::dead_public]: `DeadFields::unused` is public but is not reachable from binary `app`
+      --> library/src/lib.rs:132:5
+        |
+    132 |     pub unused: u8,
         |     ^^^ public declaration
         = help: consider restricting this declaration's visibility or removing it
 
     warning[hawk::unnecessary_public]: `ConstructedTuple` is public but all reachable uses are within `library`; it can be `pub(crate)`
-      --> library/src/lib.rs:119:1
+      --> library/src/lib.rs:155:1
         |
-    119 | pub struct ConstructedTuple(u8);
+    155 | pub struct ConstructedTuple(u8);
         | ^^^ public declaration
         = help: change this declaration to `pub(crate)`
 
     warning[hawk::unnecessary_public]: `ConstructedEnum` is public but all reachable uses are within `library`; it can be `pub(crate)`
-      --> library/src/lib.rs:121:1
+      --> library/src/lib.rs:157:1
         |
-    121 | pub enum ConstructedEnum {
+    157 | pub enum ConstructedEnum {
         | ^^^ public declaration
         = help: change this declaration to `pub(crate)`
 
-    warning[hawk::dead_public]: `DeadUnion` is public but is not reachable from binary `app`
-      --> library/src/lib.rs:125:1
+    warning[hawk::dead_public]: `ConstructedEnum::Dead` is a public enum variant but is not reachable from binary `app`
+      --> library/src/lib.rs:159:5
         |
-    125 | pub union DeadUnion {
+    159 |     Dead,
+        |     ^^^ public enum variant
+        = help: remove this variant
+
+    warning[hawk::dead_public]: `DeadUnion` is public but is not reachable from binary `app`
+      --> library/src/lib.rs:162:1
+        |
+    162 | pub union DeadUnion {
         | ^^^ public declaration
         = help: consider restricting this declaration's visibility or removing it
 
-    warning[hawk::dead_public]: `dead_entry` is public but is not reachable from binary `app`
-      --> library/src/lib.rs:142:1
+    warning[hawk::dead_public]: `DeadUnion::value` is public but is not reachable from binary `app`
+      --> library/src/lib.rs:163:5
         |
-    142 | pub fn dead_entry() {
+    163 |     pub value: u8,
+        |     ^^^ public declaration
+        = help: consider restricting this declaration's visibility or removing it
+
+    warning[hawk::dead_public]: `ProductEnum::Unused` is a public enum variant but is not reachable from binary `app`
+      --> library/src/lib.rs:176:5
+        |
+    176 |     Unused,
+        |     ^^^ public enum variant
+        = help: remove this variant
+
+    warning[hawk::dead_public]: `dead_entry` is public but is not reachable from binary `app`
+      --> library/src/lib.rs:190:1
+        |
+    190 | pub fn dead_entry() {
         | ^^^ public declaration
         = help: consider restricting this declaration's visibility or removing it
 
     warning[hawk::dead_public]: `dead_helper` is public but is not reachable from binary `app`
-      --> library/src/lib.rs:146:1
+      --> library/src/lib.rs:194:1
         |
-    146 | pub fn dead_helper() {}
+    194 | pub fn dead_helper() {}
         | ^^^ public declaration
         = help: consider restricting this declaration's visibility or removing it
 
     warning[hawk::dead_public]: `dead_code_allowed_helper` is public but is not reachable from binary `app`
-      --> library/src/lib.rs:153:1
+      --> library/src/lib.rs:201:1
         |
-    153 | pub fn dead_code_allowed_helper() {}
+    201 | pub fn dead_code_allowed_helper() {}
         | ^^^ public declaration
         = help: consider restricting this declaration's visibility or removing it
 
