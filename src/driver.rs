@@ -18,6 +18,7 @@ use rustc_session::config::CrateType;
 use rustc_span::Pos;
 use rustc_span::Symbol;
 use rustc_span::def_id::LOCAL_CRATE;
+use rustc_span::hygiene::{ExpnKind, MacroKind};
 
 use crate::graph::{Definition, DefinitionKind, Edge, EdgeKind, Fragment, Span};
 
@@ -99,6 +100,8 @@ fn collect_fragment(tcx: TyCtxt<'_>, crate_name: String, is_product_root: bool) 
     let mut definitions = Vec::new();
     let mut defined = HashSet::new();
     let mut adt_members = Vec::new();
+    let mut source_item_fields = Vec::new();
+    let mut generated_fields = Vec::new();
     let crate_items = tcx.hir_crate_items(());
     let is_proc_macro_crate = tcx.crate_types().contains(&CrateType::ProcMacro);
 
@@ -119,9 +122,28 @@ fn collect_fragment(tcx: TyCtxt<'_>, crate_name: String, is_product_root: bool) 
     }
     for item_id in crate_items.free_items() {
         let item = tcx.hir_item(item_id);
+        let source_item_index = (!item.span.from_expansion()).then(|| {
+            source_item_fields.push((
+                source_file_start(tcx, item.span),
+                item.span.lo().to_u32(),
+                Vec::new(),
+            ));
+            source_item_fields.len() - 1
+        });
         match item.kind {
             hir::ItemKind::Struct(_, _, data) | hir::ItemKind::Union(_, _, data) => {
                 for field in data.fields() {
+                    let field_span = tcx.def_span(field.def_id);
+                    if let Some(index) = source_item_index
+                        && is_publicly_exported(tcx, field.def_id)
+                    {
+                        source_item_fields[index]
+                            .2
+                            .push((tcx.item_name(field.def_id.to_def_id()), field.def_id));
+                    }
+                    if field_span.from_expansion() {
+                        generated_fields.push(field.def_id);
+                    }
                     definitions.push(definition(
                         tcx,
                         field.def_id,
@@ -245,6 +267,37 @@ fn collect_fragment(tcx: TyCtxt<'_>, crate_name: String, is_product_root: bool) 
         from: id(tcx, member.to_def_id()),
         to: id(tcx, adt.to_def_id()),
         kind: EdgeKind::Interface,
+    }));
+    source_item_fields.sort_by_key(|(file_start, item_start, _)| (*file_start, *item_start));
+    // A derive can expose a generated field whose visibility is governed by a
+    // source field, as `rkyv::Archived<T>` does. HIR cannot prove that macro
+    // relationship, so conservatively retain same-named source visibility when
+    // the expansion callsite identifies its decorated item.
+    edges.extend(generated_fields.into_iter().filter_map(|field| {
+        let span = tcx.def_span(field);
+        if !matches!(
+            span.ctxt().outer_expn_data().kind,
+            ExpnKind::Macro(MacroKind::Derive, _)
+        ) {
+            return None;
+        }
+        let source_callsite = span.source_callsite();
+        let source_file = source_file_start(tcx, source_callsite);
+        let source_position = source_callsite.hi().to_u32();
+        let name = tcx.item_name(field.to_def_id());
+        source_item_fields
+            .iter()
+            .find(|(file_start, item_start, _)| {
+                *file_start == source_file && *item_start >= source_position
+            })?
+            .2
+            .iter()
+            .find(|(source_name, _)| *source_name == name)
+            .map(|(_, source_field)| Edge {
+                from: id(tcx, field.to_def_id()),
+                to: id(tcx, source_field.to_def_id()),
+                kind: EdgeKind::VisibilityRequirement,
+            })
     }));
 
     edges.sort_by(|left, right| {
@@ -375,6 +428,14 @@ fn is_publicly_exported(tcx: TyCtxt<'_>, def_id: LocalDefId) -> bool {
     !tcx.def_span(def_id).from_expansion()
         && tcx.local_visibility(def_id).is_public()
         && tcx.effective_visibilities(()).is_exported(def_id)
+}
+
+fn source_file_start(tcx: TyCtxt<'_>, span: rustc_span::Span) -> u32 {
+    tcx.sess
+        .source_map()
+        .lookup_source_file(span.lo())
+        .start_pos
+        .to_u32()
 }
 
 fn is_public_variant(tcx: TyCtxt<'_>, def_id: LocalDefId) -> bool {

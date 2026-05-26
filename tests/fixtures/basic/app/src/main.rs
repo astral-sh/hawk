@@ -24,6 +24,8 @@ fn main() {
     }
     library::exercise_internal_public_modules();
     library::consumed_outer::consumed_nested::invoke();
+    library::exercise_mirrored_source();
+    let _ = library::archived_mirrored_fields().required_through_archive;
 }
 
 #[allow(dead_code)]

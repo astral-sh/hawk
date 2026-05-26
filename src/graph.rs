@@ -39,6 +39,7 @@ pub enum EdgeKind {
     Interface,
     Reexport,
     VisibilityParent,
+    VisibilityRequirement,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
@@ -232,7 +233,10 @@ fn required_public_visibility<'a>(
     for edge in edges {
         if matches!(
             edge.kind,
-            EdgeKind::Interface | EdgeKind::Reexport | EdgeKind::VisibilityParent
+            EdgeKind::Interface
+                | EdgeKind::Reexport
+                | EdgeKind::VisibilityParent
+                | EdgeKind::VisibilityRequirement
         ) && definitions.contains_key(edge.to.as_str())
         {
             interface_edges
@@ -296,6 +300,9 @@ fn adjacency<'a>(
 ) -> HashMap<&'a str, Vec<&'a str>> {
     let mut adjacency: HashMap<&str, Vec<&str>> = HashMap::new();
     for edge in edges {
+        if edge.kind == EdgeKind::VisibilityRequirement {
+            continue;
+        }
         adjacency
             .entry(edge.from.as_str())
             .or_default()
@@ -542,6 +549,62 @@ mod tests {
         });
 
         assert!(analyze(&input, &HashSet::new()).is_empty());
+    }
+
+    #[test]
+    fn cross_crate_generated_field_use_preserves_its_source_field_visibility() {
+        let mut input = fragments(
+            vec![
+                typed_node("source_field", "lib", true, DefinitionKind::Field),
+                typed_node("generated_field", "lib", false, DefinitionKind::Field),
+            ],
+            vec![Edge {
+                from: "generated_field".into(),
+                to: "source_field".into(),
+                kind: EdgeKind::VisibilityRequirement,
+            }],
+        );
+        input[0].edges.push(Edge {
+            from: "main".into(),
+            to: "generated_field".into(),
+            kind: EdgeKind::Body,
+        });
+
+        assert!(analyze(&input, &HashSet::new()).is_empty());
+    }
+
+    #[test]
+    fn internal_generated_field_use_does_not_make_its_source_field_live() {
+        let mut input = fragments(
+            vec![
+                typed_node("entry", "lib", true, DefinitionKind::Function),
+                typed_node("source_field", "lib", true, DefinitionKind::Field),
+                typed_node("generated_field", "lib", false, DefinitionKind::Field),
+            ],
+            vec![
+                Edge {
+                    from: "entry".into(),
+                    to: "generated_field".into(),
+                    kind: EdgeKind::Body,
+                },
+                Edge {
+                    from: "generated_field".into(),
+                    to: "source_field".into(),
+                    kind: EdgeKind::VisibilityRequirement,
+                },
+            ],
+        );
+        input[0].edges.push(Edge {
+            from: "main".into(),
+            to: "entry".into(),
+            kind: EdgeKind::Body,
+        });
+
+        let findings = analyze(&input, &HashSet::new());
+
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, FindingKind::DeadPublic);
+        assert_eq!(findings[0].definition.id, "source_field");
     }
 
     #[test]

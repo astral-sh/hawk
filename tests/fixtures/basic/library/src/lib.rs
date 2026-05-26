@@ -264,3 +264,20 @@ pub mod dead_outer {
 pub mod alias_namespace {
     pub use crate::export_target::through_reexport as nested_through_reexport;
 }
+
+#[derive(macro_dep::ArchiveMirror)]
+pub struct MirroredFields {
+    pub required_through_archive: u8,
+}
+
+pub fn exercise_mirrored_source() {
+    let _ = MirroredFields {
+        required_through_archive: 1,
+    };
+}
+
+pub fn archived_mirrored_fields() -> ArchivedMirroredFields {
+    ArchivedMirroredFields {
+        required_through_archive: 1,
+    }
+}
