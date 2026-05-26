@@ -3,12 +3,12 @@
 extern crate rustc_driver;
 extern crate rustc_hir;
 extern crate rustc_interface;
-extern crate rustc_lint_defs;
 extern crate rustc_middle;
 extern crate rustc_session;
 extern crate rustc_span;
 
 mod cli;
+mod config;
 mod driver;
 mod graph;
 

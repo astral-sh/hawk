@@ -146,8 +146,8 @@ pub fn dead_entry() {
 pub fn dead_helper() {}
 
 #[allow(dead_code)]
-pub fn retained_entry() {
-    retained_helper();
+pub fn dead_code_allowed_entry() {
+    dead_code_allowed_helper();
 }
 
-pub fn retained_helper() {}
+pub fn dead_code_allowed_helper() {}

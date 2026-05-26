@@ -38,13 +38,6 @@ fn diagnoses_public_surface_of_a_binary_product() {
       | ^^^ public declaration
       = help: change this declaration to `pub(crate)`
 
-    warning[hawk::dead_public]: `ProductContext` is public but is not reachable from binary `app`
-      --> library/src/lib.rs:13:1
-       |
-    13 | pub trait ProductContext {
-       | ^^^ public declaration
-       = help: consider restricting this declaration's visibility or removing it
-
     warning[hawk::dead_public]: `ContextOptionsAlias` is public but is not reachable from binary `app`
       --> library/src/lib.rs:21:1
        |
@@ -129,13 +122,29 @@ fn diagnoses_public_surface_of_a_binary_product() {
         | ^^^ public declaration
         = help: consider restricting this declaration's visibility or removing it
 
-    warning[hawk::unnecessary_public]: `retained_helper` is public but all reachable uses are within `library`; it can be `pub(crate)`
+    warning[hawk::dead_public]: `dead_code_allowed_helper` is public but is not reachable from binary `app`
       --> library/src/lib.rs:153:1
         |
-    153 | pub fn retained_helper() {}
+    153 | pub fn dead_code_allowed_helper() {}
         | ^^^ public declaration
-        = help: change this declaration to `pub(crate)`
+        = help: consider restricting this declaration's visibility or removing it
 
-    hawk: 15 finding(s) for `app --bin app --all-features` on the host target
+    warning[hawk::unknown_item]: override for `hawk::dead_public` references unknown item `library::removed_api`
+      --> hawk.toml:15:1
+       |
+    15 | [[override]]
+       | ^^^ no matching item was found
+      = note: reason: covered by stale selector diagnostic
+      = help: remove this override or update its `crate` and `item` selectors
+
+    warning[hawk::unfulfilled_expectation]: expected `hawk::dead_public` for `library::PrivateContextOptions`, but no finding was produced
+      --> hawk.toml:22:1
+       |
+    22 | [[override]]
+       | ^^^ unfulfilled expectation
+      = note: reason: covered by unfulfilled expectation diagnostic
+      = help: remove this expectation or update its `lint` selector
+
+    hawk: 16 finding(s) for `app --bin app --all-features` on the host target
     "###);
 }

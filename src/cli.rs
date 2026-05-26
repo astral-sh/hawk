@@ -11,6 +11,7 @@ use anyhow::{Context, Result, bail};
 use cargo_metadata::{MetadataCommand, TargetKind};
 use clap::{Parser, ValueEnum};
 
+use crate::config::{Config, ConfigDiagnostic, ConfigDiagnosticKind};
 use crate::graph::{Finding, FindingKind, Fragment, Span, analyze};
 
 #[derive(Debug, Parser)]
@@ -42,6 +43,10 @@ struct Args {
     /// Preserve serialized compiler fragments at this directory.
     #[arg(long)]
     graph_dir: Option<PathBuf>,
+
+    /// Path to Hawk lint overrides; defaults to hawk.toml in the workspace root.
+    #[arg(long, value_name = "PATH")]
+    config: Option<PathBuf>,
 
     /// Control when colored output is used.
     #[arg(long, value_enum, default_value_t, value_name = "WHEN")]
@@ -91,6 +96,7 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
     validate_product(&metadata, &args.package, &args.bin)?;
 
     let workspace_root = metadata.workspace_root.into_std_path_buf();
+    let config = Config::load(&workspace_root, args.config.as_deref())?;
     let manifest_path = args
         .manifest_path
         .canonicalize()
@@ -157,16 +163,20 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
         );
     }
     let excluded: HashSet<String> = args.excluded_crates.into_iter().collect();
-    let findings = analyze(&fragments, &excluded);
+    let findings = config.apply(&fragments, analyze(&fragments, &excluded));
     let mut diagnostics = String::new();
-    for finding in &findings {
+    for finding in &findings.findings {
         write_diagnostic(&mut diagnostics, finding, &args.bin, &workspace_root)
+            .expect("formatting diagnostics into a string cannot fail");
+    }
+    for diagnostic in &findings.config_diagnostics {
+        write_config_diagnostic(&mut diagnostics, diagnostic, &config, &workspace_root)
             .expect("formatting diagnostics into a string cannot fail");
     }
     writeln!(
         diagnostics,
         "hawk: {} finding(s) for `{} --bin {} --all-features` on the host target",
-        findings.len(),
+        findings.findings.len() + findings.config_diagnostics.len(),
         args.package,
         args.bin
     )
@@ -191,7 +201,7 @@ fn write_diagnostic(
 ) -> std::fmt::Result {
     let (code, message, help) = match finding.kind {
         FindingKind::DeadPublic => (
-            "hawk::dead_public",
+            finding.kind.code(),
             format!(
                 "`{}` is public but is not reachable from binary `{binary}`",
                 finding.definition.name
@@ -199,7 +209,7 @@ fn write_diagnostic(
             "consider restricting this declaration's visibility or removing it",
         ),
         FindingKind::UnnecessaryPublic => (
-            "hawk::unnecessary_public",
+            finding.kind.code(),
             format!(
                 "`{}` is public but all reachable uses are within `{}`; it can be `pub(crate)`",
                 finding.definition.name, finding.definition.crate_name
@@ -276,6 +286,100 @@ fn write_diagnostic(
             styled("help", HELP)
         )?;
     }
+    writeln!(output)
+}
+
+fn write_config_diagnostic(
+    output: &mut String,
+    diagnostic: &ConfigDiagnostic<'_>,
+    config: &Config,
+    workspace_root: &Path,
+) -> std::fmt::Result {
+    let entry = diagnostic.entry;
+    let item = format!("{}::{}", entry.crate_name, entry.item);
+    let (code, message, marker, help) = match diagnostic.kind {
+        ConfigDiagnosticKind::UnknownItem => (
+            "hawk::unknown_item",
+            format!(
+                "override for `{}` references unknown item `{item}`",
+                entry.lint.code()
+            ),
+            "no matching item was found",
+            "remove this override or update its `crate` and `item` selectors",
+        ),
+        ConfigDiagnosticKind::UnfulfilledExpectation => (
+            "hawk::unfulfilled_expectation",
+            format!(
+                "expected `{}` for `{item}`, but no finding was produced",
+                entry.lint.code()
+            ),
+            "unfulfilled expectation",
+            "remove this expectation or update its `lint` selector",
+        ),
+    };
+    writeln!(
+        output,
+        "{}: {}",
+        styled(format_args!("warning[{code}]"), WARNING),
+        styled(message, EMPHASIS)
+    )?;
+
+    let config_path = config.path().expect("diagnostic requires a loaded config");
+    let display_path = config_path
+        .strip_prefix(workspace_root)
+        .unwrap_or(config_path)
+        .display();
+    writeln!(
+        output,
+        "  {} {}:{}:{}",
+        styled("-->", LOCATION),
+        display_path,
+        entry.span.line,
+        entry.span.column
+    )?;
+    if let Some(source_line) = config.source_line(entry.span.line) {
+        let width = entry.span.line.to_string().len();
+        writeln!(
+            output,
+            "{empty:>width$} {}",
+            styled("|", SEPARATOR),
+            empty = "",
+            width = width
+        )?;
+        writeln!(
+            output,
+            "{} {} {source_line}",
+            styled(format!("{:>width$}", entry.span.line), LOCATION),
+            styled("|", SEPARATOR)
+        )?;
+        writeln!(
+            output,
+            "{empty:>width$} {} {}",
+            styled("|", SEPARATOR),
+            styled(
+                format_args!(
+                    "{}^^^ {marker}",
+                    marker_indent(source_line, entry.span.column)
+                ),
+                WARNING
+            ),
+            empty = "",
+            width = width
+        )?;
+    }
+    writeln!(
+        output,
+        "  {} {}: reason: {}",
+        styled("=", SEPARATOR),
+        styled("note", HELP),
+        entry.reason
+    )?;
+    writeln!(
+        output,
+        "  {} {}: {help}",
+        styled("=", SEPARATOR),
+        styled("help", HELP)
+    )?;
     writeln!(output)
 }
 
@@ -394,7 +498,6 @@ mod tests {
                 column: 1,
             }),
             public_api: true,
-            allow_dead_code: false,
         };
         let finding = Finding {
             kind: FindingKind::UnnecessaryPublic,

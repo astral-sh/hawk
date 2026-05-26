@@ -23,7 +23,6 @@ pub struct Definition {
     pub kind: DefinitionKind,
     pub span: Option<Span>,
     pub public_api: bool,
-    pub allow_dead_code: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -70,6 +69,23 @@ pub enum FindingKind {
     UnnecessaryPublic,
 }
 
+impl FindingKind {
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::DeadPublic => "hawk::dead_public",
+            Self::UnnecessaryPublic => "hawk::unnecessary_public",
+        }
+    }
+
+    pub fn from_code(code: &str) -> Option<Self> {
+        match code {
+            "hawk::dead_public" => Some(Self::DeadPublic),
+            "hawk::unnecessary_public" => Some(Self::UnnecessaryPublic),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Finding<'a> {
     pub kind: FindingKind,
@@ -113,11 +129,6 @@ pub fn analyze<'a>(
         );
     let production = reachable(production_roots, &adjacency);
 
-    let retained_roots = definitions
-        .values()
-        .filter(|definition| definition.public_api && definition.allow_dead_code)
-        .map(|definition| definition.id.as_str());
-    let retained = reachable(retained_roots, &adjacency);
     let explicitly_required: HashSet<&str> = fragments
         .iter()
         .flat_map(|fragment| fragment.required_public_roots.iter().map(String::as_str))
@@ -129,7 +140,6 @@ pub fn analyze<'a>(
     let mut reported = HashSet::new();
     for definition in definitions.values() {
         if !definition.public_api
-            || definition.allow_dead_code
             || excluded_crates.contains(&definition.crate_name)
             || fragments.iter().any(|fragment| {
                 fragment.is_product_root && fragment.crate_name == definition.crate_name
@@ -147,8 +157,7 @@ pub fn analyze<'a>(
         }
 
         let is_production_live = production.contains(definition.id.as_str());
-        let is_retained = retained.contains(definition.id.as_str());
-        if !is_production_live && !is_retained {
+        if !is_production_live {
             findings.push(Finding {
                 kind: FindingKind::DeadPublic,
                 definition,
@@ -303,7 +312,6 @@ mod tests {
             kind: DefinitionKind::Function,
             span: None,
             public_api,
-            allow_dead_code: false,
         }
     }
 
@@ -421,11 +429,12 @@ mod tests {
     }
 
     #[test]
-    fn allowed_root_can_reveal_an_unnecessarily_public_helper() {
-        let mut retained = node("debug_entry", "lib", true);
-        retained.allow_dead_code = true;
+    fn unreachable_public_reference_does_not_keep_a_helper_alive() {
         let input = fragments(
-            vec![retained, node("helper", "lib", true)],
+            vec![
+                node("debug_entry", "lib", true),
+                node("helper", "lib", true),
+            ],
             vec![Edge {
                 from: "debug_entry".into(),
                 to: "helper".into(),
@@ -434,9 +443,12 @@ mod tests {
         );
         let findings = analyze(&input, &HashSet::new());
 
-        assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].kind, FindingKind::UnnecessaryPublic);
-        assert_eq!(findings[0].definition.id, "helper");
+        assert_eq!(findings.len(), 2);
+        assert!(
+            findings
+                .iter()
+                .all(|finding| finding.kind == FindingKind::DeadPublic)
+        );
     }
 
     #[test]

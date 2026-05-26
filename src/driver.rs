@@ -13,10 +13,8 @@ use rustc_hir::def::{CtorOf, DefKind, Res};
 use rustc_hir::def_id::{CRATE_DEF_ID, DefId, LocalDefId};
 use rustc_hir::intravisit::{self, Visitor};
 use rustc_interface::interface;
-use rustc_lint_defs::Level;
 use rustc_middle::ty::{self, TyCtxt};
 use rustc_session::config::CrateType;
-use rustc_session::lint::builtin::DEAD_CODE;
 use rustc_span::Pos;
 use rustc_span::Symbol;
 use rustc_span::def_id::LOCAL_CRATE;
@@ -308,11 +306,6 @@ fn definition(
     kind: DefinitionKind,
     public_api: bool,
 ) -> Definition {
-    let hir_id = tcx.local_def_id_to_hir_id(def_id);
-    let allow_dead_code = matches!(
-        tcx.lint_level_at_node(DEAD_CODE, hir_id).level,
-        Level::Allow | Level::Expect
-    );
     Definition {
         id: id(tcx, def_id.to_def_id()),
         crate_name: crate_name.into(),
@@ -320,7 +313,6 @@ fn definition(
         kind,
         span: span(tcx, def_id),
         public_api,
-        allow_dead_code,
     }
 }
 

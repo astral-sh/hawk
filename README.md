@@ -40,6 +40,36 @@ retain the compiler fragments in a run-specific subdirectory for investigation.
 Diagnostics are colored automatically in a terminal; use `--color=always` or
 `--color=never` to override terminal detection.
 
+## Configuration
+
+Add `hawk.toml` at the workspace root to suppress an intentional finding or
+pin one as an expected finding:
+
+```toml
+[[override]]
+lint = "hawk::dead_public"
+crate = "library"
+item = "legacy_entry"
+level = "allow"
+reason = "retained temporarily while consumers migrate"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "library"
+item = "generated_registration"
+level = "expect"
+reason = "called by generated registration that Hawk does not model"
+```
+
+`allow` suppresses a matching finding. `expect` suppresses a matching finding
+and reports `hawk::unfulfilled_expectation` if that exact finding is no longer
+present. An entry whose `crate` and `item` selector no longer identifies a
+compiled item reports `hawk::unknown_item`.
+
+Overrides filter diagnostics only; they do not add reachability roots or
+preserve visibility for referenced items. Use `--config PATH` to load a
+configuration file other than the workspace-root `hawk.toml`.
+
 ## License
 
 hawk is licensed under either of

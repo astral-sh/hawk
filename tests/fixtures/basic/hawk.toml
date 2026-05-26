@@ -1,0 +1,27 @@
+[[override]]
+lint = "hawk::dead_public"
+crate = "library"
+item = "dead_code_allowed_entry"
+level = "allow"
+reason = "allow suppresses only this finding, not referenced helpers"
+
+[[override]]
+lint = "hawk::dead_public"
+crate = "library"
+item = "ProductContext"
+level = "expect"
+reason = "covered by fixture expectation"
+
+[[override]]
+lint = "hawk::dead_public"
+crate = "library"
+item = "removed_api"
+level = "expect"
+reason = "covered by stale selector diagnostic"
+
+[[override]]
+lint = "hawk::dead_public"
+crate = "library"
+item = "PrivateContextOptions"
+level = "expect"
+reason = "covered by unfulfilled expectation diagnostic"

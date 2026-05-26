@@ -53,10 +53,12 @@ positives. Any compiled cross-crate reference prevents a visibility diagnostic
 because rustc privacy-checks dead items as well as production-reachable ones
 and `pub` is the narrowest Rust visibility available for those uses.
 
-Existing `dead_code` lint allowances are treated as deliberate retention. They
-do not turn dependencies into production uses: a retained public function may
-still reveal that a public helper it uses only internally does not need to be
-public.
+An optional workspace-root `hawk.toml` configures diagnostic overrides by
+exact lint, crate, and item path. `allow` suppresses a matching finding;
+`expect` also produces an unfulfilled-expectation diagnostic when its finding
+disappears. Overrides that refer to an item absent from the compiled graph
+produce an unknown-item diagnostic so stale configuration is visible.
+Overrides do not change reachability or required-public analysis.
 
 ## Implementation direction
 
