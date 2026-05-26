@@ -31,5 +31,6 @@ jobs:
   check-zizmor:
     uses: ./.github/workflows/check-zizmor.yml
     permissions:
+      actions: read
       contents: read
       security-events: write
