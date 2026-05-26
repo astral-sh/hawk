@@ -52,9 +52,46 @@ struct Args {
     #[arg(long, value_name = "PATH")]
     config: Option<PathBuf>,
 
+    /// Control whether emitted diagnostics are reported or fail the command.
+    #[arg(long, value_enum, default_value_t, value_name = "MODE")]
+    mode: EnforcementMode,
+
     /// Control when colored output is used.
     #[arg(long, value_enum, default_value_t, value_name = "WHEN")]
     color: TerminalColor,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
+enum EnforcementMode {
+    /// Report diagnostics as warnings and exit successfully.
+    #[default]
+    Warn,
+
+    /// Report diagnostics as errors and exit unsuccessfully.
+    Deny,
+}
+
+impl EnforcementMode {
+    fn severity(self) -> &'static str {
+        match self {
+            Self::Warn => "warning",
+            Self::Deny => "error",
+        }
+    }
+
+    fn style(self) -> Style {
+        match self {
+            Self::Warn => WARNING,
+            Self::Deny => ERROR,
+        }
+    }
+
+    fn exit_code(self, diagnostic_count: usize) -> ExitCode {
+        match self {
+            Self::Deny if diagnostic_count > 0 => ExitCode::FAILURE,
+            Self::Warn | Self::Deny => ExitCode::SUCCESS,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, ValueEnum)]
@@ -176,13 +213,26 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
     let findings = config.apply(&analysis_target, &fragments, analyze(&fragments, &excluded));
     let mut diagnostics = String::new();
     for finding in &findings.findings {
-        write_diagnostic(&mut diagnostics, finding, &args.bin, &workspace_root)
-            .expect("formatting diagnostics into a string cannot fail");
+        write_diagnostic(
+            &mut diagnostics,
+            finding,
+            &args.bin,
+            &workspace_root,
+            args.mode,
+        )
+        .expect("formatting diagnostics into a string cannot fail");
     }
     for diagnostic in &findings.config_diagnostics {
-        write_config_diagnostic(&mut diagnostics, diagnostic, &config, &workspace_root)
-            .expect("formatting diagnostics into a string cannot fail");
+        write_config_diagnostic(
+            &mut diagnostics,
+            diagnostic,
+            &config,
+            &workspace_root,
+            args.mode,
+        )
+        .expect("formatting diagnostics into a string cannot fail");
     }
+    let diagnostic_count = findings.findings.len() + findings.config_diagnostics.len();
     let compilation_target = args.target.as_deref().map_or_else(
         || "the host target".to_owned(),
         |target| format!("target `{target}`"),
@@ -190,19 +240,17 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
     writeln!(
         diagnostics,
         "hawk: {} finding(s) for `{} --bin {} --all-features` on {}",
-        findings.findings.len() + findings.config_diagnostics.len(),
-        args.package,
-        args.bin,
-        compilation_target
+        diagnostic_count, args.package, args.bin, compilation_target
     )
     .expect("formatting diagnostics into a string cannot fail");
     anstream::AutoStream::new(std::io::stdout(), args.color.into())
         .write_all(diagnostics.as_bytes())
         .context("write diagnostic output")?;
-    Ok(ExitCode::SUCCESS)
+    Ok(args.mode.exit_code(diagnostic_count))
 }
 
 const WARNING: Style = AnsiColor::Yellow.on_default().bold();
+const ERROR: Style = AnsiColor::Red.on_default().bold();
 const LOCATION: Style = AnsiColor::BrightBlue.on_default().bold();
 const SEPARATOR: Style = AnsiColor::Cyan.on_default();
 const HELP: Style = AnsiColor::BrightCyan.on_default().bold();
@@ -213,6 +261,7 @@ fn write_diagnostic(
     finding: &Finding<'_>,
     binary: &str,
     workspace_root: &Path,
+    mode: EnforcementMode,
 ) -> std::fmt::Result {
     let (message, help) = match finding.kind {
         FindingKind::DeadPublic => (
@@ -230,7 +279,7 @@ fn write_diagnostic(
             "change this declaration to `pub(crate)`",
         ),
     };
-    write_warning_header(output, finding.kind.code(), message)?;
+    write_diagnostic_header(output, finding.kind.code(), message, mode)?;
 
     if let Some(span) = &finding.definition.span {
         let source_line = source_line(workspace_root, span);
@@ -241,6 +290,7 @@ fn write_diagnostic(
             span.column,
             source_line.as_deref(),
             "public declaration",
+            mode.style(),
         )?;
         writeln!(
             output,
@@ -273,6 +323,7 @@ fn write_config_diagnostic(
     diagnostic: &ConfigDiagnostic<'_>,
     config: &Config,
     workspace_root: &Path,
+    mode: EnforcementMode,
 ) -> std::fmt::Result {
     let entry = diagnostic.entry;
     let item = format!("{}::{}", entry.crate_name, entry.item);
@@ -296,7 +347,7 @@ fn write_config_diagnostic(
             "remove this expectation or update its `lint` selector",
         ),
     };
-    write_warning_header(output, code, message)?;
+    write_diagnostic_header(output, code, message, mode)?;
 
     let config_path = config.path().expect("diagnostic requires a loaded config");
     let display_path = config_path
@@ -310,6 +361,7 @@ fn write_config_diagnostic(
         entry.span.column,
         config.source_line(entry.span.line),
         marker,
+        mode.style(),
     )?;
     writeln!(
         output,
@@ -327,15 +379,16 @@ fn write_config_diagnostic(
     writeln!(output)
 }
 
-fn write_warning_header(
+fn write_diagnostic_header(
     output: &mut String,
     code: &str,
     message: impl Display,
+    mode: EnforcementMode,
 ) -> std::fmt::Result {
     writeln!(
         output,
         "{}: {}",
-        styled(format_args!("warning[{code}]"), WARNING),
+        styled(format_args!("{}[{code}]", mode.severity()), mode.style()),
         styled(message, EMPHASIS)
     )
 }
@@ -347,6 +400,7 @@ fn write_annotated_location(
     column: usize,
     source_line: Option<&str>,
     marker: &str,
+    marker_style: Style,
 ) -> Result<usize, std::fmt::Error> {
     writeln!(
         output,
@@ -374,7 +428,7 @@ fn write_annotated_location(
             styled("|", SEPARATOR),
             styled(
                 format_args!("{}^^^ {marker}", marker_indent(source_line, column)),
-                WARNING
+                marker_style
             ),
             empty = "",
             width = width
@@ -483,7 +537,7 @@ mod tests {
 
     use crate::graph::{Definition, DefinitionKind, Finding, FindingKind, Span};
 
-    use super::write_diagnostic;
+    use super::{EnforcementMode, write_diagnostic};
 
     #[test]
     fn diagnostic_rendering_includes_terminal_styles() {
@@ -510,6 +564,7 @@ mod tests {
             &finding,
             "app",
             Path::new(env!("CARGO_MANIFEST_DIR")),
+            EnforcementMode::Warn,
         )
         .expect("render diagnostic");
 
@@ -524,5 +579,21 @@ mod tests {
           = help: change this declaration to `pub(crate)`
 
         "###);
+    }
+
+    #[test]
+    fn deny_mode_fails_only_when_a_diagnostic_is_emitted() {
+        assert_eq!(
+            EnforcementMode::Warn.exit_code(1),
+            std::process::ExitCode::SUCCESS
+        );
+        assert_eq!(
+            EnforcementMode::Deny.exit_code(0),
+            std::process::ExitCode::SUCCESS
+        );
+        assert_eq!(
+            EnforcementMode::Deny.exit_code(1),
+            std::process::ExitCode::FAILURE
+        );
     }
 }
