@@ -22,10 +22,13 @@ fn main() {
         library::ProductEnum::UsedAcrossCrates => {}
         _ => {}
     }
+    library::exercise_internal_public_modules();
+    library::consumed_outer::consumed_nested::invoke();
 }
 
 #[allow(dead_code)]
 fn typechecked_cross_crate_references() {
     let _ = library::TypeCheckedAcrossCrates;
     let _ = library::PublicRenderer::render(&library::PublicRendererValue);
+    let _ = library::TypecheckedExportPath;
 }

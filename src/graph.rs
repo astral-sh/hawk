@@ -38,6 +38,7 @@ pub enum EdgeKind {
     Body,
     Interface,
     Reexport,
+    VisibilityParent,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
@@ -56,6 +57,7 @@ pub enum DefinitionKind {
     Field,
     EnumVariant,
     Reexport,
+    Module,
     Other,
 }
 
@@ -132,10 +134,26 @@ pub fn analyze<'a>(
         );
     let production = reachable(production_roots, &adjacency);
 
-    let explicitly_required: HashSet<&str> = fragments
+    let mut explicitly_required: HashSet<&str> = fragments
         .iter()
         .flat_map(|fragment| fragment.required_public_roots.iter().map(String::as_str))
         .collect();
+    let no_explicitly_required = HashSet::new();
+    let externally_required_visibility =
+        required_public_visibility(&definitions, &edges, &equivalents, &no_explicitly_required);
+    for definition in definitions
+        .values()
+        .filter(|definition| definition.public_api && definition.kind == DefinitionKind::Reexport)
+    {
+        let targets = reexport_targets(definition.id.as_str(), &edges);
+        if !is_analyzable_reexport(&targets, &definitions)
+            || targets
+                .iter()
+                .any(|target| externally_required_visibility.contains(target))
+        {
+            explicitly_required.insert(definition.id.as_str());
+        }
+    }
     let required_public_visibility =
         required_public_visibility(&definitions, &edges, &equivalents, &explicitly_required);
 
@@ -159,7 +177,13 @@ pub fn analyze<'a>(
             continue;
         }
 
-        let is_production_live = production.contains(definition.id.as_str());
+        let is_production_live = if definition.kind == DefinitionKind::Reexport {
+            reexport_targets(definition.id.as_str(), &edges)
+                .iter()
+                .any(|target| production.contains(target))
+        } else {
+            production.contains(definition.id.as_str())
+        };
         if !is_production_live {
             findings.push(Finding {
                 kind: FindingKind::DeadPublic,
@@ -206,8 +230,10 @@ fn required_public_visibility<'a>(
 
     let mut interface_edges: HashMap<&str, Vec<&str>> = HashMap::new();
     for edge in edges {
-        if matches!(edge.kind, EdgeKind::Interface | EdgeKind::Reexport)
-            && definitions.contains_key(edge.to.as_str())
+        if matches!(
+            edge.kind,
+            EdgeKind::Interface | EdgeKind::Reexport | EdgeKind::VisibilityParent
+        ) && definitions.contains_key(edge.to.as_str())
         {
             interface_edges
                 .entry(edge.from.as_str())
@@ -234,6 +260,34 @@ fn required_public_visibility<'a>(
     }
 
     required
+}
+
+fn reexport_targets<'a>(source: &str, edges: &'a [&Edge]) -> Vec<&'a str> {
+    edges
+        .iter()
+        .filter(|edge| edge.kind == EdgeKind::Reexport && edge.from == source)
+        .map(|edge| edge.to.as_str())
+        .collect()
+}
+
+fn is_analyzable_reexport(targets: &[&str], definitions: &HashMap<&str, &Definition>) -> bool {
+    !targets.is_empty()
+        && targets.iter().all(|target| {
+            definitions.get(target).is_some_and(|definition| {
+                matches!(
+                    definition.kind,
+                    DefinitionKind::Function
+                        | DefinitionKind::InherentMethod
+                        | DefinitionKind::Trait
+                        | DefinitionKind::Struct
+                        | DefinitionKind::Enum
+                        | DefinitionKind::Union
+                        | DefinitionKind::TypeAlias
+                        | DefinitionKind::Constant
+                        | DefinitionKind::Static
+                )
+            })
+        })
 }
 
 fn adjacency<'a>(
@@ -322,7 +376,7 @@ mod tests {
         }
     }
 
-    fn node_of_kind(
+    fn typed_node(
         id: &str,
         crate_name: &str,
         public_api: bool,
@@ -415,8 +469,8 @@ mod tests {
     fn cross_crate_variant_use_requires_its_parent_enum_to_remain_public() {
         let mut input = fragments(
             vec![
-                node_of_kind("api_enum", "lib", true, DefinitionKind::Enum),
-                node_of_kind("api_enum::used", "lib", true, DefinitionKind::EnumVariant),
+                typed_node("api_enum", "lib", true, DefinitionKind::Enum),
+                typed_node("api_enum::used", "lib", true, DefinitionKind::EnumVariant),
             ],
             vec![Edge {
                 from: "api_enum::used".into(),
@@ -437,9 +491,9 @@ mod tests {
     fn internally_used_variant_of_required_public_enum_is_not_reported() {
         let mut input = fragments(
             vec![
-                node_of_kind("entry", "lib", true, DefinitionKind::Function),
-                node_of_kind("api_enum", "lib", true, DefinitionKind::Enum),
-                node_of_kind(
+                typed_node("entry", "lib", true, DefinitionKind::Function),
+                typed_node("api_enum", "lib", true, DefinitionKind::Enum),
+                typed_node(
                     "api_enum::internal",
                     "lib",
                     true,
@@ -472,8 +526,8 @@ mod tests {
     fn cross_crate_field_use_requires_its_public_payload_type_to_remain_public() {
         let mut input = fragments(
             vec![
-                node_of_kind("api_field", "lib", true, DefinitionKind::Field),
-                node_of_kind("payload", "lib", true, DefinitionKind::Struct),
+                typed_node("api_field", "lib", true, DefinitionKind::Field),
+                typed_node("payload", "lib", true, DefinitionKind::Struct),
             ],
             vec![Edge {
                 from: "api_field".into(),
@@ -582,6 +636,142 @@ mod tests {
     fn public_reexport_target_required_by_rust_visibility_is_clean() {
         let mut input = fragments(vec![node("reexported", "lib", true)], vec![]);
         input[1].required_public_roots.push("reexported".into());
+
+        assert!(analyze(&input, &HashSet::new()).is_empty());
+    }
+
+    #[test]
+    fn dead_public_reexport_is_reported_without_narrowing_its_target() {
+        let mut input = fragments(
+            vec![
+                typed_node("alias", "lib", true, DefinitionKind::Reexport),
+                node("target", "lib", true),
+            ],
+            vec![Edge {
+                from: "alias".into(),
+                to: "target".into(),
+                kind: EdgeKind::Reexport,
+            }],
+        );
+        input[1].required_public_roots.push("target".into());
+
+        let findings = analyze(&input, &HashSet::new());
+
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, FindingKind::DeadPublic);
+        assert_eq!(findings[0].definition.id, "alias");
+    }
+
+    #[test]
+    fn locally_used_public_reexport_can_be_narrowed() {
+        let mut input = fragments(
+            vec![
+                typed_node("alias", "lib", true, DefinitionKind::Reexport),
+                node("entry", "lib", true),
+                node("target", "lib", true),
+            ],
+            vec![
+                Edge {
+                    from: "alias".into(),
+                    to: "target".into(),
+                    kind: EdgeKind::Reexport,
+                },
+                Edge {
+                    from: "entry".into(),
+                    to: "target".into(),
+                    kind: EdgeKind::Body,
+                },
+            ],
+        );
+        input[0].edges.push(Edge {
+            from: "main".into(),
+            to: "entry".into(),
+            kind: EdgeKind::Body,
+        });
+        input[1].required_public_roots.push("target".into());
+
+        let findings = analyze(&input, &HashSet::new());
+
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, FindingKind::UnnecessaryPublic);
+        assert_eq!(findings[0].definition.id, "alias");
+    }
+
+    #[test]
+    fn possible_cross_crate_consumer_preserves_public_reexport() {
+        let mut input = fragments(
+            vec![
+                typed_node("alias", "lib", true, DefinitionKind::Reexport),
+                node("target", "lib", true),
+            ],
+            vec![Edge {
+                from: "alias".into(),
+                to: "target".into(),
+                kind: EdgeKind::Reexport,
+            }],
+        );
+        input[0].edges.push(Edge {
+            from: "main".into(),
+            to: "target".into(),
+            kind: EdgeKind::Body,
+        });
+        input[1].required_public_roots.push("target".into());
+
+        assert!(analyze(&input, &HashSet::new()).is_empty());
+    }
+
+    #[test]
+    fn internally_used_public_module_can_be_narrowed() {
+        let mut input = fragments(
+            vec![
+                typed_node("namespace", "lib", true, DefinitionKind::Module),
+                node("entry", "lib", true),
+                node("child", "lib", false),
+            ],
+            vec![
+                Edge {
+                    from: "entry".into(),
+                    to: "child".into(),
+                    kind: EdgeKind::Body,
+                },
+                Edge {
+                    from: "child".into(),
+                    to: "namespace".into(),
+                    kind: EdgeKind::VisibilityParent,
+                },
+            ],
+        );
+        input[0].edges.push(Edge {
+            from: "main".into(),
+            to: "entry".into(),
+            kind: EdgeKind::Body,
+        });
+
+        let findings = analyze(&input, &HashSet::new());
+
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, FindingKind::UnnecessaryPublic);
+        assert_eq!(findings[0].definition.id, "namespace");
+    }
+
+    #[test]
+    fn cross_crate_descendant_preserves_public_module_path() {
+        let mut input = fragments(
+            vec![
+                typed_node("namespace", "lib", true, DefinitionKind::Module),
+                node("child", "lib", true),
+            ],
+            vec![Edge {
+                from: "child".into(),
+                to: "namespace".into(),
+                kind: EdgeKind::VisibilityParent,
+            }],
+        );
+        input[0].edges.push(Edge {
+            from: "main".into(),
+            to: "child".into(),
+            kind: EdgeKind::Body,
+        });
 
         assert!(analyze(&input, &HashSet::new()).is_empty());
     }

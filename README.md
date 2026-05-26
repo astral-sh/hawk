@@ -42,6 +42,38 @@ retain the compiler fragments in a run-specific subdirectory for investigation.
 Diagnostics are colored automatically in a terminal; use `--color=always` or
 `--color=never` to override terminal detection.
 
+By default, Hawk reports diagnostics as warnings and exits successfully so it
+can be introduced without changing build status. To use it as a CI gate, deny
+the `warnings` group:
+
+```sh
+./target/debug/cargo-hawk \
+  --manifest-path /path/to/workspace/Cargo.toml \
+  --package app \
+  --bin app \
+  -D warnings
+```
+
+Hawk accepts Clippy-style `-A`/`--allow`, `-W`/`--warn`, and `-D`/`--deny`
+lint levels. Later options take precedence, so CI can enforce most diagnostics
+while introducing one incrementally:
+
+```sh
+./target/debug/cargo-hawk \
+  --manifest-path /path/to/workspace/Cargo.toml \
+  --package app \
+  --bin app \
+  -D warnings \
+  -W hawk::unnecessary_public
+```
+
+The supported selectors are `warnings`,
+`hawk::dead_public`, `hawk::unnecessary_public`,
+`hawk::unknown_item`, and `hawk::unfulfilled_expectation`. Denied
+diagnostics are printed as errors and cause a non-zero exit status. Invalid
+configuration or a failed instrumented Cargo build fails regardless of lint
+levels.
+
 ## Cross-compilation
 
 Hawk forwards `--target` to Cargo, but it does not install a target SDK or
@@ -88,7 +120,27 @@ For fields and inherent associated constants, a live item used only inside its
 defining crate can be changed to `pub(crate)`. Enum variants have no
 independent Rust visibility modifier: Hawk diagnoses unreachable variants for
 removal, but does not report reachable variants as unnecessary public surface.
-Public re-export paths and public module visibility are not diagnosed yet.
+
+## Exported paths and modules
+
+In addition to public declarations, Hawk diagnoses selected public re-exports
+and public modules. A named local re-export of a modeled non-module
+declaration is reported only when no compiled cross-crate reference could
+require that exported path. If its target is not reachable from the selected
+binary it is dead public surface; if its target is used only without a
+required external path, the re-export can be restricted to `pub(crate) use`.
+
+Public module visibility is tracked through declarations lexically nested
+inside the module. A cross-crate reference to a descendant conservatively
+preserves its public module ancestors; a module whose reachable descendants
+are internal can be restricted to `pub(crate) mod`.
+
+Rustc resolves consumer paths through `pub use` to the underlying declaration,
+so the graph cannot identify which alias was used. To avoid suggestions that
+could fail privacy checking, Hawk does not report glob re-exports, re-exports
+of modules or unmodeled/external targets, and it preserves a public module
+that contains a public re-export. These are intentional false negatives until
+export-path provenance is available.
 
 ## Configuration
 
@@ -125,10 +177,15 @@ present. An entry whose `crate` and `item` selector no longer identifies a
 compiled item reports `hawk::unknown_item`. An optional `target` accepts the
 same named targets and `cfg(...)` platform expressions as Cargo target
 dependencies; the override is checked only while analyzing a matching target.
+For newly analyzed paths, `item` uses the exported alias name (for example
+`PublicAlias`) or module path (for example `api::internal`).
 
 Overrides filter diagnostics only; they do not add reachability roots or
 preserve visibility for referenced items. Use `--config PATH` to load a
 configuration file other than the workspace-root `hawk.toml`.
+With `-D warnings`, correctly suppressed diagnostics do not fail the command,
+while stale selectors and unfulfilled expectations do unless lowered or
+allowed explicitly.
 
 ## License
 

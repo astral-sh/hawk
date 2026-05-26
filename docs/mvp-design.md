@@ -25,21 +25,27 @@ diagnostics. Compiled workspace library dependencies can produce:
 - unnecessary public visibility: a live public declaration has no live
   cross-crate consumer and can be restricted to `pub(crate)`.
 
-The MVP is diagnostic-only. It retains declaration spans and reasoning needed
-for follow-up machine-applicable fixes.
+Hawk emits warnings and exits successfully by default. Clippy-style ordered
+`-A`/`-W`/`-D` options control lint levels; `-D warnings` enforces all Hawk
+diagnostics in CI, while a later per-diagnostic option can incrementally lower
+or allow one lint. The options apply after `hawk.toml` overrides and cover both
+visibility findings and configuration diagnostics for stale selectors or
+unfulfilled expectations. Invalid configuration and instrumented build
+failures fail independently of lint levels. Hawk retains declaration spans and
+reasoning needed for follow-up machine-applicable fixes.
 
 ## Initial scope
 
 The MVP includes free functions, inherent methods and associated constants,
-traits, named types, constants, statics, public struct and union fields, and
-enum variants. Public re-exports are recorded in graph fragments but do not
-produce diagnostics yet: rustc resolves downstream paths to the underlying
-declaration, so an export-path diagnostic cannot yet prove which `use` was
-consumed. Targets of public re-exports are treated as required-public roots
-because narrowing only the declaration fails with `E0365`. Proc-macro entry
-points are also treated as required-public roots because rustc requires those
-attributed functions to remain public. For declarations that carry
-visibility, the MVP suggests no visibility narrower than `pub(crate)`.
+traits, named types, constants, statics, public struct and union fields, enum
+variants, selected public re-exports, and public modules. For a named public
+re-export of a modeled local non-module declaration, Hawk diagnoses the
+exported path only if no compiled cross-crate reference to its target (or a
+required interface related to it) exists. A target unreachable from the
+selected product produces a dead-export finding; a target used without a
+possible external consumer produces an unnecessary-public finding for the
+`use`. Targets of public re-exports remain required-public roots because
+narrowing only the declaration fails with `E0365`.
 
 Field construction, projection, named-pattern, and `offset_of!` uses are
 reference edges, including tuple-struct constructors whose accessibility
@@ -52,18 +58,34 @@ reports unreachable variants as removable dead public surface, but does not
 emit an unnecessary-public finding for a reachable variant because it has no
 independent actionable visibility change.
 
-Public module visibility is deferred. Direct trait-associated item diagnostics
-are represented by the containing trait, because trait items do not carry
-their own visibility. Types assigned by associated type definitions in
-publicly reachable trait implementations are treated as required-public roots
-because restricting them can make the crate fail to compile (`E0446`) even
-without a product call path. Trait method interface edges are recorded so a
-type returned across a compiled crate boundary also remains public. Trait
-implementation bodies are conservatively rooted so indirect trait dispatch
-does not turn into dead-public false positives. Any compiled cross-crate
-reference prevents a visibility diagnostic because rustc privacy-checks dead
-items as well as production-reachable ones and `pub` is the narrowest Rust
-visibility available for those uses.
+Rustc resolves downstream uses of an exported path to its underlying
+declaration; the current graph cannot recover which `pub use` was consumed.
+The sound conservative boundary is deliberate: glob re-exports and
+re-exports of modules or unmodeled/external targets do not produce findings,
+and a public module containing a public re-export is retained. This avoids
+recommending visibility changes that could make a consumer fail privacy
+checking.
+
+Public module definitions are linked to lexically contained definitions by
+visibility-parent edges. A compiled cross-crate reference to a descendant
+retains every public declaring module on that path, even where a different
+re-export might also expose the descendant. This can miss unnecessary module
+visibility, but does not suggest narrowing a path required by known
+consumers. Proc-macro entry points are also treated as required-public roots
+because rustc requires those attributed functions to remain public. The MVP
+suggests no visibility narrower than `pub(crate)`.
+
+Direct trait-associated item diagnostics are represented by the containing
+trait, because trait items do not carry their own visibility. Types assigned
+by associated type definitions in publicly reachable trait implementations are
+treated as required-public roots because restricting them can make the crate
+fail to compile (`E0446`) even without a product call path. Trait method
+interface edges are recorded so a type returned across a compiled crate
+boundary also remains public. Trait implementation bodies are conservatively
+rooted so indirect trait dispatch does not turn into dead-public false
+positives. Any compiled cross-crate reference prevents a visibility diagnostic
+because rustc privacy-checks dead items as well as production-reachable ones
+and `pub` is the narrowest Rust visibility available for those uses.
 
 An optional workspace-root `hawk.toml` configures diagnostic overrides by
 exact lint, crate, and item path, optionally scoped to a Cargo-style target
@@ -88,3 +110,8 @@ Reference edges distinguish implementation-body reachability from public
 interface exposure. Cross-crate references from all compiled items preserve
 the referenced declaration's public visibility; interface edges then preserve
 types exposed through that declaration, including trait method return types.
+Visibility-parent edges preserve public lexical module paths for declarations
+that a compiled external item may access. Public re-export candidates are
+checked against this required-visibility closure and are reported only when
+the target kind and absence of potential external consumers make narrowing
+provably type-checking-safe.

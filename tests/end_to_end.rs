@@ -43,7 +43,7 @@ fn diagnoses_public_surface_of_a_binary_product() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stdout = anstream::adapter::strip_str(&stdout).to_string();
     let summary = format!(
-        "hawk: 28 finding(s) for `app --bin app --all-features` on target `{host_target}`\n"
+        "hawk: 34 finding(s) for `app --bin app --all-features` on target `{host_target}`\n"
     );
     let diagnostics = stdout
         .strip_suffix(&summary)
@@ -69,6 +69,13 @@ fn diagnoses_public_surface_of_a_binary_product() {
     57 | pub struct PrivateContextOptions;
        | ^^^ public declaration
        = help: change this declaration to `pub(crate)`
+
+    warning[hawk::unnecessary_public]: public re-export `ReexportedValue` is not required by any compiled cross-crate use; it can be `pub(crate)`
+      --> library/src/lib.rs:71:9
+       |
+    71 | pub use exported::ReexportedValue;
+       |         ^^^ public re-export
+       = help: change this re-export to `pub(crate) use`
 
     warning[hawk::unnecessary_public]: `InternalRenderer` is public but all reachable uses are within `library`; it can be `pub(crate)`
       --> library/src/lib.rs:91:1
@@ -231,6 +238,41 @@ fn diagnoses_public_surface_of_a_binary_product() {
         | ^^^ public declaration
         = help: consider restricting this declaration's visibility or removing it
 
+    warning[hawk::dead_public]: public re-export `dead_export_path` has no target reachable from binary `app`
+      --> library/src/lib.rs:236:9
+        |
+    236 | pub use dead_export_target::dead_export_path;
+        |         ^^^ public re-export
+        = help: consider restricting this re-export's visibility or removing it
+
+    warning[hawk::unnecessary_public]: public module `internal_outer` is used only within `library`; it can be `pub(crate)`
+      --> library/src/lib.rs:244:1
+        |
+    244 | pub mod internal_outer {
+        | ^^^ public module
+        = help: change this module to `pub(crate) mod`
+
+    warning[hawk::unnecessary_public]: public module `internal_outer::internal_nested` is used only within `library`; it can be `pub(crate)`
+      --> library/src/lib.rs:245:5
+        |
+    245 |     pub mod internal_nested {
+        |     ^^^ public module
+        = help: change this module to `pub(crate) mod`
+
+    warning[hawk::dead_public]: public module `dead_outer` has no declaration reachable from binary `app`
+      --> library/src/lib.rs:260:1
+        |
+    260 | pub mod dead_outer {
+        | ^^^ public module
+        = help: consider restricting this module's visibility or removing it
+
+    warning[hawk::dead_public]: public module `dead_outer::dead_nested` has no declaration reachable from binary `app`
+      --> library/src/lib.rs:261:5
+        |
+    261 |     pub mod dead_nested {}
+        |     ^^^ public module
+        = help: consider restricting this module's visibility or removing it
+
     warning[hawk::unknown_item]: override for `hawk::dead_public` references unknown item `library::removed_api`
       --> hawk.toml:15:1
        |
@@ -248,4 +290,41 @@ fn diagnoses_public_surface_of_a_binary_product() {
       = help: remove this expectation or update its `lint` selector
 
     "###);
+}
+
+#[test]
+fn ordered_lint_levels_control_severity_and_exit_status() {
+    let manifest =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/basic/Cargo.toml");
+    let target_dir = tempfile::tempdir().expect("temporary target directory");
+    let output = Command::new(env!("CARGO_BIN_EXE_cargo-hawk"))
+        .arg("--manifest-path")
+        .arg(manifest)
+        .arg("--package")
+        .arg("app")
+        .arg("--bin")
+        .arg("app")
+        .arg("-D")
+        .arg("warnings")
+        .arg("-W")
+        .arg("hawk::unnecessary_public")
+        .arg("-A")
+        .arg("hawk::unknown_item")
+        .arg("--target-dir")
+        .arg(target_dir.path())
+        .output()
+        .expect("run cargo-hawk");
+
+    assert!(
+        !output.status.success(),
+        "denied diagnostic did not fail:\n{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = anstream::adapter::strip_str(&stdout).to_string();
+    assert!(stdout.contains("error[hawk::dead_public]"));
+    assert!(stdout.contains("warning[hawk::unnecessary_public]"));
+    assert!(stdout.contains("error[hawk::unfulfilled_expectation]"));
+    assert!(!stdout.contains("hawk::unknown_item"));
+    assert!(stdout.contains("hawk: 33 finding(s)"));
 }
