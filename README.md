@@ -75,6 +75,27 @@ Platform-specific expectations can be scoped in `hawk.toml`, for example with
 `target = "cfg(windows)"` or `target = "cfg(not(windows))"`, so a run on one
 platform does not validate an item that is only compiled on another.
 
+## Exported paths and modules
+
+In addition to public declarations, Hawk diagnoses selected public re-exports
+and public modules. A named local re-export of a modeled non-module
+declaration is reported only when no compiled cross-crate reference could
+require that exported path. If its target is not reachable from the selected
+binary it is dead public surface; if its target is used only without a
+required external path, the re-export can be restricted to `pub(crate) use`.
+
+Public module visibility is tracked through declarations lexically nested
+inside the module. A cross-crate reference to a descendant conservatively
+preserves its public module ancestors; a module whose reachable descendants
+are internal can be restricted to `pub(crate) mod`.
+
+Rustc resolves consumer paths through `pub use` to the underlying declaration,
+so the graph cannot identify which alias was used. To avoid suggestions that
+could fail privacy checking, Hawk does not report glob re-exports, re-exports
+of modules or unmodeled/external targets, and it preserves a public module
+that contains a public re-export. These are intentional false negatives until
+export-path provenance is available.
+
 ## Configuration
 
 Add `hawk.toml` at the workspace root to suppress an intentional finding or
@@ -110,6 +131,8 @@ present. An entry whose `crate` and `item` selector no longer identifies a
 compiled item reports `hawk::unknown_item`. An optional `target` accepts the
 same named targets and `cfg(...)` platform expressions as Cargo target
 dependencies; the override is checked only while analyzing a matching target.
+For newly analyzed paths, `item` uses the exported alias name (for example
+`PublicAlias`) or module path (for example `api::internal`).
 
 Overrides filter diagnostics only; they do not add reachability roots or
 preserve visibility for referenced items. Use `--config PATH` to load a

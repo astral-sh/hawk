@@ -43,7 +43,7 @@ fn diagnoses_public_surface_of_a_binary_product() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stdout = anstream::adapter::strip_str(&stdout).to_string();
     let summary = format!(
-        "hawk: 16 finding(s) for `app --bin app --all-features` on target `{host_target}`\n"
+        "hawk: 22 finding(s) for `app --bin app --all-features` on target `{host_target}`\n"
     );
     let diagnostics = stdout
         .strip_suffix(&summary)
@@ -69,6 +69,13 @@ fn diagnoses_public_surface_of_a_binary_product() {
     57 | pub struct PrivateContextOptions;
        | ^^^ public declaration
        = help: change this declaration to `pub(crate)`
+
+    warning[hawk::unnecessary_public]: public re-export `ReexportedValue` is not required by any compiled cross-crate use; it can be `pub(crate)`
+      --> library/src/lib.rs:71:9
+       |
+    71 | pub use exported::ReexportedValue;
+       |         ^^^ public re-export
+       = help: change this re-export to `pub(crate) use`
 
     warning[hawk::unnecessary_public]: `InternalRenderer` is public but all reachable uses are within `library`; it can be `pub(crate)`
       --> library/src/lib.rs:91:1
@@ -146,6 +153,41 @@ fn diagnoses_public_surface_of_a_binary_product() {
     153 | pub fn dead_code_allowed_helper() {}
         | ^^^ public declaration
         = help: consider restricting this declaration's visibility or removing it
+
+    warning[hawk::dead_public]: public re-export `dead_export_path` has no target reachable from binary `app`
+      --> library/src/lib.rs:159:9
+        |
+    159 | pub use dead_export_target::dead_export_path;
+        |         ^^^ public re-export
+        = help: consider restricting this re-export's visibility or removing it
+
+    warning[hawk::unnecessary_public]: public module `internal_outer` is used only within `library`; it can be `pub(crate)`
+      --> library/src/lib.rs:167:1
+        |
+    167 | pub mod internal_outer {
+        | ^^^ public module
+        = help: change this module to `pub(crate) mod`
+
+    warning[hawk::unnecessary_public]: public module `internal_outer::internal_nested` is used only within `library`; it can be `pub(crate)`
+      --> library/src/lib.rs:168:5
+        |
+    168 |     pub mod internal_nested {
+        |     ^^^ public module
+        = help: change this module to `pub(crate) mod`
+
+    warning[hawk::dead_public]: public module `dead_outer` has no declaration reachable from binary `app`
+      --> library/src/lib.rs:183:1
+        |
+    183 | pub mod dead_outer {
+        | ^^^ public module
+        = help: consider restricting this module's visibility or removing it
+
+    warning[hawk::dead_public]: public module `dead_outer::dead_nested` has no declaration reachable from binary `app`
+      --> library/src/lib.rs:184:5
+        |
+    184 |     pub mod dead_nested {}
+        |     ^^^ public module
+        = help: consider restricting this module's visibility or removing it
 
     warning[hawk::unknown_item]: override for `hawk::dead_public` references unknown item `library::removed_api`
       --> hawk.toml:15:1

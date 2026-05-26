@@ -104,7 +104,8 @@ fn collect_fragment(tcx: TyCtxt<'_>, crate_name: String, is_product_root: bool) 
     for owner in crate_items.owners() {
         let def_id = owner.def_id;
         let kind = diagnostic_kind(tcx, def_id);
-        let public_api = kind.is_some_and(|kind| kind != DefinitionKind::Reexport)
+        let public_api = kind
+            .is_some_and(|kind| kind != DefinitionKind::Reexport || is_named_reexport(tcx, def_id))
             && is_publicly_exported(tcx, def_id);
         definitions.push(definition(
             tcx,
@@ -156,6 +157,13 @@ fn collect_fragment(tcx: TyCtxt<'_>, crate_name: String, is_product_root: bool) 
             edges: &mut edges,
         };
         visitor.visit_node(tcx.hir_node_by_def_id(def_id));
+        if let Some(parent) = enclosing_module(tcx, def_id) {
+            edges.push(Edge {
+                from: id(tcx, def_id.to_def_id()),
+                to: id(tcx, parent.to_def_id()),
+                kind: EdgeKind::VisibilityParent,
+            });
+        }
         if diagnostic_kind(tcx, def_id) == Some(DefinitionKind::InherentMethod)
             && let ty::Adt(adt, _) = tcx
                 .type_of(tcx.local_parent(def_id))
@@ -236,12 +244,15 @@ fn collect_fragment(tcx: TyCtxt<'_>, crate_name: String, is_product_root: bool) 
     }
     // Lowering the local target of a public reexport fails with E0365 while
     // the reexport remains part of the crate interface.
-    let public_reexport_sources: HashSet<String> = crate_items
+    let public_reexports: Vec<LocalDefId> = crate_items
         .owners()
         .map(|owner| owner.def_id)
         .filter(|def_id| {
             tcx.def_kind(*def_id) == DefKind::Use && is_publicly_exported(tcx, *def_id)
         })
+        .collect();
+    let public_reexport_sources: HashSet<String> = public_reexports
+        .iter()
         .map(|def_id| id(tcx, def_id.to_def_id()))
         .collect();
     required_public_roots.extend(
@@ -251,6 +262,15 @@ fn collect_fragment(tcx: TyCtxt<'_>, crate_name: String, is_product_root: bool) 
                 edge.kind == EdgeKind::Reexport && public_reexport_sources.contains(&edge.from)
             })
             .map(|edge| edge.to.clone()),
+    );
+    // Consumer paths through a public reexport are erased to its declaration
+    // target in HIR. A containing namespace cannot be narrowed soundly until
+    // the exported path itself can be attributed to consumers.
+    required_public_roots.extend(
+        public_reexports
+            .into_iter()
+            .filter_map(|def_id| enclosing_module(tcx, def_id))
+            .map(|def_id| id(tcx, def_id.to_def_id())),
     );
     if is_proc_macro_crate {
         // Public exports from a proc-macro crate can only be macro entry points.
@@ -299,6 +319,13 @@ fn is_publicly_exported(tcx: TyCtxt<'_>, def_id: LocalDefId) -> bool {
         && tcx.effective_visibilities(()).is_exported(def_id)
 }
 
+fn is_named_reexport(tcx: TyCtxt<'_>, def_id: LocalDefId) -> bool {
+    matches!(
+        tcx.hir_node_by_def_id(def_id),
+        Node::Item(item) if matches!(item.kind, hir::ItemKind::Use(_, hir::UseKind::Single(_)))
+    )
+}
+
 fn definition(
     tcx: TyCtxt<'_>,
     def_id: LocalDefId,
@@ -309,7 +336,7 @@ fn definition(
     Definition {
         id: id(tcx, def_id.to_def_id()),
         crate_name: crate_name.into(),
-        name: tcx.def_path_str(def_id.to_def_id()),
+        name: definition_name(tcx, def_id, kind),
         kind,
         span: span(tcx, def_id),
         public_api,
@@ -318,6 +345,7 @@ fn definition(
 
 fn diagnostic_kind(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Option<DefinitionKind> {
     match tcx.def_kind(def_id) {
+        DefKind::Mod if def_id != CRATE_DEF_ID => Some(DefinitionKind::Module),
         DefKind::Fn => Some(DefinitionKind::Function),
         DefKind::Trait => Some(DefinitionKind::Trait),
         DefKind::Struct => Some(DefinitionKind::Struct),
@@ -337,6 +365,34 @@ fn diagnostic_kind(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Option<DefinitionKind
         }
         _ => None,
     }
+}
+
+fn definition_name(tcx: TyCtxt<'_>, def_id: LocalDefId, kind: DefinitionKind) -> String {
+    if kind != DefinitionKind::Reexport {
+        return tcx.def_path_str(def_id.to_def_id());
+    }
+
+    let Node::Item(item) = tcx.hir_node_by_def_id(def_id) else {
+        return tcx.def_path_str(def_id.to_def_id());
+    };
+    let Some(ident) = item.kind.ident() else {
+        return tcx.def_path_str(def_id.to_def_id());
+    };
+    let name = ident.to_string();
+    let parent = tcx.local_parent(def_id);
+    if parent == CRATE_DEF_ID {
+        name
+    } else {
+        format!("{}::{name}", tcx.def_path_str(parent.to_def_id()))
+    }
+}
+
+fn enclosing_module(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Option<LocalDefId> {
+    if def_id == CRATE_DEF_ID {
+        return None;
+    }
+    let parent = tcx.local_parent(def_id);
+    (parent != CRATE_DEF_ID && tcx.def_kind(parent) == DefKind::Mod).then_some(parent)
 }
 
 fn id(tcx: TyCtxt<'_>, def_id: DefId) -> String {
