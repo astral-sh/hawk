@@ -6,6 +6,8 @@ fn diagnoses_public_surface_of_a_binary_product() {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/basic/Cargo.toml");
     let target_dir = tempfile::tempdir().expect("temporary target directory");
     let graph_dir = tempfile::tempdir().expect("temporary graph directory");
+    let unrelated_json = graph_dir.path().join("unrelated.json");
+    std::fs::write(&unrelated_json, "{}").expect("write unrelated JSON file");
     let output = Command::new(env!("CARGO_BIN_EXE_cargo-hawk"))
         .arg("--manifest-path")
         .arg(manifest)
@@ -25,6 +27,7 @@ fn diagnoses_public_surface_of_a_binary_product() {
         "cargo-hawk failed:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    assert!(unrelated_json.exists());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("hawk::unnecessary_public: `internal_helper`"));
     assert!(stdout.contains("hawk::dead_public: `dead_entry`"));

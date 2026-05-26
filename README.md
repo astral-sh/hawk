@@ -36,7 +36,7 @@ internal unless exempted:
 
 Instrumented Cargo artifacts are reused under `/private/tmp/codex-hawk-target`
 by default. Use `--target-dir` to override that location and `--graph-dir` to
-retain the compiler fragments for investigation.
+retain the compiler fragments in a run-specific subdirectory for investigation.
 
 ## License
 

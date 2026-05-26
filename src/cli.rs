@@ -74,11 +74,17 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
     fs::create_dir_all(&target_dir)
         .with_context(|| format!("create target directory {}", target_dir.display()))?;
 
+    let run_id = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock before Unix epoch")?
+        .as_nanos()
+        .to_string();
     let temporary_graph_dir;
     let graph_dir = match args.graph_dir {
         Some(path) => {
+            let path = path.join(&run_id);
             fs::create_dir_all(&path)
-                .with_context(|| format!("create graph directory {}", path.display()))?;
+                .with_context(|| format!("create graph run directory {}", path.display()))?;
             path
         }
         None => {
@@ -87,14 +93,8 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
             temporary_graph_dir.path().to_path_buf()
         }
     };
-    remove_json_fragments(&graph_dir)?;
 
     let executable = env::current_exe().context("locate hawk executable")?;
-    let run_id = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .context("system clock before Unix epoch")?
-        .as_nanos()
-        .to_string();
     let status = Command::new("cargo")
         .current_dir(&workspace_root)
         .arg("check")
@@ -182,22 +182,6 @@ fn default_target_dir(workspace_root: &Path, package: &str, binary: &str) -> Pat
         .and_then(|name| name.to_str())
         .unwrap_or("workspace");
     PathBuf::from("/private/tmp/codex-hawk-target").join(format!("{workspace}-{package}-{binary}"))
-}
-
-fn remove_json_fragments(graph_dir: &Path) -> Result<()> {
-    for entry in fs::read_dir(graph_dir)
-        .with_context(|| format!("read graph directory {}", graph_dir.display()))?
-    {
-        let path = entry?.path();
-        if path
-            .extension()
-            .is_some_and(|extension| extension == "json")
-        {
-            fs::remove_file(&path)
-                .with_context(|| format!("remove stale fragment {}", path.display()))?;
-        }
-    }
-    Ok(())
 }
 
 fn read_fragments(graph_dir: &Path) -> Result<Vec<Fragment>> {
