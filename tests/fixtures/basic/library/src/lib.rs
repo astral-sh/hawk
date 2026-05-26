@@ -100,6 +100,10 @@ pub enum ConstructedEnum {
     Active,
 }
 
+pub union DeadUnion {
+    pub value: u8,
+}
+
 pub fn exercise_constructors() {
     let tuple = ConstructedTuple(1);
     let ConstructedTuple(value) = tuple;

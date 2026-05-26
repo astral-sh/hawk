@@ -49,6 +49,7 @@ pub enum DefinitionKind {
     Trait,
     Struct,
     Enum,
+    Union,
     TypeAlias,
     Constant,
     Static,

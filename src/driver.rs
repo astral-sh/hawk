@@ -293,6 +293,7 @@ fn diagnostic_kind(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Option<DefinitionKind
         DefKind::Trait => Some(DefinitionKind::Trait),
         DefKind::Struct => Some(DefinitionKind::Struct),
         DefKind::Enum => Some(DefinitionKind::Enum),
+        DefKind::Union => Some(DefinitionKind::Union),
         DefKind::TyAlias => Some(DefinitionKind::TypeAlias),
         DefKind::Const => Some(DefinitionKind::Constant),
         DefKind::Static { .. } => Some(DefinitionKind::Static),
