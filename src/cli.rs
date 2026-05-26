@@ -4,7 +4,6 @@ use std::fs::{self, File};
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use cargo_metadata::{MetadataCommand, TargetKind};
@@ -74,18 +73,16 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
     fs::create_dir_all(&target_dir)
         .with_context(|| format!("create target directory {}", target_dir.display()))?;
 
-    let run_id = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .context("system clock before Unix epoch")?
-        .as_nanos()
-        .to_string();
     let temporary_graph_dir;
     let graph_dir = match args.graph_dir {
         Some(path) => {
-            let path = path.join(&run_id);
             fs::create_dir_all(&path)
-                .with_context(|| format!("create graph run directory {}", path.display()))?;
-            path
+                .with_context(|| format!("create graph directory {}", path.display()))?;
+            tempfile::Builder::new()
+                .prefix("run-")
+                .tempdir_in(&path)
+                .with_context(|| format!("create graph run directory {}", path.display()))?
+                .keep()
         }
         None => {
             temporary_graph_dir =
@@ -93,6 +90,11 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
             temporary_graph_dir.path().to_path_buf()
         }
     };
+    let run_id = graph_dir
+        .file_name()
+        .unwrap_or(graph_dir.as_os_str())
+        .to_string_lossy()
+        .into_owned();
 
     let executable = env::current_exe().context("locate hawk executable")?;
     let status = Command::new("cargo")
