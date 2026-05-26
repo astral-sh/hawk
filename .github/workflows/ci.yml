@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref_name }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  check-fmt:
+    uses: ./.github/workflows/check-fmt.yml
+
+  check-lint:
+    uses: ./.github/workflows/check-lint.yml
+
+  test:
+    uses: ./.github/workflows/test.yml
+
+  check-zizmor:
+    uses: ./.github/workflows/check-zizmor.yml
+    permissions:
+      contents: read
+      security-events: write
