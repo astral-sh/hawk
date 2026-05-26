@@ -11,7 +11,7 @@ use anyhow::{Context, Result, bail};
 use cargo_metadata::{MetadataCommand, TargetKind};
 use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser, ValueEnum};
 
-use crate::config::{AnalysisTarget, Config, ConfigDiagnostic, ConfigDiagnosticKind};
+use crate::config::{AnalysisTarget, Config, ConfigDiagnostic, ConfigDiagnosticKind, ConfigEntry};
 use crate::graph::{
     DefinitionKind, Finding, FindingKind, FixPlan, FixTarget, Fragment, Span, analyze,
 };
@@ -50,7 +50,7 @@ struct Args {
     #[arg(long)]
     graph_dir: Option<PathBuf>,
 
-    /// Path to Hawk lint overrides; defaults to hawk.toml in the workspace root.
+    /// Path to Hawk configuration; defaults to hawk.toml in the workspace root.
     #[arg(long, value_name = "PATH")]
     config: Option<PathBuf>,
 
@@ -288,8 +288,12 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
     let analysis_target = AnalysisTarget::from_rustc(args.target.as_deref())?;
     let excluded: HashSet<String> = args.excluded_crates.iter().cloned().collect();
     if args.fix {
-        let initial_findings =
-            config.apply(&analysis_target, &fragments, analyze(&fragments, &excluded));
+        let retained_roots = config.retained_roots(&analysis_target, &fragments);
+        let initial_findings = config.apply(
+            &analysis_target,
+            &fragments,
+            analyze(&fragments, &excluded, &retained_roots),
+        );
         let fix_plan = FixPlan {
             targets: initial_findings
                 .findings
@@ -319,7 +323,12 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
             fragments = read_fragments(&graph_dir)?;
         }
     }
-    let findings = config.apply(&analysis_target, &fragments, analyze(&fragments, &excluded));
+    let retained_roots = config.retained_roots(&analysis_target, &fragments);
+    let findings = config.apply(
+        &analysis_target,
+        &fragments,
+        analyze(&fragments, &excluded, &retained_roots),
+    );
     let mut diagnostics = String::new();
     let mut diagnostic_count = 0;
     let mut has_denied_diagnostic = false;
@@ -596,9 +605,9 @@ fn write_config_diagnostic(
     level: LintLevel,
 ) -> std::fmt::Result {
     let entry = diagnostic.entry;
-    let item = format!("{}::{}", entry.crate_name, entry.item);
-    let (message, marker, help) = match diagnostic.kind {
-        ConfigDiagnosticKind::UnknownItem => (
+    let item = format!("{}::{}", entry.crate_name(), entry.item());
+    let (message, marker, help) = match (diagnostic.kind, entry) {
+        (ConfigDiagnosticKind::UnknownItem, ConfigEntry::Override(entry)) => (
             format!(
                 "override for `{}` references unknown item `{item}`",
                 entry.lint.code()
@@ -606,7 +615,12 @@ fn write_config_diagnostic(
             "no matching item was found",
             "remove this override or update its `crate` and `item` selectors",
         ),
-        ConfigDiagnosticKind::UnfulfilledExpectation => (
+        (ConfigDiagnosticKind::UnknownItem, ConfigEntry::Root(_)) => (
+            format!("configured root references unknown item `{item}`"),
+            "no matching item was found",
+            "remove this root or update its `crate` and `item` selectors",
+        ),
+        (ConfigDiagnosticKind::UnfulfilledExpectation, ConfigEntry::Override(entry)) => (
             format!(
                 "expected `{}` for `{item}`, but no finding was produced",
                 entry.lint.code()
@@ -614,6 +628,9 @@ fn write_config_diagnostic(
             "unfulfilled expectation",
             "remove this expectation or update its `lint` selector",
         ),
+        (ConfigDiagnosticKind::UnfulfilledExpectation, ConfigEntry::Root(_)) => {
+            unreachable!("roots cannot produce expectation diagnostics")
+        }
     };
     write_diagnostic_header(
         output,
@@ -630,9 +647,9 @@ fn write_config_diagnostic(
     write_annotated_location(
         output,
         display_path,
-        entry.span.line,
-        entry.span.column,
-        config.source_line(entry.span.line),
+        entry.span().line,
+        entry.span().column,
+        config.source_line(entry.span().line),
         marker,
         level.style(),
     )?;
@@ -641,7 +658,7 @@ fn write_config_diagnostic(
         "  {} {}: reason: {}",
         styled("=", SEPARATOR),
         styled("note", HELP),
-        entry.reason
+        entry.reason()
     )?;
     writeln!(
         output,

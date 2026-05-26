@@ -246,12 +246,12 @@ fn diagnoses_public_surface_of_a_binary_product() {
         | ^^^ public declaration
         = help: consider restricting this declaration's visibility or removing it
 
-    warning[hawk::dead_public]: `dead_code_allowed_helper` is public but is not reachable from binary `app`
+    warning[hawk::unnecessary_public]: `dead_code_allowed_helper` is public but all reachable uses are within `library`; it can be `pub(crate)`
       --> library/src/lib.rs:201:1
         |
     201 | pub fn dead_code_allowed_helper() {}
         | ^^^ public declaration
-        = help: consider restricting this declaration's visibility or removing it
+        = help: change this declaration to `pub(crate)`
 
     warning[hawk::dead_public]: public re-export `dead_export_path` has no target reachable from binary `app`
       --> library/src/lib.rs:236:9

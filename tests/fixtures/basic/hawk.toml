@@ -1,9 +1,9 @@
-[[override]]
-lint = "hawk::dead_public"
+[[root]]
 crate = "library"
 item = "dead_code_allowed_entry"
-level = "allow"
-reason = "allow suppresses only this finding, not referenced helpers"
+# Retained roots seed reachability without requiring helpers to remain public.
+# This item represents an entry point invoked outside Hawk's product graph.
+reason = "invoked by an unmodeled external entry point"
 
 [[override]]
 lint = "hawk::dead_public"

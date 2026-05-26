@@ -124,6 +124,7 @@ struct DefinitionIdentity<'a> {
 pub fn analyze<'a>(
     fragments: &'a [Fragment],
     excluded_crates: &HashSet<String>,
+    retained_roots: &HashSet<String>,
 ) -> Vec<Finding<'a>> {
     let definitions: HashMap<&str, &Definition> = fragments
         .iter()
@@ -145,13 +146,20 @@ pub fn analyze<'a>(
             fragments
                 .iter()
                 .flat_map(|fragment| fragment.conservative_roots.iter().map(String::as_str)),
-        );
+        )
+        .chain(retained_roots.iter().map(String::as_str));
     let production = reachable(production_roots, &adjacency);
 
     let mut explicitly_required: HashSet<&str> = fragments
         .iter()
         .flat_map(|fragment| fragment.required_public_roots.iter().map(String::as_str))
         .collect();
+    explicitly_required.extend(retained_roots.iter().filter_map(|root| {
+        definitions
+            .get(root.as_str())
+            .filter(|definition| definition.public_api)
+            .map(|definition| definition.id.as_str())
+    }));
     let no_explicitly_required = HashSet::new();
     let externally_required_visibility =
         required_public_visibility(&definitions, &edges, &equivalents, &no_explicitly_required);
@@ -382,8 +390,18 @@ fn reachable<'a>(
 
 #[cfg(test)]
 mod tests {
-    use super::{Definition, DefinitionKind, Edge, EdgeKind, FindingKind, Fragment, analyze};
+    use super::{
+        Definition, DefinitionKind, Edge, EdgeKind, Finding, FindingKind, Fragment,
+        analyze as analyze_with_roots,
+    };
     use std::collections::HashSet;
+
+    fn analyze<'a>(
+        fragments: &'a [Fragment],
+        excluded_crates: &HashSet<String>,
+    ) -> Vec<Finding<'a>> {
+        analyze_with_roots(fragments, excluded_crates, &HashSet::new())
+    }
 
     fn node(id: &str, crate_name: &str, public_api: bool) -> Definition {
         Definition {
@@ -467,6 +485,25 @@ mod tests {
         });
 
         let findings = analyze(&input, &HashSet::new());
+
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, FindingKind::UnnecessaryPublic);
+        assert_eq!(findings[0].definition.id, "helper");
+    }
+
+    #[test]
+    fn retained_public_root_keeps_internal_helper_live_without_requiring_its_visibility() {
+        let input = fragments(
+            vec![node("entry", "lib", true), node("helper", "lib", true)],
+            vec![Edge {
+                from: "entry".into(),
+                to: "helper".into(),
+                kind: EdgeKind::Body,
+            }],
+        );
+        let retained_roots = HashSet::from(["entry".to_owned()]);
+
+        let findings = analyze_with_roots(&input, &HashSet::new(), &retained_roots);
 
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].kind, FindingKind::UnnecessaryPublic);
