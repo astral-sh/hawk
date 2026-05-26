@@ -199,9 +199,8 @@ fn write_diagnostic(
     binary: &str,
     workspace_root: &Path,
 ) -> std::fmt::Result {
-    let (code, message, help) = match finding.kind {
+    let (message, help) = match finding.kind {
         FindingKind::DeadPublic => (
-            finding.kind.code(),
             format!(
                 "`{}` is public but is not reachable from binary `{binary}`",
                 finding.definition.name
@@ -209,7 +208,6 @@ fn write_diagnostic(
             "consider restricting this declaration's visibility or removing it",
         ),
         FindingKind::UnnecessaryPublic => (
-            finding.kind.code(),
             format!(
                 "`{}` is public but all reachable uses are within `{}`; it can be `pub(crate)`",
                 finding.definition.name, finding.definition.crate_name
@@ -217,52 +215,18 @@ fn write_diagnostic(
             "change this declaration to `pub(crate)`",
         ),
     };
-    writeln!(
-        output,
-        "{}: {}",
-        styled(format_args!("warning[{code}]"), WARNING),
-        styled(message, EMPHASIS)
-    )?;
+    write_warning_header(output, finding.kind.code(), message)?;
 
     if let Some(span) = &finding.definition.span {
-        writeln!(
+        let source_line = source_line(workspace_root, span);
+        let width = write_annotated_location(
             output,
-            "  {} {}:{}:{}",
-            styled("-->", LOCATION),
-            span.file,
+            &span.file,
             span.line,
-            span.column
+            span.column,
+            source_line.as_deref(),
+            "public declaration",
         )?;
-        let width = span.line.to_string().len();
-        if let Some(source_line) = source_line(workspace_root, span) {
-            writeln!(
-                output,
-                "{empty:>width$} {}",
-                styled("|", SEPARATOR),
-                empty = "",
-                width = width
-            )?;
-            writeln!(
-                output,
-                "{} {} {source_line}",
-                styled(format!("{:>width$}", span.line), LOCATION),
-                styled("|", SEPARATOR)
-            )?;
-            writeln!(
-                output,
-                "{empty:>width$} {} {}",
-                styled("|", SEPARATOR),
-                styled(
-                    format_args!(
-                        "{}^^^ public declaration",
-                        marker_indent(&source_line, span.column)
-                    ),
-                    WARNING
-                ),
-                empty = "",
-                width = width
-            )?;
-        }
         writeln!(
             output,
             "{empty:>width$} {} {}: {help}",
@@ -317,56 +281,21 @@ fn write_config_diagnostic(
             "remove this expectation or update its `lint` selector",
         ),
     };
-    writeln!(
-        output,
-        "{}: {}",
-        styled(format_args!("warning[{code}]"), WARNING),
-        styled(message, EMPHASIS)
-    )?;
+    write_warning_header(output, code, message)?;
 
     let config_path = config.path().expect("diagnostic requires a loaded config");
     let display_path = config_path
         .strip_prefix(workspace_root)
         .unwrap_or(config_path)
         .display();
-    writeln!(
+    write_annotated_location(
         output,
-        "  {} {}:{}:{}",
-        styled("-->", LOCATION),
         display_path,
         entry.span.line,
-        entry.span.column
+        entry.span.column,
+        config.source_line(entry.span.line),
+        marker,
     )?;
-    if let Some(source_line) = config.source_line(entry.span.line) {
-        let width = entry.span.line.to_string().len();
-        writeln!(
-            output,
-            "{empty:>width$} {}",
-            styled("|", SEPARATOR),
-            empty = "",
-            width = width
-        )?;
-        writeln!(
-            output,
-            "{} {} {source_line}",
-            styled(format!("{:>width$}", entry.span.line), LOCATION),
-            styled("|", SEPARATOR)
-        )?;
-        writeln!(
-            output,
-            "{empty:>width$} {} {}",
-            styled("|", SEPARATOR),
-            styled(
-                format_args!(
-                    "{}^^^ {marker}",
-                    marker_indent(source_line, entry.span.column)
-                ),
-                WARNING
-            ),
-            empty = "",
-            width = width
-        )?;
-    }
     writeln!(
         output,
         "  {} {}: reason: {}",
@@ -381,6 +310,62 @@ fn write_config_diagnostic(
         styled("help", HELP)
     )?;
     writeln!(output)
+}
+
+fn write_warning_header(
+    output: &mut String,
+    code: &str,
+    message: impl Display,
+) -> std::fmt::Result {
+    writeln!(
+        output,
+        "{}: {}",
+        styled(format_args!("warning[{code}]"), WARNING),
+        styled(message, EMPHASIS)
+    )
+}
+
+fn write_annotated_location(
+    output: &mut String,
+    file: impl Display,
+    line: usize,
+    column: usize,
+    source_line: Option<&str>,
+    marker: &str,
+) -> Result<usize, std::fmt::Error> {
+    writeln!(
+        output,
+        "  {} {file}:{line}:{column}",
+        styled("-->", LOCATION)
+    )?;
+    let width = line.to_string().len();
+    if let Some(source_line) = source_line {
+        writeln!(
+            output,
+            "{empty:>width$} {}",
+            styled("|", SEPARATOR),
+            empty = "",
+            width = width
+        )?;
+        writeln!(
+            output,
+            "{} {} {source_line}",
+            styled(format!("{line:>width$}"), LOCATION),
+            styled("|", SEPARATOR)
+        )?;
+        writeln!(
+            output,
+            "{empty:>width$} {} {}",
+            styled("|", SEPARATOR),
+            styled(
+                format_args!("{}^^^ {marker}", marker_indent(source_line, column)),
+                WARNING
+            ),
+            empty = "",
+            width = width
+        )?;
+    }
+    Ok(width)
 }
 
 fn styled(content: impl Display, style: Style) -> impl Display {
