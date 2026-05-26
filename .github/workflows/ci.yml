@@ -15,12 +15,18 @@ concurrency:
 jobs:
   check-fmt:
     uses: ./.github/workflows/check-fmt.yml
+    permissions:
+      contents: read
 
   check-lint:
     uses: ./.github/workflows/check-lint.yml
+    permissions:
+      contents: read
 
   test:
     uses: ./.github/workflows/test.yml
+    permissions:
+      contents: read
 
   check-zizmor:
     uses: ./.github/workflows/check-zizmor.yml
