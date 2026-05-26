@@ -10,11 +10,11 @@ The MVP analyzes:
 
 - one binary target;
 - `--all-features`;
-- the host target;
+- one selected compilation target, defaulting to the host target;
 - production reachability only.
 
-Alternate products, platform configurations, and test-only reachability are
-future analysis modes rather than implicit roots.
+Alternate products and test-only reachability are future analysis modes rather
+than implicit roots.
 
 ## Diagnostics
 

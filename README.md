@@ -23,8 +23,10 @@ cargo build
 ```
 
 The selected binary is analyzed under `--all-features --locked` on the host
-target. All workspace library crates compiled for that binary are considered
-internal unless exempted:
+target by default. Pass `--target TRIPLE` to analyze another compilation
+target; Hawk expects any required cross-compilation environment to be prepared
+by the caller. All workspace library crates compiled for that binary are
+considered internal unless exempted:
 
 ```sh
 ./target/debug/cargo-hawk \

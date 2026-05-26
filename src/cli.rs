@@ -32,6 +32,10 @@ struct Args {
     #[arg(long)]
     bin: String,
 
+    /// Compilation target triple to analyze; defaults to the host target.
+    #[arg(long, value_name = "TRIPLE")]
+    target: Option<String>,
+
     /// Workspace library crate whose API is an external boundary.
     #[arg(long = "exclude-crate")]
     excluded_crates: Vec<String>,
@@ -132,7 +136,8 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
         .into_owned();
 
     let executable = env::current_exe().context("locate hawk executable")?;
-    let status = Command::new("cargo")
+    let mut cargo = Command::new("cargo");
+    cargo
         .current_dir(&workspace_root)
         .arg("check")
         .arg("--manifest-path")
@@ -144,7 +149,11 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
         .arg("--all-features")
         .arg("--locked")
         .arg("--target-dir")
-        .arg(&target_dir)
+        .arg(&target_dir);
+    if let Some(target) = &args.target {
+        cargo.arg("--target").arg(target);
+    }
+    let status = cargo
         .env("RUSTC_WORKSPACE_WRAPPER", executable)
         .env("HAWK_OUTPUT_DIR", &graph_dir)
         .env("HAWK_ROOT_CRATE", &crate_name)
@@ -173,12 +182,17 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
         write_config_diagnostic(&mut diagnostics, diagnostic, &config, &workspace_root)
             .expect("formatting diagnostics into a string cannot fail");
     }
+    let compilation_target = args.target.as_deref().map_or_else(
+        || "the host target".to_owned(),
+        |target| format!("target `{target}`"),
+    );
     writeln!(
         diagnostics,
-        "hawk: {} finding(s) for `{} --bin {} --all-features` on the host target",
+        "hawk: {} finding(s) for `{} --bin {} --all-features` on {}",
         findings.findings.len() + findings.config_diagnostics.len(),
         args.package,
-        args.bin
+        args.bin,
+        compilation_target
     )
     .expect("formatting diagnostics into a string cannot fail");
     anstream::AutoStream::new(std::io::stdout(), args.color.into())

@@ -2,6 +2,16 @@ use std::process::Command;
 
 #[test]
 fn diagnoses_public_surface_of_a_binary_product() {
+    let rustc_version = Command::new("rustc")
+        .arg("-vV")
+        .output()
+        .expect("read Rust compiler version");
+    assert!(rustc_version.status.success());
+    let rustc_version = String::from_utf8(rustc_version.stdout).expect("Rust compiler version");
+    let host_target = rustc_version
+        .lines()
+        .find_map(|line| line.strip_prefix("host: "))
+        .expect("Rust compiler host target");
     let manifest =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/basic/Cargo.toml");
     let target_dir = tempfile::tempdir().expect("temporary target directory");
@@ -15,6 +25,8 @@ fn diagnoses_public_surface_of_a_binary_product() {
         .arg("app")
         .arg("--bin")
         .arg("app")
+        .arg("--target")
+        .arg(host_target)
         .arg("--target-dir")
         .arg(target_dir.path())
         .arg("--graph-dir")
@@ -29,8 +41,14 @@ fn diagnoses_public_surface_of_a_binary_product() {
     );
     assert!(unrelated_json.exists());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let stdout = anstream::adapter::strip_str(&stdout);
-    insta::assert_snapshot!(stdout, @r###"
+    let stdout = anstream::adapter::strip_str(&stdout).to_string();
+    let summary = format!(
+        "hawk: 16 finding(s) for `app --bin app --all-features` on target `{host_target}`\n"
+    );
+    let diagnostics = stdout
+        .strip_suffix(&summary)
+        .expect("target-specific findings summary");
+    insta::assert_snapshot!(diagnostics, @r###"
     warning[hawk::unnecessary_public]: `internal_helper` is public but all reachable uses are within `library`; it can be `pub(crate)`
       --> library/src/lib.rs:5:1
       |
@@ -145,6 +163,5 @@ fn diagnoses_public_surface_of_a_binary_product() {
       = note: reason: covered by unfulfilled expectation diagnostic
       = help: remove this expectation or update its `lint` selector
 
-    hawk: 16 finding(s) for `app --bin app --all-features` on the host target
     "###);
 }
