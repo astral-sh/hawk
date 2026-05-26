@@ -42,6 +42,39 @@ retain the compiler fragments in a run-specific subdirectory for investigation.
 Diagnostics are colored automatically in a terminal; use `--color=always` or
 `--color=never` to override terminal detection.
 
+## Cross-compilation
+
+Hawk forwards `--target` to Cargo, but it does not install a target SDK or
+configure a cross linker. For example, a macOS host can analyze a Windows
+MSVC product using [`cargo-xwin`](https://github.com/rust-cross/cargo-xwin).
+From the Hawk checkout, prepare its pinned Rust toolchain once:
+
+```sh
+rustup target add x86_64-pc-windows-msvc
+rustup component add llvm-tools-preview
+cargo install cargo-xwin --locked
+```
+
+Then export the linker and Windows SDK configuration for the child Cargo
+process before running Hawk:
+
+```sh
+target=x86_64-pc-windows-msvc
+eval "$(cargo xwin env --quiet \
+  --target "$target" \
+  --manifest-path /path/to/workspace/Cargo.toml)"
+
+./target/debug/cargo-hawk \
+  --manifest-path /path/to/workspace/Cargo.toml \
+  --package app \
+  --bin app \
+  --target "$target"
+```
+
+Platform-specific expectations can be scoped in `hawk.toml`, for example with
+`target = "cfg(windows)"` or `target = "cfg(not(windows))"`, so a run on one
+platform does not validate an item that is only compiled on another.
+
 ## Configuration
 
 Add `hawk.toml` at the workspace root to suppress an intentional finding or
