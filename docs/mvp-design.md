@@ -132,9 +132,12 @@ after Hawk merges graph fragments. Hawk builds fix plans from emitted
 findings, running package-scoped `cargo fix --lib` for production findings and
 package-scoped `cargo fix --lib --tests` for test-only findings. The latter
 compiles each owning library as a primary fix target while retaining test
-configuration, so test-support dependencies as well as `cfg(test)` items can
-be edited without applying unrelated workspace fixes. Its compiler wrapper
-matches equivalent declaration identities and emits rustc `MachineApplicable`
+configuration, so production declarations in test-support dependencies can be
+edited even when the package disables its library test harness. Declarations
+compiled only under `cfg(test)` are not candidates in the current model. Fix
+compilations cap ordinary compiler lints to prevent Cargo from consuming
+unrelated rustc suggestions; Hawk's compiler wrapper matches equivalent
+declaration identities and emits the planned rustc `MachineApplicable`
 suggestions. Hawk finishes with another instrumented check of the selected
 binary and workspace tests so visibility changes used only by tests are
 validated before completion.

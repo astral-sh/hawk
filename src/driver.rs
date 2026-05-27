@@ -48,6 +48,10 @@ pub fn run_wrapper(mut args: Vec<String>) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    if fix_plan.is_some() {
+        args.push("--cap-lints".to_owned());
+        args.push("allow".to_owned());
+    }
     let mut callbacks = HawkCallbacks {
         output_dir,
         root_crate,

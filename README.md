@@ -98,12 +98,15 @@ safety checks; pass `--allow-dirty`, `--allow-staged`, or `--allow-no-vcs` with
 Unlike `cargo clippy --fix`, Hawk applies fixes only to library packages in the
 selected production product. Production findings are fixed through library
 targets, while declarations needed only by tests are fixed through their
-owning packages' library and test targets. This allows `cfg(test)` declarations
-and test-support dependencies to be edited without applying unrelated fixes
-throughout the workspace. Hawk then rechecks the selected binary and workspace
-tests. Enum variants are report-only because they have no independent
-visibility modifier; a variant finding disappears after fixing its containing
-enum only when the entire enum no longer needs to be public.
+owning packages' library and test targets. This covers production declarations
+in test-support packages even when their library test harness is disabled.
+Declarations compiled only under `cfg(test)` are not diagnostic candidates
+yet. Hawk caps ordinary compiler lints during the fix phase so Cargo applies
+Hawk's planned suggestions rather than unrelated compiler fixes, then rechecks
+the selected binary and workspace tests. Enum variants are report-only because
+they have no independent visibility modifier; a variant finding disappears
+after fixing its containing enum only when the entire enum no longer needs to
+be public.
 
 ## Cross-compilation
 

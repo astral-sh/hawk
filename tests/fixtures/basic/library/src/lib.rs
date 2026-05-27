@@ -287,3 +287,6 @@ pub fn integration_test_support() {
 }
 
 pub fn test_only_helper() {}
+
+// Keep an unrelated machine-applicable rustc suggestion in the fix fixture.
+use std::fmt::Debug;

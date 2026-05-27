@@ -394,4 +394,5 @@ fn applies_visibility_fixes_through_cargo_fix() {
     assert!(library.contains("pub enum ProductEnum {"));
     assert!(library.contains("pub fn integration_test_support() {"));
     assert!(library.contains("pub(crate) fn test_only_helper() {}"));
+    assert!(library.contains("use std::fmt::Debug;"));
 }
