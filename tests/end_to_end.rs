@@ -476,3 +476,34 @@ fn applies_visibility_fixes_through_cargo_fix() {
     assert!(unit_support.contains("pub(crate) fn test_entry() {"));
     assert!(unit_support.contains("pub(crate) fn test_only_helper() {}"));
 }
+
+#[test]
+fn does_not_fix_one_alias_from_a_grouped_public_reexport() {
+    let source_workspace =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/grouped_reexport_fixes");
+    let workspace = tempfile::tempdir().expect("temporary fixture workspace");
+    copy_directory(&source_workspace, workspace.path());
+    let target_dir = tempfile::tempdir().expect("temporary target directory");
+    let output = Command::new(env!("CARGO_BIN_EXE_cargo-hawk"))
+        .arg("--manifest-path")
+        .arg(workspace.path().join("Cargo.toml"))
+        .arg("--fix")
+        .arg("--allow-no-vcs")
+        .arg("--target-dir")
+        .arg(target_dir.path())
+        .arg("--color=never")
+        .output()
+        .expect("run cargo-hawk with fixes");
+
+    assert!(
+        output.status.success(),
+        "cargo-hawk fix failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("public re-export `Narrow`"));
+
+    let library =
+        fs::read_to_string(workspace.path().join("library/src/lib.rs")).expect("read fixed source");
+    assert!(library.contains("pub use exported::{Kept, Narrow};"));
+}
