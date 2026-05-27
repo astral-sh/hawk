@@ -8,6 +8,9 @@ exceeds those consumers' needs.
 
 This repository is at the prototype stage.
 
+See [Architecture](docs/architecture.md) for how Hawk's workspace-level
+analysis relates to Clippy's compiler-wrapper and lint-pass architecture.
+
 ## Usage
 
 `hawk` is pinned to Rust 1.95.0 and uses `rustc_private`; the repository
