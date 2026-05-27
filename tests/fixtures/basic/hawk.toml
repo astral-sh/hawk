@@ -1,3 +1,8 @@
+[[production]]
+package = "app"
+bin = "app"
+reason = "binary product under analysis"
+
 [[override]]
 lint = "hawk::dead_public"
 crate = "library"

@@ -26,14 +26,6 @@ struct Args {
     #[arg(long, default_value = "Cargo.toml")]
     manifest_path: PathBuf,
 
-    /// Package containing the selected binary product.
-    #[arg(short = 'p', long)]
-    package: String,
-
-    /// Binary target that defines production reachability.
-    #[arg(long)]
-    bin: String,
-
     /// Compilation target triple to analyze; defaults to the host target.
     #[arg(long, value_name = "TRIPLE")]
     target: Option<String>,
@@ -227,16 +219,12 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
         .no_deps()
         .exec()
         .with_context(|| format!("read Cargo metadata from {}", args.manifest_path.display()))?;
-    validate_product(&metadata, &args.package, &args.bin)?;
     let candidate_crates = workspace_library_crates(&metadata);
 
     let workspace_root = metadata.workspace_root.clone().into_std_path_buf();
     let config = Config::load(&workspace_root, args.config.as_deref())?;
     let analysis_target = AnalysisTarget::from_rustc(args.target.as_deref())?;
-    let mut production_products = vec![ProductionSelection {
-        package: &args.package,
-        binary: &args.bin,
-    }];
+    let mut production_products: Vec<ProductionSelection<'_>> = Vec::new();
     for consumer in config.production_consumers(&analysis_target) {
         let config_path = config
             .path()
@@ -260,6 +248,16 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
             });
         }
     }
+    if production_products.is_empty() {
+        let config_path = config
+            .path()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| workspace_root.join("hawk.toml"));
+        bail!(
+            "no applicable production binaries configured in {}; add a `[[production]]` entry",
+            config_path.display()
+        );
+    }
     let manifest_path = args
         .manifest_path
         .canonicalize()
@@ -267,7 +265,7 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
     let target_dir = args
         .target_dir
         .clone()
-        .unwrap_or_else(|| default_target_dir(&workspace_root, &args.package, &args.bin));
+        .unwrap_or_else(|| default_target_dir(&workspace_root));
     fs::create_dir_all(&target_dir)
         .with_context(|| format!("create target directory {}", target_dir.display()))?;
 
@@ -334,8 +332,7 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
         .any(|fragment| fragment.is_product_root)
     {
         bail!(
-            "no instrumented fragment was emitted for binary `{}`; rerun with a fresh --target-dir",
-            args.bin
+            "no instrumented fragment was emitted for a configured production binary; rerun with a fresh --target-dir"
         );
     }
     let excluded: HashSet<String> = args.excluded_crates.iter().cloned().collect();
@@ -436,9 +433,9 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
     let mut diagnostic_count = 0;
     let mut has_denied_diagnostic = false;
     let production_description = if production_products.len() == 1 {
-        format!("binary `{}`", args.bin)
+        format!("binary `{}`", production_products[0].binary)
     } else {
-        "the selected production binaries".to_owned()
+        "the configured production binaries".to_owned()
     };
     for finding in &findings.findings {
         let level = lint_levels.level(finding.kind.code());
@@ -474,18 +471,15 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
         || "the host target".to_owned(),
         |target| format!("target `{target}`"),
     );
-    let configured_production_count = production_products.len() - 1;
-    let production_summary = if configured_production_count == 0 {
-        format!("`{} --bin {} --all-features`", args.package, args.bin)
-    } else if configured_production_count == 1 {
+    let production_summary = if production_products.len() == 1 {
         format!(
-            "`{} --bin {} --all-features` and 1 configured production binary",
-            args.package, args.bin
+            "`{} --bin {} --all-features`",
+            production_products[0].package, production_products[0].binary
         )
     } else {
         format!(
-            "`{} --bin {} --all-features` and {configured_production_count} configured production binaries",
-            args.package, args.bin
+            "{} configured production binaries",
+            production_products.len()
         )
     };
     writeln!(
@@ -596,12 +590,11 @@ impl InstrumentedCargo<'_> {
             CargoSelection::Production(_) | CargoSelection::FixProduction(_) => "production",
         };
         let root_crate = match selection {
-            CargoSelection::Production(product) => product.binary,
+            CargoSelection::Production(product) => product.binary.replace('-', "_"),
             CargoSelection::Tests
             | CargoSelection::FixProduction(_)
-            | CargoSelection::FixTests(_) => &self.args.bin,
-        }
-        .replace('-', "_");
+            | CargoSelection::FixTests(_) => String::new(),
+        };
         command
             .env("RUSTC_WORKSPACE_WRAPPER", self.executable)
             .env("HAWK_OUTPUT_DIR", graph_dir)
@@ -1068,12 +1061,12 @@ fn validate_product(
     Ok(())
 }
 
-fn default_target_dir(workspace_root: &Path, package: &str, binary: &str) -> PathBuf {
+fn default_target_dir(workspace_root: &Path) -> PathBuf {
     let workspace = workspace_root
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("workspace");
-    PathBuf::from("/private/tmp/codex-hawk-target").join(format!("{workspace}-{package}-{binary}"))
+    PathBuf::from("/private/tmp/codex-hawk-target").join(workspace)
 }
 
 fn read_fragments(graph_dir: &Path) -> Result<Vec<Fragment>> {
@@ -1193,10 +1186,6 @@ mod tests {
         let matches = Args::command()
             .try_get_matches_from([
                 "cargo-hawk",
-                "--package",
-                "app",
-                "--bin",
-                "app",
                 "-Dwarnings",
                 "--warn",
                 "hawk::unnecessary_public",

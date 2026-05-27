@@ -1,4 +1,9 @@
 [[production]]
+package = "app"
+bin = "app"
+reason = "primary binary shipped as part of this product"
+
+[[production]]
 package = "secondary"
 bin = "secondary"
 reason = "second binary shipped as part of this product"

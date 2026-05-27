@@ -1,10 +1,10 @@
 # hawk
 
 `hawk` is an experimental Cargo lint tool for binary products built from
-internal Rust workspace crates. It analyzes public library items in a selected
-binary product against its production binaries and workspace test consumers,
-reporting items that are unused or whose visibility exceeds those consumers'
-needs.
+internal Rust workspace crates. It analyzes public library items in a
+configured binary product against its production binaries and workspace test
+consumers, reporting items that are unused or whose visibility exceeds those
+consumers' needs.
 
 This repository is at the prototype stage.
 
@@ -15,16 +15,22 @@ toolchain configuration installs `rustc-dev` when necessary.
 The build embeds the selected compiler sysroot runtime path so the resulting
 executable can run directly as Cargo's compiler wrapper.
 
+Add each binary shipped as part of the product to `hawk.toml`:
+
+```toml
+[[production]]
+package = "app"
+bin = "app"
+reason = "shipped application binary"
+```
+
 ```sh
 cargo build
 ./target/debug/cargo-hawk \
-  --manifest-path /path/to/workspace/Cargo.toml \
-  --package app \
-  --bin app
+  --manifest-path /path/to/workspace/Cargo.toml
 ```
 
-The selected binary, any additional production binaries configured in
-`hawk.toml`, and workspace test targets are analyzed under
+Configured production binaries and workspace test targets are analyzed under
 `--all-features --locked` on the host target by default. Pass `--target TRIPLE`
 to analyze another compilation target; Hawk expects any required
 cross-compilation environment to be prepared by the caller. Diagnostics apply
@@ -35,8 +41,6 @@ considered internal unless exempted:
 ```sh
 ./target/debug/cargo-hawk \
   --manifest-path /path/to/workspace/Cargo.toml \
-  --package app \
-  --bin app \
   --exclude-crate supported_library
 ```
 
@@ -53,8 +57,6 @@ the `warnings` group:
 ```sh
 ./target/debug/cargo-hawk \
   --manifest-path /path/to/workspace/Cargo.toml \
-  --package app \
-  --bin app \
   -D warnings
 ```
 
@@ -65,8 +67,6 @@ while introducing one incrementally:
 ```sh
 ./target/debug/cargo-hawk \
   --manifest-path /path/to/workspace/Cargo.toml \
-  --package app \
-  --bin app \
   -D warnings \
   -W hawk::unnecessary_public
 ```
@@ -85,8 +85,6 @@ Pass `--fix` to apply visibility reductions through Cargo's `fix` machinery:
 ```sh
 ./target/debug/cargo-hawk \
   --manifest-path /path/to/workspace/Cargo.toml \
-  --package app \
-  --bin app \
   --fix
 ```
 
@@ -97,14 +95,14 @@ safety checks; pass `--allow-dirty`, `--allow-staged`, or `--allow-no-vcs` with
 `--fix` when the corresponding Cargo override is appropriate.
 
 Unlike `cargo clippy --fix`, Hawk applies fixes only to workspace library
-packages in the selected production or test surface. Production findings are
+packages in the configured production or test surface. Production findings are
 fixed through library targets, while declarations needed only by tests or
 compiled only for tests are fixed through their owning packages' library and
 test targets. This covers dev-dependency support libraries even when their
 library test harness is disabled, as well as declarations enabled under
 `cfg(test)`. Hawk caps ordinary compiler lints during the fix phase so Cargo
 applies Hawk's planned suggestions rather than unrelated compiler fixes, then
-rechecks the selected binary and workspace tests. Enum variants are
+rechecks all configured production binaries and workspace tests. Enum variants are
 report-only because they have no independent visibility modifier; a variant
 finding disappears after fixing its containing enum only when the entire enum
 no longer needs to be public.
@@ -133,8 +131,6 @@ eval "$(cargo xwin env --quiet \
 
 ./target/debug/cargo-hawk \
   --manifest-path /path/to/workspace/Cargo.toml \
-  --package app \
-  --bin app \
   --target "$target"
 ```
 
@@ -190,12 +186,17 @@ export-path provenance is available.
 
 ## Configuration
 
-Add `hawk.toml` at the workspace root when the shipped product has additional
-binary targets in the same workspace. Each applicable `[[production]]` entry
-is built as another production consumer, so an API required by that binary is
-not diagnosed as dead or unnecessarily public:
+Add `hawk.toml` at the workspace root and list every binary shipped as part of
+the product. Each applicable `[[production]]` entry is built as a production
+consumer, so an API required by that binary is not diagnosed as dead or
+unnecessarily public:
 
 ```toml
+[[production]]
+package = "uv"
+bin = "uv"
+reason = "shipped package manager binary"
+
 [[production]]
 package = "uv-dev"
 bin = "uv-dev"
@@ -208,10 +209,11 @@ target = "cfg(windows)"
 reason = "Windows-only binary shipped from this workspace"
 ```
 
-The additional package and binary must be targets of the selected Cargo
-workspace and are analyzed with the same `--all-features` and compilation
-target as the primary binary. An optional `target` accepts the same named
-targets and `cfg(...)` platform expressions as Cargo target dependencies.
+Every package and binary must be a target of the selected Cargo workspace. All
+configured binaries are analyzed with the same `--all-features` and
+compilation target. An optional `target` accepts the same named targets and
+`cfg(...)` platform expressions as Cargo target dependencies. At least one
+production binary must apply to the analyzed target.
 
 The same configuration file can suppress an intentional finding or pin one as
 an expected finding:

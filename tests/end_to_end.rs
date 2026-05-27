@@ -36,10 +36,6 @@ fn diagnoses_public_surface_of_a_binary_product() {
     let output = Command::new(env!("CARGO_BIN_EXE_cargo-hawk"))
         .arg("--manifest-path")
         .arg(manifest)
-        .arg("--package")
-        .arg("app")
-        .arg("--bin")
-        .arg("app")
         .arg("--target")
         .arg(host_target)
         .arg("--target-dir")
@@ -324,17 +320,17 @@ fn diagnoses_public_surface_of_a_binary_product() {
        = help: change this declaration to `pub(crate)`
 
     warning[hawk::unknown_item]: override for `hawk::dead_public` references unknown item `library::removed_api`
-      --> hawk.toml:15:1
+      --> hawk.toml:20:1
        |
-    15 | [[override]]
+    20 | [[override]]
        | ^^^ no matching item was found
       = note: reason: covered by stale selector diagnostic
       = help: remove this override or update its `crate` and `item` selectors
 
     warning[hawk::unfulfilled_expectation]: expected `hawk::dead_public` for `library::PrivateContextOptions`, but no finding was produced
-      --> hawk.toml:22:1
+      --> hawk.toml:27:1
        |
-    22 | [[override]]
+    27 | [[override]]
        | ^^^ unfulfilled expectation
       = note: reason: covered by unfulfilled expectation diagnostic
       = help: remove this expectation or update its `lint` selector
@@ -350,10 +346,6 @@ fn configured_production_binary_contributes_product_reachability() {
     let output = Command::new(env!("CARGO_BIN_EXE_cargo-hawk"))
         .arg("--manifest-path")
         .arg(manifest)
-        .arg("--package")
-        .arg("app")
-        .arg("--bin")
-        .arg("app")
         .arg("--target-dir")
         .arg(target_dir.path())
         .arg("--color=never")
@@ -367,12 +359,34 @@ fn configured_production_binary_contributes_product_reachability() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(!stdout.contains("`secondary_api` is public"));
+    assert!(stdout.contains(
+        "`unused` is public but is not reachable from the configured production binaries"
+    ));
+    assert!(stdout.contains("for 2 configured production binaries and workspace tests"));
+}
+
+#[test]
+fn requires_a_configured_production_binary() {
+    let manifest =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/basic/Cargo.toml");
+    let configuration = tempfile::NamedTempFile::new().expect("temporary empty configuration");
+    let target_dir = tempfile::tempdir().expect("temporary target directory");
+    let output = Command::new(env!("CARGO_BIN_EXE_cargo-hawk"))
+        .arg("--manifest-path")
+        .arg(manifest)
+        .arg("--config")
+        .arg(configuration.path())
+        .arg("--target-dir")
+        .arg(target_dir.path())
+        .arg("--color=never")
+        .output()
+        .expect("run cargo-hawk");
+
+    assert!(!output.status.success());
     assert!(
-        stdout.contains(
-            "`unused` is public but is not reachable from the selected production binaries"
-        )
+        String::from_utf8_lossy(&output.stderr)
+            .contains("no applicable production binaries configured")
     );
-    assert!(stdout.contains("and 1 configured production binary and workspace tests"));
 }
 
 #[test]
@@ -383,10 +397,6 @@ fn ordered_lint_levels_control_severity_and_exit_status() {
     let output = Command::new(env!("CARGO_BIN_EXE_cargo-hawk"))
         .arg("--manifest-path")
         .arg(manifest)
-        .arg("--package")
-        .arg("app")
-        .arg("--bin")
-        .arg("app")
         .arg("-D")
         .arg("warnings")
         .arg("-W")
@@ -421,10 +431,6 @@ fn applies_visibility_fixes_through_cargo_fix() {
     let output = Command::new(env!("CARGO_BIN_EXE_cargo-hawk"))
         .arg("--manifest-path")
         .arg(workspace.path().join("Cargo.toml"))
-        .arg("--package")
-        .arg("app")
-        .arg("--bin")
-        .arg("app")
         .arg("--fix")
         .arg("--allow-no-vcs")
         .arg("--target-dir")

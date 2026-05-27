@@ -2,29 +2,27 @@
 
 ## Product model
 
-The analyzed surface is the workspace library dependencies compiled into an
-explicitly selected Cargo binary target, configured same-workspace production
-binary targets, or workspace test targets. They are considered closed-world
-unless their crates are explicitly excluded. The selected and configured
-production binaries establish production reachability, and workspace tests are
-compiled as a separate consumer graph that can also introduce test-only
-declarations.
+The analyzed surface is the workspace library dependencies compiled into
+configured same-workspace production binary targets or workspace test targets.
+They are considered closed-world unless their crates are explicitly excluded.
+The configured production binaries establish production reachability, and
+workspace tests are compiled as a separate consumer graph that can also
+introduce test-only declarations.
 
 The analysis includes:
 
-- one command-line selected binary target plus zero or more configured
-  same-workspace binary targets;
+- one or more configured same-workspace binary targets;
 - `--all-features`;
 - one selected compilation target, defaulting to the host target;
 - production reachability from those binary targets;
 - test reachability and visibility requirements from workspace test targets.
 
-Binaries are never inferred as roots: a shipped secondary binary must be
-listed explicitly in `hawk.toml`.
+Binaries are never inferred as roots: every shipped binary must be listed
+explicitly in `hawk.toml`.
 
 ## Diagnostics
 
-Selected production binaries seed production reachability but do not
+Configured production binaries seed production reachability but do not
 themselves receive `hawk` diagnostics. Tests can preserve public visibility,
 establish test-only reachability, and introduce diagnostic candidates from
 dev-dependencies or `#[cfg(test)]` source. Compiled workspace library
@@ -99,8 +97,8 @@ positives. Any compiled cross-crate reference prevents a visibility diagnostic
 because rustc privacy-checks dead items as well as production-reachable ones
 and `pub` is the narrowest Rust visibility available for those uses.
 
-An optional workspace-root `hawk.toml` configures supplementary production
-binaries and diagnostic overrides. A `[[production]]` entry names a package
+An optional workspace-root `hawk.toml` configures production binaries and
+diagnostic overrides. A `[[production]]` entry names a package
 and binary target in the selected workspace, optionally scoped to a
 Cargo-style target name or `cfg(...)` platform expression, and its compiled
 references participate in production reachability and required-public
@@ -114,7 +112,7 @@ required-public analysis, and suppressed findings are not eligible for fixes.
 
 ## Implementation direction
 
-`cargo hawk` invokes each selected production binary build and `cargo check
+`cargo hawk` invokes each configured production binary build and `cargo check
 --workspace --tests` with `RUSTC_WORKSPACE_WRAPPER=hawk-driver`. The compiler
 driver is pinned to the workspace Rust toolchain and emits resolved graph
 fragments for each compiled workspace crate. The frontend retains production
@@ -148,5 +146,5 @@ can be edited. Fix compilations cap ordinary compiler lints to prevent Cargo
 from consuming unrelated rustc suggestions; Hawk's compiler wrapper matches
 equivalent declaration identities and emits the planned rustc
 `MachineApplicable` suggestions. Hawk finishes with another instrumented check
-of every selected production binary and workspace tests so visibility changes
+of every configured production binary and workspace tests so visibility changes
 used only by tests are validated before completion.
