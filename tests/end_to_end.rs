@@ -58,7 +58,7 @@ fn diagnoses_public_surface_of_a_binary_product() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stdout = anstream::adapter::strip_str(&stdout).to_string();
     let summary = format!(
-        "hawk: 35 finding(s) for `app --bin app --all-features` and workspace tests on target `{host_target}`\n"
+        "hawk: 39 finding(s) for `app --bin app --all-features` and workspace tests on target `{host_target}`\n"
     );
     let diagnostics = stdout
         .strip_suffix(&summary)
@@ -295,6 +295,34 @@ fn diagnoses_public_surface_of_a_binary_product() {
         | ^^^ public declaration
         = help: change this declaration to `pub(crate)`
 
+    warning[hawk::unnecessary_public]: `helper` is public but is needed only by tests; it can be `pub(crate)`
+      --> test_support/src/lib.rs:5:1
+      |
+    5 | pub fn helper() {}
+      | ^^^ public declaration
+      = help: change this declaration to `pub(crate)`
+
+    warning[hawk::dead_public]: `dead_test_surface` is public but is not reachable from any workspace test
+      --> test_support/src/lib.rs:7:1
+      |
+    7 | pub fn dead_test_surface() {}
+      | ^^^ public declaration
+      = help: consider restricting this declaration's visibility or removing it
+
+    warning[hawk::unnecessary_public]: `test_entry` is public but is needed only by tests; it can be `pub(crate)`
+      --> unit_support/src/lib.rs:9:1
+      |
+    9 | pub fn test_entry() {
+      | ^^^ public declaration
+      = help: change this declaration to `pub(crate)`
+
+    warning[hawk::unnecessary_public]: `test_only_helper` is public but is needed only by tests; it can be `pub(crate)`
+      --> unit_support/src/lib.rs:14:1
+       |
+    14 | pub fn test_only_helper() {}
+       | ^^^ public declaration
+       = help: change this declaration to `pub(crate)`
+
     warning[hawk::unknown_item]: override for `hawk::dead_public` references unknown item `library::removed_api`
       --> hawk.toml:15:1
        |
@@ -348,7 +376,7 @@ fn ordered_lint_levels_control_severity_and_exit_status() {
     assert!(stdout.contains("warning[hawk::unnecessary_public]"));
     assert!(stdout.contains("error[hawk::unfulfilled_expectation]"));
     assert!(!stdout.contains("hawk::unknown_item"));
-    assert!(stdout.contains("hawk: 34 finding(s)"));
+    assert!(stdout.contains("hawk: 38 finding(s)"));
 }
 
 #[test]
@@ -395,4 +423,17 @@ fn applies_visibility_fixes_through_cargo_fix() {
     assert!(library.contains("pub fn integration_test_support() {"));
     assert!(library.contains("pub(crate) fn test_only_helper() {}"));
     assert!(library.contains("use std::fmt::Debug;"));
+
+    let test_support = fs::read_to_string(workspace.path().join("test_support/src/lib.rs"))
+        .expect("read fixed test-support source");
+    assert!(test_support.contains("pub fn entry() {"));
+    assert!(test_support.contains("pub(crate) fn helper() {}"));
+    assert!(test_support.contains("pub(crate) fn dead_test_surface() {}"));
+
+    let unit_support = fs::read_to_string(workspace.path().join("unit_support/src/lib.rs"))
+        .expect("read fixed unit-test source");
+    assert!(unit_support.contains("pub fn product_entry() {}"));
+    assert!(unit_support.contains("pub fn not_exported() {}"));
+    assert!(unit_support.contains("pub(crate) fn test_entry() {"));
+    assert!(unit_support.contains("pub(crate) fn test_only_helper() {}"));
 }

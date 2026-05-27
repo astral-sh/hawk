@@ -8,6 +8,8 @@ version = "0.1.0"
 dependencies = [
  "library",
  "macro_dep",
+ "test_support",
+ "unit_support",
 ]
 
 [[package]]
@@ -19,4 +21,12 @@ dependencies = [
 
 [[package]]
 name = "macro_dep"
+version = "0.1.0"
+
+[[package]]
+name = "test_support"
+version = "0.1.0"
+
+[[package]]
+name = "unit_support"
 version = "0.1.0"

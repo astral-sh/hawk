@@ -228,6 +228,7 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
         .exec()
         .with_context(|| format!("read Cargo metadata from {}", args.manifest_path.display()))?;
     validate_product(&metadata, &args.package, &args.bin)?;
+    let candidate_crates = workspace_library_crates(&metadata);
 
     let workspace_root = metadata.workspace_root.clone().into_std_path_buf();
     let config = Config::load(&workspace_root, args.config.as_deref())?;
@@ -315,7 +316,13 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
         let initial_findings = config.apply(
             &analysis_target,
             &production_fragments,
-            analyze(&production_fragments, &test_fragments, &excluded),
+            &test_fragments,
+            analyze(
+                &production_fragments,
+                &test_fragments,
+                &candidate_crates,
+                &excluded,
+            ),
         );
         let fixable_findings: Vec<_> = initial_findings
             .findings
@@ -327,14 +334,14 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
             fixable_findings
                 .iter()
                 .copied()
-                .filter(|finding| !finding.test_only),
+                .filter(|finding| !finding.test_only && !finding.test_compiled_only),
             &production_fragments,
         );
         let test_fix_plan = fix_plan_for(
             fixable_findings
                 .iter()
                 .copied()
-                .filter(|finding| finding.test_only),
+                .filter(|finding| finding.test_only || finding.test_compiled_only),
             &test_fragments,
         );
         let mut applied_fixes = false;
@@ -388,7 +395,13 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
     let findings = config.apply(
         &analysis_target,
         &production_fragments,
-        analyze(&production_fragments, &test_fragments, &excluded),
+        &test_fragments,
+        analyze(
+            &production_fragments,
+            &test_fragments,
+            &candidate_crates,
+            &excluded,
+        ),
     );
     let mut diagnostics = String::new();
     let mut diagnostic_count = 0;
@@ -610,6 +623,16 @@ fn fix_packages(metadata: &cargo_metadata::Metadata, fix_plan: &FixPlan) -> Resu
     Ok(packages)
 }
 
+fn workspace_library_crates(metadata: &cargo_metadata::Metadata) -> HashSet<String> {
+    metadata
+        .workspace_packages()
+        .iter()
+        .flat_map(|package| &package.targets)
+        .filter(|target| target.kind.contains(&TargetKind::Lib))
+        .map(|target| target.name.replace('-', "_"))
+        .collect()
+}
+
 const WARNING: Style = AnsiColor::Yellow.on_default().bold();
 const ERROR: Style = AnsiColor::Red.on_default().bold();
 const LOCATION: Style = AnsiColor::BrightBlue.on_default().bold();
@@ -624,8 +647,21 @@ fn write_diagnostic(
     workspace_root: &Path,
     level: LintLevel,
 ) -> std::fmt::Result {
-    let (message, help, marker) = match (finding.kind, finding.definition.kind, finding.test_only) {
-        (FindingKind::DeadPublic, DefinitionKind::EnumVariant, _) => (
+    let (message, help, marker) = match (
+        finding.kind,
+        finding.definition.kind,
+        finding.test_only,
+        finding.test_compiled_only,
+    ) {
+        (FindingKind::DeadPublic, DefinitionKind::EnumVariant, _, true) => (
+            format!(
+                "`{}` is a public enum variant but is not reachable from any workspace test",
+                finding.definition.name
+            ),
+            "remove this variant",
+            "public enum variant",
+        ),
+        (FindingKind::DeadPublic, DefinitionKind::EnumVariant, _, false) => (
             format!(
                 "`{}` is a public enum variant but is not reachable from binary `{binary}`",
                 finding.definition.name
@@ -633,10 +669,18 @@ fn write_diagnostic(
             "remove this variant",
             "public enum variant",
         ),
-        (FindingKind::UnnecessaryPublic, DefinitionKind::EnumVariant, _) => {
+        (FindingKind::UnnecessaryPublic, DefinitionKind::EnumVariant, _, _) => {
             unreachable!("live enum variants do not have actionable visibility findings")
         }
-        (FindingKind::DeadPublic, DefinitionKind::Reexport, _) => (
+        (FindingKind::DeadPublic, DefinitionKind::Reexport, _, true) => (
+            format!(
+                "public re-export `{}` has no target reachable from any workspace test",
+                finding.definition.name
+            ),
+            "consider restricting this re-export's visibility or removing it",
+            "public re-export",
+        ),
+        (FindingKind::DeadPublic, DefinitionKind::Reexport, _, false) => (
             format!(
                 "public re-export `{}` has no target reachable from binary `{binary}`",
                 finding.definition.name
@@ -644,7 +688,15 @@ fn write_diagnostic(
             "consider restricting this re-export's visibility or removing it",
             "public re-export",
         ),
-        (FindingKind::DeadPublic, DefinitionKind::Module, _) => (
+        (FindingKind::DeadPublic, DefinitionKind::Module, _, true) => (
+            format!(
+                "public module `{}` has no declaration reachable from any workspace test",
+                finding.definition.name
+            ),
+            "consider restricting this module's visibility or removing it",
+            "public module",
+        ),
+        (FindingKind::DeadPublic, DefinitionKind::Module, _, false) => (
             format!(
                 "public module `{}` has no declaration reachable from binary `{binary}`",
                 finding.definition.name
@@ -652,7 +704,15 @@ fn write_diagnostic(
             "consider restricting this module's visibility or removing it",
             "public module",
         ),
-        (FindingKind::DeadPublic, _, _) => (
+        (FindingKind::DeadPublic, _, _, true) => (
+            format!(
+                "`{}` is public but is not reachable from any workspace test",
+                finding.definition.name
+            ),
+            "consider restricting this declaration's visibility or removing it",
+            "public declaration",
+        ),
+        (FindingKind::DeadPublic, _, _, false) => (
             format!(
                 "`{}` is public but is not reachable from binary `{binary}`",
                 finding.definition.name
@@ -660,7 +720,7 @@ fn write_diagnostic(
             "consider restricting this declaration's visibility or removing it",
             "public declaration",
         ),
-        (FindingKind::UnnecessaryPublic, DefinitionKind::Reexport, true) => (
+        (FindingKind::UnnecessaryPublic, DefinitionKind::Reexport, true, _) => (
             format!(
                 "public re-export `{}` is needed only by tests; it can be `pub(crate)`",
                 finding.definition.name
@@ -668,7 +728,7 @@ fn write_diagnostic(
             "change this re-export to `pub(crate) use`",
             "public re-export",
         ),
-        (FindingKind::UnnecessaryPublic, DefinitionKind::Reexport, false) => (
+        (FindingKind::UnnecessaryPublic, DefinitionKind::Reexport, false, _) => (
             format!(
                 "public re-export `{}` is not required by any compiled cross-crate use; it can be `pub(crate)`",
                 finding.definition.name
@@ -676,7 +736,7 @@ fn write_diagnostic(
             "change this re-export to `pub(crate) use`",
             "public re-export",
         ),
-        (FindingKind::UnnecessaryPublic, DefinitionKind::Module, true) => (
+        (FindingKind::UnnecessaryPublic, DefinitionKind::Module, true, _) => (
             format!(
                 "public module `{}` is needed only by tests; it can be `pub(crate)`",
                 finding.definition.name
@@ -684,7 +744,7 @@ fn write_diagnostic(
             "change this module to `pub(crate) mod`",
             "public module",
         ),
-        (FindingKind::UnnecessaryPublic, DefinitionKind::Module, false) => (
+        (FindingKind::UnnecessaryPublic, DefinitionKind::Module, false, _) => (
             format!(
                 "public module `{}` is used only within `{}`; it can be `pub(crate)`",
                 finding.definition.name, finding.definition.crate_name
@@ -692,7 +752,7 @@ fn write_diagnostic(
             "change this module to `pub(crate) mod`",
             "public module",
         ),
-        (FindingKind::UnnecessaryPublic, _, true) => (
+        (FindingKind::UnnecessaryPublic, _, true, _) => (
             format!(
                 "`{}` is public but is needed only by tests; it can be `pub(crate)`",
                 finding.definition.name
@@ -700,7 +760,7 @@ fn write_diagnostic(
             "change this declaration to `pub(crate)`",
             "public declaration",
         ),
-        (FindingKind::UnnecessaryPublic, _, false) => (
+        (FindingKind::UnnecessaryPublic, _, false, _) => (
             format!(
                 "`{}` is public but all reachable uses are within `{}`; it can be `pub(crate)`",
                 finding.definition.name, finding.definition.crate_name
@@ -999,6 +1059,7 @@ mod tests {
             kind: FindingKind::UnnecessaryPublic,
             definition: &definition,
             test_only: false,
+            test_compiled_only: false,
         };
         let mut output = String::new();
 
@@ -1038,6 +1099,7 @@ mod tests {
             kind: FindingKind::DeadPublic,
             definition: &definition,
             test_only: false,
+            test_compiled_only: false,
         };
         let mut output = String::new();
 

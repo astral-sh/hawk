@@ -6,3 +6,7 @@ edition = "2024"
 [dependencies]
 library = { path = "../library" }
 macro_dep = { path = "../macro_dep" }
+unit_support = { path = "../unit_support" }
+
+[dev-dependencies]
+test_support = { path = "../test_support" }

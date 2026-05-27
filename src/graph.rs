@@ -112,6 +112,7 @@ pub struct Finding<'a> {
     pub kind: FindingKind,
     pub definition: &'a Definition,
     pub test_only: bool,
+    pub test_compiled_only: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -127,6 +128,7 @@ struct DefinitionIdentity<'a> {
 pub fn analyze<'a>(
     production_fragments: &'a [Fragment],
     test_fragments: &'a [Fragment],
+    candidate_crates: &HashSet<String>,
     excluded_crates: &HashSet<String>,
 ) -> Vec<Finding<'a>> {
     let definitions: HashMap<&str, &Definition> = production_fragments
@@ -190,11 +192,31 @@ pub fn analyze<'a>(
 
     let mut findings = Vec::new();
     let mut reported = HashSet::new();
+    let production_definitions: HashSet<_> = production_fragments
+        .iter()
+        .flat_map(|fragment| &fragment.definitions)
+        .map(definition_identity)
+        .collect();
+    let production_candidates: HashSet<_> = production_fragments
+        .iter()
+        .flat_map(|fragment| &fragment.definitions)
+        .filter(|definition| definition.public_api)
+        .map(definition_identity)
+        .collect();
     for definition in production_fragments
         .iter()
         .flat_map(|fragment| &fragment.definitions)
+        .chain(
+            test_fragments
+                .iter()
+                .flat_map(|fragment| &fragment.definitions),
+        )
     {
+        let identity = definition_identity(definition);
         if !definition.public_api
+            || (production_definitions.contains(&identity)
+                && !production_candidates.contains(&identity))
+            || !candidate_crates.contains(&definition.crate_name)
             || excluded_crates.contains(&definition.crate_name)
             || production_fragments.iter().any(|fragment| {
                 fragment.is_product_root && fragment.crate_name == definition.crate_name
@@ -207,10 +229,11 @@ pub fn analyze<'a>(
             continue;
         }
 
-        if !reported.insert(definition_identity(definition)) {
+        if !reported.insert(identity) {
             continue;
         }
 
+        let test_compiled_only = !production_definitions.contains(&identity);
         let is_production_live = is_live(definition, &edges, &production);
         let is_test_live = is_live(definition, &edges, &tests);
         if !is_production_live && !is_test_live {
@@ -218,6 +241,7 @@ pub fn analyze<'a>(
                 kind: FindingKind::DeadPublic,
                 definition,
                 test_only: false,
+                test_compiled_only,
             });
             continue;
         }
@@ -230,6 +254,7 @@ pub fn analyze<'a>(
             kind: FindingKind::UnnecessaryPublic,
             definition,
             test_only: !is_production_live && is_test_live,
+            test_compiled_only,
         });
     }
 
@@ -419,7 +444,14 @@ mod tests {
         fragments: &'a [Fragment],
         excluded_crates: &HashSet<String>,
     ) -> Vec<Finding<'a>> {
-        analyze_with_tests(fragments, &[], excluded_crates)
+        analyze_with_tests(fragments, &[], &candidate_crates(), excluded_crates)
+    }
+
+    fn candidate_crates() -> HashSet<String> {
+        ["lib", "test_support"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
     }
 
     fn node(id: &str, crate_name: &str, public_api: bool) -> Definition {
@@ -536,6 +568,7 @@ mod tests {
         assert_eq!(findings[0].kind, FindingKind::UnnecessaryPublic);
         assert_eq!(findings[0].definition.id, "helper");
         assert!(!findings[0].test_only);
+        assert!(!findings[0].test_compiled_only);
     }
 
     #[test]
@@ -561,12 +594,101 @@ mod tests {
             }],
         );
 
-        let findings = analyze_with_tests(&input, &test_input, &HashSet::new());
+        let findings =
+            analyze_with_tests(&input, &test_input, &candidate_crates(), &HashSet::new());
 
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].kind, FindingKind::UnnecessaryPublic);
         assert_eq!(findings[0].definition.id, "helper");
         assert!(findings[0].test_only);
+        assert!(!findings[0].test_compiled_only);
+    }
+
+    #[test]
+    fn public_surface_compiled_only_for_tests_is_analyzed() {
+        let production_input = fragments(vec![], vec![]);
+        let mut test_input = test_fragments(
+            vec![
+                node("test_entry", "test_support", true),
+                node("test_helper", "test_support", true),
+            ],
+            vec![Edge {
+                from: "test_entry".into(),
+                to: "test_helper".into(),
+                kind: EdgeKind::Body,
+            }],
+        );
+        test_input[1].crate_name = "test_support".into();
+
+        let findings = analyze_with_tests(
+            &production_input,
+            &test_input,
+            &candidate_crates(),
+            &HashSet::new(),
+        );
+
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, FindingKind::UnnecessaryPublic);
+        assert_eq!(findings[0].definition.id, "test_helper");
+        assert!(findings[0].test_only);
+        assert!(findings[0].test_compiled_only);
+    }
+
+    #[test]
+    fn dead_public_surface_compiled_only_for_tests_is_reported() {
+        let production_input = fragments(vec![], vec![]);
+        let mut test_input = test_fragments(vec![node("unused", "test_support", true)], vec![]);
+        test_input[1].crate_name = "test_support".into();
+
+        let findings = analyze_with_tests(
+            &production_input,
+            &test_input,
+            &candidate_crates(),
+            &HashSet::new(),
+        );
+
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, FindingKind::DeadPublic);
+        assert_eq!(findings[0].definition.id, "unused");
+        assert!(!findings[0].test_only);
+        assert!(findings[0].test_compiled_only);
+    }
+
+    #[test]
+    fn public_declarations_in_test_binary_targets_are_not_candidates() {
+        let production_input = fragments(vec![], vec![]);
+        let mut test_input = test_fragments(vec![], vec![]);
+        test_input[0]
+            .definitions
+            .push(node("public_test_helper", "integration_test", true));
+
+        assert!(
+            analyze_with_tests(
+                &production_input,
+                &test_input,
+                &candidate_crates(),
+                &HashSet::new(),
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn test_harness_does_not_expand_existing_production_candidate_surface() {
+        let production_input = fragments(vec![node("production_hidden", "lib", false)], vec![]);
+        let mut test_hidden = node("test_hidden", "lib", true);
+        test_hidden.name = "production_hidden".into();
+        let test_input = test_fragments(vec![test_hidden], vec![]);
+
+        assert!(
+            analyze_with_tests(
+                &production_input,
+                &test_input,
+                &candidate_crates(),
+                &HashSet::new(),
+            )
+            .is_empty()
+        );
     }
 
     #[test]

@@ -178,11 +178,13 @@ fn emit_fix(tcx: TyCtxt<'_>, visibility_span: rustc_span::Span, kind: FindingKin
 
 fn emit_fragment(tcx: TyCtxt<'_>, root_crate: &str, output_dir: &Path) -> Result<()> {
     let crate_name = tcx.crate_name(LOCAL_CRATE).to_string();
-    let is_product_root = match env::var("HAWK_CONSUMER_MODE").as_deref() {
+    let consumer_mode = env::var("HAWK_CONSUMER_MODE");
+    let is_product_root = match consumer_mode.as_deref() {
         Ok("tests") => tcx.sess.opts.test && tcx.entry_fn(()).is_some(),
         _ => crate_name == root_crate && tcx.entry_fn(()).is_some(),
     };
-    let fragment = collect_fragment(tcx, crate_name.clone(), is_product_root);
+    let test_surface = consumer_mode.as_deref() == Ok("tests") && tcx.sess.opts.test;
+    let fragment = collect_fragment(tcx, crate_name.clone(), is_product_root, test_surface);
     let crate_id = id(tcx, CRATE_DEF_ID.to_def_id());
     let suffix: String = crate_id
         .chars()
@@ -202,7 +204,12 @@ fn write_fragment(writer: impl Write, fragment: &Fragment, path: &Path) -> Resul
         .with_context(|| format!("flush {}", path.display()))
 }
 
-fn collect_fragment(tcx: TyCtxt<'_>, crate_name: String, is_product_root: bool) -> Fragment {
+fn collect_fragment(
+    tcx: TyCtxt<'_>,
+    crate_name: String,
+    is_product_root: bool,
+    test_surface: bool,
+) -> Fragment {
     let mut definitions = Vec::new();
     let mut defined = HashSet::new();
     let mut adt_members = Vec::new();
@@ -216,7 +223,7 @@ fn collect_fragment(tcx: TyCtxt<'_>, crate_name: String, is_product_root: bool) 
         let kind = diagnostic_kind(tcx, def_id);
         let public_api = kind
             .is_some_and(|kind| kind != DefinitionKind::Reexport || is_named_reexport(tcx, def_id))
-            && is_publicly_exported(tcx, def_id);
+            && is_public_candidate(tcx, def_id, test_surface);
         definitions.push(definition(
             tcx,
             def_id,
@@ -241,7 +248,7 @@ fn collect_fragment(tcx: TyCtxt<'_>, crate_name: String, is_product_root: bool) 
                 for field in data.fields() {
                     let field_span = tcx.def_span(field.def_id);
                     if let Some(index) = source_item_index
-                        && is_publicly_exported(tcx, field.def_id)
+                        && is_public_candidate(tcx, field.def_id, test_surface)
                     {
                         source_item_fields[index]
                             .2
@@ -255,7 +262,7 @@ fn collect_fragment(tcx: TyCtxt<'_>, crate_name: String, is_product_root: bool) 
                         field.def_id,
                         &crate_name,
                         DefinitionKind::Field,
-                        is_publicly_exported(tcx, field.def_id),
+                        is_public_candidate(tcx, field.def_id, test_surface),
                     ));
                     defined.insert(field.def_id);
                     adt_members.push((field.def_id, item.owner_id.def_id));
@@ -268,7 +275,7 @@ fn collect_fragment(tcx: TyCtxt<'_>, crate_name: String, is_product_root: bool) 
                         variant.def_id,
                         &crate_name,
                         DefinitionKind::EnumVariant,
-                        is_public_variant(tcx, variant.def_id),
+                        is_public_variant(tcx, variant.def_id, test_surface),
                     ));
                     defined.insert(variant.def_id);
                     adt_members.push((variant.def_id, item.owner_id.def_id));
@@ -465,7 +472,7 @@ fn collect_fragment(tcx: TyCtxt<'_>, crate_name: String, is_product_root: bool) 
         .owners()
         .map(|owner| owner.def_id)
         .filter(|def_id| {
-            tcx.def_kind(*def_id) == DefKind::Use && is_publicly_exported(tcx, *def_id)
+            tcx.def_kind(*def_id) == DefKind::Use && is_public_candidate(tcx, *def_id, test_surface)
         })
         .collect();
     let public_reexport_sources: HashSet<String> = public_reexports
@@ -530,10 +537,10 @@ fn collect_fragment(tcx: TyCtxt<'_>, crate_name: String, is_product_root: bool) 
     }
 }
 
-fn is_publicly_exported(tcx: TyCtxt<'_>, def_id: LocalDefId) -> bool {
+fn is_public_candidate(tcx: TyCtxt<'_>, def_id: LocalDefId, test_surface: bool) -> bool {
     !tcx.def_span(def_id).from_expansion()
         && tcx.local_visibility(def_id).is_public()
-        && tcx.effective_visibilities(()).is_exported(def_id)
+        && (test_surface || tcx.effective_visibilities(()).is_exported(def_id))
 }
 
 fn source_file_start(tcx: TyCtxt<'_>, span: rustc_span::Span) -> u32 {
@@ -544,8 +551,10 @@ fn source_file_start(tcx: TyCtxt<'_>, span: rustc_span::Span) -> u32 {
         .to_u32()
 }
 
-fn is_public_variant(tcx: TyCtxt<'_>, def_id: LocalDefId) -> bool {
-    !tcx.def_span(def_id).from_expansion() && tcx.effective_visibilities(()).is_exported(def_id)
+fn is_public_variant(tcx: TyCtxt<'_>, def_id: LocalDefId, test_surface: bool) -> bool {
+    !tcx.def_span(def_id).from_expansion()
+        && (tcx.effective_visibilities(()).is_exported(def_id)
+            || (test_surface && tcx.local_visibility(tcx.local_parent(def_id)).is_public()))
 }
 
 fn is_named_reexport(tcx: TyCtxt<'_>, def_id: LocalDefId) -> bool {

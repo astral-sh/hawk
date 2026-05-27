@@ -26,6 +26,7 @@ fn main() {
     library::consumed_outer::consumed_nested::invoke();
     library::exercise_mirrored_source();
     let _ = library::archived_mirrored_fields().required_through_archive;
+    unit_support::product_entry();
 }
 
 #[allow(dead_code)]

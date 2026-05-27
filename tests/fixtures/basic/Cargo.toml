@@ -1,3 +1,3 @@
 [workspace]
-members = ["app", "library", "macro_dep"]
+members = ["app", "library", "macro_dep", "test_support", "unit_support"]
 resolver = "3"

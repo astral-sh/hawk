@@ -154,11 +154,13 @@ impl Config {
     pub fn apply<'findings, 'config>(
         &'config self,
         target: &AnalysisTarget,
-        fragments: &[Fragment],
+        production_fragments: &[Fragment],
+        test_fragments: &[Fragment],
         findings: Vec<Finding<'findings>>,
     ) -> AppliedFindings<'findings, 'config> {
-        let known_items: HashSet<(&str, &str)> = fragments
+        let known_items: HashSet<(&str, &str)> = production_fragments
             .iter()
+            .chain(test_fragments)
             .flat_map(|fragment| &fragment.definitions)
             .map(|definition| (definition.crate_name.as_str(), definition.name.as_str()))
             .collect();
@@ -318,6 +320,10 @@ mod tests {
         }
     }
 
+    fn candidate_crates() -> HashSet<String> {
+        HashSet::from(["library".to_owned()])
+    }
+
     #[test]
     fn expect_suppresses_a_matching_finding() {
         let directory = tempfile::tempdir().expect("temporary configuration directory");
@@ -336,11 +342,12 @@ reason = "known retained public surface"
         .expect("write configuration");
         let config = Config::load(directory.path(), Some(&path)).expect("load configuration");
         let fragments = vec![fragment()];
-        let findings = analyze(&fragments, &[], &HashSet::new());
+        let findings = analyze(&fragments, &[], &candidate_crates(), &HashSet::new());
 
         let applied = config.apply(
             &target("aarch64-apple-darwin", &["unix"]),
             &fragments,
+            &[],
             findings,
         );
 
@@ -366,11 +373,12 @@ reason = "detect stale selectors"
         .expect("write configuration");
         let config = Config::load(directory.path(), Some(&path)).expect("load configuration");
         let fragments = vec![fragment()];
-        let findings = analyze(&fragments, &[], &HashSet::new());
+        let findings = analyze(&fragments, &[], &candidate_crates(), &HashSet::new());
 
         let applied = config.apply(
             &target("aarch64-apple-darwin", &["unix"]),
             &fragments,
+            &[],
             findings,
         );
 
@@ -406,7 +414,8 @@ reason = "only retained on Windows"
         let windows = config.apply(
             &target("x86_64-pc-windows-msvc", &["windows"]),
             &fragments,
-            analyze(&fragments, &[], &HashSet::new()),
+            &[],
+            analyze(&fragments, &[], &candidate_crates(), &HashSet::new()),
         );
         assert!(windows.findings.is_empty());
         assert!(windows.config_diagnostics.is_empty());
@@ -414,7 +423,8 @@ reason = "only retained on Windows"
         let unix = config.apply(
             &target("aarch64-apple-darwin", &["unix"]),
             &fragments,
-            analyze(&fragments, &[], &HashSet::new()),
+            &[],
+            analyze(&fragments, &[], &candidate_crates(), &HashSet::new()),
         );
         assert_eq!(unix.findings.len(), 1);
         assert!(unix.config_diagnostics.is_empty());
@@ -439,11 +449,12 @@ reason = "only compiled on Windows"
         .expect("write configuration");
         let config = Config::load(directory.path(), Some(&path)).expect("load configuration");
         let fragments = vec![fragment()];
-        let findings = analyze(&fragments, &[], &HashSet::new());
+        let findings = analyze(&fragments, &[], &candidate_crates(), &HashSet::new());
 
         let applied = config.apply(
             &target("aarch64-apple-darwin", &["unix"]),
             &fragments,
+            &[],
             findings,
         );
 
