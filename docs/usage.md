@@ -1,0 +1,146 @@
+# Using Hawk
+
+Hawk analyzes public declarations in workspace library crates against a
+configured binary product and workspace non-production consumers. This guide
+covers invoking the tool; see [Configuration](configuration.md) for the
+`hawk.toml` reference and [Architecture](architecture.md) for the analysis
+model.
+
+## Build Hawk
+
+Hawk is pinned to Rust 1.95.0 and uses `rustc_private`; the repository
+toolchain configuration installs `rustc-dev` when necessary. The build embeds
+the selected compiler sysroot runtime path so the resulting executable can run
+directly as Cargo's compiler wrapper.
+
+```sh
+cargo build
+```
+
+## Configure a product
+
+Add each binary shipped as part of the product to `hawk.toml` at the root of
+the workspace being analyzed:
+
+```toml
+[[production]]
+package = "app"
+bin = "app"
+reason = "shipped application binary"
+```
+
+Every configured package and binary must be a target of that workspace. Hawk
+does not infer product entry points: an API used by an omitted binary can be
+reported as unnecessary or dead. See [Configuration](configuration.md) for
+multiple binaries, target-scoped entries, and accepted findings.
+
+## Run analysis
+
+```sh
+./target/debug/cargo-hawk \
+  --manifest-path /path/to/workspace/Cargo.toml
+```
+
+Configured production binaries and workspace non-production targets are
+analyzed under `--all-features --locked` on the host target by default. The
+non-production surface includes tests, benches, examples, and compile-only
+doctests. Diagnostics apply to workspace library crates compiled for those
+targets, including declarations enabled only under `cfg(test)`.
+
+Workspace libraries are treated as internal unless exempted. Exclude a
+library crate whose public API is consumed outside the analyzed product:
+
+```sh
+./target/debug/cargo-hawk \
+  --manifest-path /path/to/workspace/Cargo.toml \
+  --exclude-crate supported_library
+```
+
+Instrumented Cargo artifacts are reused under `/private/tmp/codex-hawk-target`
+by default. Use `--target-dir` to override that location and `--graph-dir` to
+retain serialized compiler fragments for investigation. Diagnostics are
+colored automatically in a terminal; use `--color=always` or `--color=never`
+to override terminal detection.
+
+## Enforce diagnostics
+
+Hawk reports diagnostics as warnings by default, so it can be introduced
+without changing build status. Deny the `warnings` group to use Hawk as a CI
+gate:
+
+```sh
+./target/debug/cargo-hawk \
+  --manifest-path /path/to/workspace/Cargo.toml \
+  -D warnings
+```
+
+Hawk accepts Clippy-style ordered `-A`/`--allow`, `-W`/`--warn`, and
+`-D`/`--deny` lint levels. Later options take precedence:
+
+```sh
+./target/debug/cargo-hawk \
+  --manifest-path /path/to/workspace/Cargo.toml \
+  -D warnings \
+  -W hawk::unnecessary_public
+```
+
+The supported selectors are `warnings`, `hawk::dead_public`,
+`hawk::unnecessary_public`, `hawk::unknown_item`, and
+`hawk::unfulfilled_expectation`. Denied diagnostics are emitted as errors and
+cause a non-zero exit status. Invalid configuration and failed instrumented
+Cargo builds fail independently of lint levels.
+
+## Apply fixes
+
+Pass `--fix` to apply visibility reductions through Cargo's fix machinery:
+
+```sh
+./target/debug/cargo-hawk \
+  --manifest-path /path/to/workspace/Cargo.toml \
+  --fix
+```
+
+Hawk emits machine-applicable `pub` to `pub(crate)` suggestions for enabled,
+unsuppressed findings. It delegates edit application and validation to
+`cargo fix`, including Cargo's source-control safety checks; pass
+`--allow-dirty`, `--allow-staged`, or `--allow-no-vcs` with `--fix` when the
+corresponding Cargo override is appropriate.
+
+Fixes are limited to workspace library packages in the configured production
+or non-production surface. Hawk rechecks configured binaries and
+non-production targets, including compile-only doctests, after applying
+edits. Enum variants remain report-only because Rust has no independent
+visibility modifier for a variant.
+
+## Analyze another target
+
+Pass `--target TRIPLE` to analyze another compilation target. Hawk forwards
+the target to Cargo but does not install a target SDK or configure a cross
+linker.
+
+For example, a macOS host can analyze a Windows MSVC product using
+[`cargo-xwin`](https://github.com/rust-cross/cargo-xwin). From the Hawk
+checkout, prepare the pinned toolchain once:
+
+```sh
+rustup target add x86_64-pc-windows-msvc
+rustup component add llvm-tools-preview
+cargo install cargo-xwin --locked
+```
+
+Then export the linker and Windows SDK configuration for Hawk's child Cargo
+process before running the analysis:
+
+```sh
+target=x86_64-pc-windows-msvc
+eval "$(cargo xwin env --quiet \
+  --target "$target" \
+  --manifest-path /path/to/workspace/Cargo.toml)"
+
+./target/debug/cargo-hawk \
+  --manifest-path /path/to/workspace/Cargo.toml \
+  --target "$target"
+```
+
+Target-scoped product entries and expectations can keep platform-specific
+surfaces explicit; see [Configuration](configuration.md).

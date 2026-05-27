@@ -1,24 +1,28 @@
 # hawk
 
-`hawk` is an experimental Cargo lint tool for binary products built from
-internal Rust workspace crates. It analyzes public library items in a
-configured binary product against its production binaries and workspace
-non-production targets, reporting items that are unused or whose visibility
-exceeds those consumers' needs.
+[![CI](https://github.com/astral-sh/hawk/actions/workflows/ci.yml/badge.svg)](https://github.com/astral-sh/hawk/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
-This repository is at the prototype stage.
+A workspace-aware Cargo lint for unnecessary public Rust APIs.
 
-See [Architecture](docs/architecture.md) for how Hawk's workspace-level
-analysis relates to Clippy's compiler-wrapper and lint-pass architecture.
+Hawk finds `pub` declarations that are unused, or can be restricted to
+`pub(crate)`, when a Cargo workspace builds one or more closed-world binary
+products.
 
-## Usage
+## Highlights
 
-`hawk` is pinned to Rust 1.95.0 and uses `rustc_private`; the repository
-toolchain configuration installs `rustc-dev` when necessary.
-The build embeds the selected compiler sysroot runtime path so the resulting
-executable can run directly as Cargo's compiler wrapper.
+- Analyzes public surface across an entire Cargo workspace, starting from
+  configured production binaries.
+- Reports `hawk::dead_public` for unused public items and
+  `hawk::unnecessary_public` for visibility that can be restricted.
+- Models production separately from tests, benches, examples, and doctests.
+- Applies machine-applicable `pub(crate)` fixes through `cargo fix`.
+- Uses Clippy-style `-A`/`-W`/`-D` lint levels for incremental CI adoption.
 
-Add each binary shipped as part of the product to `hawk.toml`:
+## Getting started
+
+Hawk currently requires its pinned Rust toolchain and uses `rustc_private`.
+Declare each shipped binary in a workspace-root `hawk.toml`:
 
 ```toml
 [[production]]
@@ -27,245 +31,43 @@ bin = "app"
 reason = "shipped application binary"
 ```
 
+Build Hawk and analyze the workspace:
+
 ```sh
 cargo build
 ./target/debug/cargo-hawk \
   --manifest-path /path/to/workspace/Cargo.toml
 ```
 
-Configured production binaries and workspace non-production targets (including
-tests, benches, examples, and doctests) are analyzed under
-`--all-features --locked` on the host target by default. Pass `--target TRIPLE`
-to analyze another
-compilation target; Hawk expects any required cross-compilation environment to
-be prepared by the caller. Diagnostics apply to workspace library crates
-compiled for those targets, including declarations enabled only under
-`cfg(test)`. Those libraries are considered internal unless exempted:
-
-```sh
-./target/debug/cargo-hawk \
-  --manifest-path /path/to/workspace/Cargo.toml \
-  --exclude-crate supported_library
-```
-
-Instrumented Cargo artifacts are reused under `/private/tmp/codex-hawk-target`
-by default. Use `--target-dir` to override that location and `--graph-dir` to
-retain the compiler fragments in a run-specific subdirectory for investigation.
-Diagnostics are colored automatically in a terminal; use `--color=always` or
-`--color=never` to override terminal detection.
-
-By default, Hawk reports diagnostics as warnings and exits successfully so it
-can be introduced without changing build status. To use it as a CI gate, deny
-the `warnings` group:
+To enforce findings in CI or apply visibility fixes:
 
 ```sh
 ./target/debug/cargo-hawk \
   --manifest-path /path/to/workspace/Cargo.toml \
   -D warnings
-```
 
-Hawk accepts Clippy-style `-A`/`--allow`, `-W`/`--warn`, and `-D`/`--deny`
-lint levels. Later options take precedence, so CI can enforce most diagnostics
-while introducing one incrementally:
-
-```sh
-./target/debug/cargo-hawk \
-  --manifest-path /path/to/workspace/Cargo.toml \
-  -D warnings \
-  -W hawk::unnecessary_public
-```
-
-The supported selectors are `warnings`,
-`hawk::dead_public`, `hawk::unnecessary_public`,
-`hawk::unknown_item`, and `hawk::unfulfilled_expectation`. Denied
-diagnostics are printed as errors and cause a non-zero exit status. Invalid
-configuration or a failed instrumented Cargo build fails regardless of lint
-levels.
-
-## Fixes
-
-Pass `--fix` to apply visibility reductions through Cargo's `fix` machinery:
-
-```sh
 ./target/debug/cargo-hawk \
   --manifest-path /path/to/workspace/Cargo.toml \
   --fix
 ```
 
-Hawk emits machine-applicable `pub` to `pub(crate)` suggestions for findings
-that are not suppressed and are enabled at the command line. It delegates edit
-application and validation to `cargo fix`, including Cargo's source-control
-safety checks; pass `--allow-dirty`, `--allow-staged`, or `--allow-no-vcs` with
-`--fix` when the corresponding Cargo override is appropriate.
+## Documentation
 
-Unlike `cargo clippy --fix`, Hawk applies fixes only to workspace library
-packages in the configured production or non-production surface. Production
-findings are fixed through library targets, while findings reached through or
-compiled only in the non-production pass are fixed through all targets of
-their owning packages. This covers dev-dependency support libraries even when
-their library test harness is disabled, declarations enabled under
-`cfg(test)`, and validation against benches, examples, and doctests. Hawk caps
-ordinary compiler lints during the fix phase so Cargo applies Hawk's planned
-suggestions rather than unrelated compiler fixes, then rechecks all configured
-production binaries and workspace non-production targets, compiling doctests
-through its driver to validate documented API consumers. Enum
-variants are report-only because they have no independent visibility modifier;
-a variant finding disappears after fixing its containing enum only when the
-entire enum no longer needs to be public.
+- [Using Hawk](docs/usage.md): running analysis, CI enforcement, fixes, and
+  cross-compilation.
+- [Configuration](docs/configuration.md): product binaries, overrides, and
+  target selectors.
+- [Architecture](docs/architecture.md): how Hawk differs from Clippy and how
+  the workspace analysis is implemented.
+- [MVP design](docs/mvp-design.md): the original analysis scope and design
+  rationale.
 
-## Cross-compilation
+## Status
 
-Hawk forwards `--target` to Cargo, but it does not install a target SDK or
-configure a cross linker. For example, a macOS host can analyze a Windows
-MSVC product using [`cargo-xwin`](https://github.com/rust-cross/cargo-xwin).
-From the Hawk checkout, prepare its pinned Rust toolchain once:
-
-```sh
-rustup target add x86_64-pc-windows-msvc
-rustup component add llvm-tools-preview
-cargo install cargo-xwin --locked
-```
-
-Then export the linker and Windows SDK configuration for the child Cargo
-process before running Hawk:
-
-```sh
-target=x86_64-pc-windows-msvc
-eval "$(cargo xwin env --quiet \
-  --target "$target" \
-  --manifest-path /path/to/workspace/Cargo.toml)"
-
-./target/debug/cargo-hawk \
-  --manifest-path /path/to/workspace/Cargo.toml \
-  --target "$target"
-```
-
-Platform-specific expectations can be scoped in `hawk.toml`, for example with
-`target = "cfg(windows)"` or `target = "cfg(not(windows))"`, so a run on one
-platform does not validate an item that is only compiled on another.
-
-## Coverage
-
-Hawk diagnoses public free functions, inherent methods and associated
-constants, traits, named types (including unions and type aliases), constants,
-statics, struct and union fields, and enum variants. Field construction,
-projection, patterns, and `offset_of!` uses, as well as enum variant
-construction and matching, participate in reachability and cross-crate
-visibility analysis.
-
-For fields and inherent associated constants, a live item used only inside its
-defining crate can be changed to `pub(crate)`. Enum variants have no
-independent Rust visibility modifier: Hawk diagnoses unreachable variants for
-removal, but does not report reachable variants as unnecessary public surface.
-
-## Non-Production Consumers
-
-Hawk keeps production and non-production compilation distinct. An item
-referenced across crate boundaries by a workspace test, bench, example, or
-doctest must remain `pub` and is not reported. Workspace test harnesses
-additionally establish reachability: a public helper reachable only along
-test paths, without a cross-crate use of its own, is reported as
-`hawk::unnecessary_public`, with a `pub(crate)` suggestion. Public
-declarations compiled only in test targets, including dev-dependency support
-crates and `#[cfg(test)]` items, are analyzed against workspace tests in the
-same way. A public declaration unreachable from either applicable consumer
-graph remains `hawk::dead_public`.
-
-## Exported paths and modules
-
-In addition to public declarations, Hawk diagnoses selected public re-exports
-and public modules. A named local re-export of a modeled non-module
-declaration is reported only when no compiled cross-crate reference could
-require that exported path. If its target is not reachable from the selected
-binary it is dead public surface; if its target is used only without a
-required external path, the re-export can be restricted to `pub(crate) use`.
-
-Public module visibility is tracked through declarations lexically nested
-inside the module. A cross-crate reference to a descendant conservatively
-preserves its public module ancestors; a module whose reachable descendants
-are internal can be restricted to `pub(crate) mod`.
-
-Rustc resolves consumer paths through `pub use` to the underlying declaration,
-so the graph cannot identify which alias was used. To avoid suggestions that
-could fail privacy checking, Hawk does not report glob re-exports, re-exports
-of modules or unmodeled/external targets, and it preserves a public module
-that contains a public re-export. These are intentional false negatives until
-export-path provenance is available.
-
-## Configuration
-
-Add `hawk.toml` at the workspace root and list every binary shipped as part of
-the product. Each applicable `[[production]]` entry is built as a production
-consumer, so an API required by that binary is not diagnosed as dead or
-unnecessarily public:
-
-```toml
-[[production]]
-package = "uv"
-bin = "uv"
-reason = "shipped package manager binary"
-
-[[production]]
-package = "uv-dev"
-bin = "uv-dev"
-reason = "developer binary shipped from this workspace"
-
-[[production]]
-package = "windows-helper"
-bin = "windows-helper"
-target = "cfg(windows)"
-reason = "Windows-only binary shipped from this workspace"
-```
-
-Every package and binary must be a target of the selected Cargo workspace. All
-configured binaries are analyzed with the same `--all-features` and
-compilation target. An optional `target` accepts the same named targets and
-`cfg(...)` platform expressions as Cargo target dependencies. At least one
-production binary must apply to the analyzed target.
-
-The same configuration file can suppress an intentional finding or pin one as
-an expected finding:
-
-```toml
-[[override]]
-lint = "hawk::dead_public"
-crate = "library"
-item = "legacy_entry"
-level = "allow"
-reason = "retained temporarily while consumers migrate"
-
-[[override]]
-lint = "hawk::unnecessary_public"
-crate = "library"
-item = "generated_registration"
-level = "expect"
-reason = "called by generated registration that Hawk does not model"
-
-[[override]]
-lint = "hawk::dead_public"
-crate = "platform"
-item = "windows_only_api"
-level = "expect"
-target = "cfg(windows)"
-reason = "public API retained only in the Windows build"
-```
-
-`allow` suppresses a matching finding. `expect` suppresses a matching finding
-and reports `hawk::unfulfilled_expectation` if that exact finding is no longer
-present. An entry whose `crate` and `item` selector no longer identifies a
-compiled item reports `hawk::unknown_item`. An optional `target` accepts the
-same platform syntax; the override is checked only while analyzing a matching
-target.
-For newly analyzed paths, `item` uses the exported alias name (for example
-`PublicAlias`) or module path (for example `api::internal`).
-
-Overrides filter diagnostics only; unlike `[[production]]`, they do not add
-reachability roots or preserve visibility for referenced items. Use
-`--config PATH` to load a configuration file other than the workspace-root
-`hawk.toml`.
-With `-D warnings`, correctly suppressed diagnostics do not fail the command,
-while stale selectors and unfulfilled expectations do unless lowered or
-allowed explicitly.
+Hawk is experimental. It assumes workspace library crates are internal to the
+configured binary product unless they are explicitly excluded from analysis.
+Because it integrates with compiler internals, it is pinned to Rust 1.95.0.
+Hawk was authored entirely by GPT-5.5 in Codex.
 
 ## License
 

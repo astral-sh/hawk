@@ -47,7 +47,7 @@ Those facts can originate in different Cargo target builds and different
 crate compilations. Hawk therefore uses rustc as a fact collector and runs
 its lint decision as a workspace-level post-processing step.
 
-## Product Model
+## Product model
 
 Hawk treats workspace library crates as internal implementation crates unless
 the caller excludes them with `--exclude-crate`. It does not infer the product
@@ -62,13 +62,14 @@ reason = "shipped package manager binary"
 ```
 
 Applicable `[[production]]` entries seed the production graph. Hawk also
-compiles workspace non-production targets separately under
-`cargo check --workspace --all-targets`:
+compiles workspace non-production targets under
+`cargo check --workspace --all-targets` and compile-only doctests under
+`cargo test --workspace --doc`:
 
-- test harnesses seed a second reachability graph, allowing Hawk to report an
-  item as needed only for tests;
-- tests, benches, and examples preserve public visibility whenever a compiled
-  cross-crate reference requires it;
+- executable non-production targets, including test harnesses and
+  `harness = false` benchmarks or tests, seed a second reachability graph;
+- tests, benches, examples, and doctests preserve public visibility whenever
+  a compiled cross-crate reference requires it;
 - test-only compilation can expose `#[cfg(test)]` declarations and
   dev-dependency support crates as diagnostic candidates.
 
@@ -81,7 +82,7 @@ workspace changes which crates are checked, but it does not define the
 workspace as the complete external consumer of its internal libraries. Hawk's
 configured product model does.
 
-## Execution Pipeline
+## Execution pipeline
 
 `cargo-hawk` is both the front-end executable and the compiler wrapper. Its
 `main` function distinguishes an ordinary CLI invocation from a
@@ -97,6 +98,7 @@ An analysis run proceeds as follows:
      v
  cargo check --package <product> --bin <product>   (once per product binary)
  cargo check --workspace --all-targets              (non-production surface)
+ cargo test --workspace --doc                       (compile-only doctests)
      |
      | RUSTC_WORKSPACE_WRAPPER=cargo-hawk
      v
@@ -114,8 +116,10 @@ An analysis run proceeds as follows:
 Every Cargo invocation includes `--all-features --locked`, a shared target
 directory, and optional `--target`. Environment variables identify the
 fragment output directory, selected product root, consumer mode, and run ID.
-The run ID is tracked as compiler dependency input so Cargo does not reuse a
-prior instrumented compilation without producing fresh fragments.
+For doctests, Hawk additionally uses rustdoc's test-builder wrapper to route
+the generated test crates through the compiler wrapper without executing
+them. The run ID is tracked as compiler dependency input so Cargo does not
+reuse a prior instrumented compilation without producing fresh fragments.
 
 Clippy follows the first half of this shape: its Cargo frontend invokes Cargo
 with `RUSTC_WORKSPACE_WRAPPER=clippy-driver`, and `clippy-driver` calls
@@ -124,7 +128,7 @@ lint passes in `config.register_lints`; those passes emit diagnostics as each
 crate is checked. Hawk's callback runs after rustc analysis and emits data,
 not findings, during the collection phase.
 
-## Compiler Fragments
+## Compiler fragments
 
 The wrapper records a `Fragment` for each compiled workspace crate. A fragment
 contains:
@@ -132,7 +136,8 @@ contains:
 - definitions, including source location, item kind, and whether the item is
   a public-surface candidate;
 - typed reference edges extracted from bodies and public interfaces;
-- entry-point roots when the crate is a selected product or test harness;
+- entry-point roots when the crate is a selected product or non-production
+  executable;
 - conservative roots for code whose indirect execution cannot be safely
   recovered from direct call edges;
 - required-public roots for visibility constraints that are independent of
@@ -146,9 +151,11 @@ Macro-expanded declarations are not direct candidates.
 For production compilation, candidates must be exported according to rustc's
 effective visibility information. For a test-harness compilation, Hawk also
 admits locally public declarations so it can analyze APIs compiled only for
-tests without broadening the production surface.
+tests without broadening the production surface. Non-production executables
+that are not test harnesses still contribute liveness roots, but do not
+expand this test-only candidate surface.
 
-### Edge Kinds
+### Edge kinds
 
 `src/driver.rs` produces five kinds of graph edge:
 
@@ -165,7 +172,7 @@ item can be absent from product execution while still requiring `pub` because
 some compiled cross-crate signature, re-export, or generated interface relies
 on its visibility.
 
-## Graph Analysis
+## Graph analysis
 
 `src/graph.rs` merges the fragments from all compiled graphs before emitting a
 finding. The same source declaration may have separate compiler identities
@@ -175,7 +182,8 @@ identities using crate name, diagnostic path, item kind, and source span.
 The analysis then computes two reachability closures:
 
 - **production live** begins at each configured product binary entry point;
-- **test live** begins at workspace test harness entry points.
+- **non-production live** begins at executable entry points compiled for
+  tests, benches, examples, or doctests.
 
 Both closures include conservative roots, currently used for trait-associated
 implementation code whose dispatch is not safely modeled by direct call
@@ -190,11 +198,11 @@ re-export, visibility-parent, and explicit visibility-requirement edges.
 
 For each public candidate in a non-excluded workspace library crate:
 
-| State                                                           | Result                     |
-| --------------------------------------------------------------- | -------------------------- |
-| Not live in production or tests, and not required public        | `hawk::dead_public`        |
-| Live in production or tests, but not required public            | `hawk::unnecessary_public` |
-| Required public by a compiled cross-crate consumer or interface | no visibility finding      |
+| State                                                             | Result                     |
+| ----------------------------------------------------------------- | -------------------------- |
+| Not live in production or non-production, and not required public | `hawk::dead_public`        |
+| Live in production or non-production, but not required public     | `hawk::unnecessary_public` |
+| Required public by a compiled cross-crate consumer or interface   | no visibility finding      |
 
 A selected production binary is a consumer, not a library surface to reduce,
 so its crate does not receive these findings.
@@ -204,7 +212,7 @@ variant as dead surface, but it does not report a reachable variant as
 unnecessarily public because Rust does not provide an independent
 `pub(crate)` modifier for a variant.
 
-## Conservative Boundaries
+## Conservative boundaries
 
 Like Clippy, Hawk should avoid fixes that change valid code into code that no
 longer compiles. Workspace-global analysis adds several privacy-specific
@@ -228,7 +236,7 @@ These choices are not additional public API promises. They represent cases
 where Hawk does not yet have enough provenance to recommend a compiling
 visibility reduction.
 
-## Diagnostics and Configuration
+## Diagnostics and configuration
 
 Hawk uses Clippy-style ordered command-line levels:
 
@@ -281,7 +289,7 @@ With `--fix`, Hawk therefore performs a second phase:
  rustc_driver emits MachineApplicable "pub(crate)" suggestions
      |
      v
- re-run production and non-production collection and analysis
+ re-run production, non-production, and compile-only doctest analysis
 ```
 
 Only enabled, unsuppressed, actionable findings enter a fix plan. During fix
@@ -293,9 +301,10 @@ report-only.
 
 The final re-analysis matters: a visibility change can alter downstream
 compilation and the remaining graph. The run succeeds only after the selected
-product and non-production builds compile in their edited state.
+product, non-production targets, and compile-only doctests compile in their
+edited state.
 
-## Implementation Map
+## Implementation map
 
 | File                  | Responsibility                                                                                                   |
 | --------------------- | ---------------------------------------------------------------------------------------------------------------- |
@@ -311,6 +320,8 @@ product and non-production builds compile in their edited state.
 Hawk:
 
 - [README](../README.md)
+- [Using Hawk](usage.md)
+- [Configuration](configuration.md)
 - [MVP design](mvp-design.md)
 - [`src/cli.rs`](../src/cli.rs)
 - [`src/driver.rs`](../src/driver.rs)
