@@ -2,31 +2,33 @@
 
 ## Product model
 
-The analyzed surface is the workspace library dependencies compiled into one
-explicitly selected Cargo binary target or workspace test targets. They are
-considered closed-world unless their crates are explicitly excluded. The
-selected binary establishes production reachability, and workspace tests are
+The analyzed surface is the workspace library dependencies compiled into an
+explicitly selected Cargo binary target, configured same-workspace production
+binary targets, or workspace test targets. They are considered closed-world
+unless their crates are explicitly excluded. The selected and configured
+production binaries establish production reachability, and workspace tests are
 compiled as a separate consumer graph that can also introduce test-only
 declarations.
 
 The analysis includes:
 
-- one binary target;
+- one command-line selected binary target plus zero or more configured
+  same-workspace binary targets;
 - `--all-features`;
 - one selected compilation target, defaulting to the host target;
-- production reachability from the selected binary;
+- production reachability from those binary targets;
 - test reachability and visibility requirements from workspace test targets.
 
-Alternate binary products remain future analysis modes rather than implicit
-roots.
+Binaries are never inferred as roots: a shipped secondary binary must be
+listed explicitly in `hawk.toml`.
 
 ## Diagnostics
 
-The selected binary seeds production reachability but does not itself receive
-`hawk` diagnostics. Tests can preserve public visibility, establish test-only
-reachability, and introduce diagnostic candidates from dev-dependencies or
-`#[cfg(test)]` source. Compiled workspace library declarations in either
-consumer graph can produce:
+Selected production binaries seed production reachability but do not
+themselves receive `hawk` diagnostics. Tests can preserve public visibility,
+establish test-only reachability, and introduce diagnostic candidates from
+dev-dependencies or `#[cfg(test)]` source. Compiled workspace library
+declarations in either consumer graph can produce:
 
 - dead public surface: a public declaration is not reachable from the product
   or workspace tests;
@@ -97,29 +99,33 @@ positives. Any compiled cross-crate reference prevents a visibility diagnostic
 because rustc privacy-checks dead items as well as production-reachable ones
 and `pub` is the narrowest Rust visibility available for those uses.
 
-An optional workspace-root `hawk.toml` configures diagnostic overrides by
-exact lint, crate, and item path, optionally scoped to a Cargo-style target
-name or `cfg(...)` platform expression. `allow` suppresses a matching finding;
-`expect` also produces an unfulfilled-expectation diagnostic when its finding
-disappears on an applicable target. Overrides that refer to an item absent
-from an applicable compiled graph produce an unknown-item diagnostic so stale
-configuration is visible. Overrides do not change reachability or
+An optional workspace-root `hawk.toml` configures supplementary production
+binaries and diagnostic overrides. A `[[production]]` entry names a package
+and binary target in the selected workspace, optionally scoped to a
+Cargo-style target name or `cfg(...)` platform expression, and its compiled
+references participate in production reachability and required-public
+analysis. An `[[override]]` entry identifies an exact lint, crate, and item
+path under the same optional target scoping. `allow` suppresses a matching
+finding; `expect` also produces an unfulfilled-expectation diagnostic when its
+finding disappears on an applicable target. Overrides that refer to an item
+absent from an applicable compiled graph produce an unknown-item diagnostic so
+stale configuration is visible. Overrides do not change reachability or
 required-public analysis, and suppressed findings are not eligible for fixes.
 
 ## Implementation direction
 
-`cargo hawk` invokes both the selected binary build and `cargo check
+`cargo hawk` invokes each selected production binary build and `cargo check
 --workspace --tests` with `RUSTC_WORKSPACE_WRAPPER=hawk-driver`. The compiler
 driver is pinned to the workspace Rust toolchain and emits resolved graph
-fragments for each compiled workspace crate. The frontend retains the two root
-sets, so a declaration can be production-live, test-live, or dead, while
-combining compiled cross-crate visibility requirements from both passes. If
-Cargo compiles the same workspace crate more than once, equivalent source
-declarations are merged by crate, name, kind, and span before diagnostics are
-emitted. In a library test harness, Hawk additionally records source-level
-public declarations, and admits those absent from the production pass as test
-surface candidates, so items enabled only under `#[cfg(test)]` are analyzed
-without broadening the existing production candidate surface.
+fragments for each compiled workspace crate. The frontend retains production
+and test root sets, so a declaration can be production-live, test-live, or
+dead, while combining compiled cross-crate visibility requirements from all
+passes. If Cargo compiles the same workspace crate more than once, equivalent
+source declarations are merged by crate, name, kind, and span before
+diagnostics are emitted. In a library test harness, Hawk additionally records
+source-level public declarations, and admits those absent from the production
+pass as test surface candidates, so items enabled only under `#[cfg(test)]`
+are analyzed without broadening the existing production candidate surface.
 
 Reference edges distinguish implementation-body reachability from public
 interface exposure. Cross-crate references from all compiled items preserve
@@ -142,5 +148,5 @@ can be edited. Fix compilations cap ordinary compiler lints to prevent Cargo
 from consuming unrelated rustc suggestions; Hawk's compiler wrapper matches
 equivalent declaration identities and emits the planned rustc
 `MachineApplicable` suggestions. Hawk finishes with another instrumented check
-of the selected binary and workspace tests so visibility changes used only by
-tests are validated before completion.
+of every selected production binary and workspace tests so visibility changes
+used only by tests are validated before completion.

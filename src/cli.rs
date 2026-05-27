@@ -50,7 +50,7 @@ struct Args {
     #[arg(long)]
     graph_dir: Option<PathBuf>,
 
-    /// Path to Hawk lint overrides; defaults to hawk.toml in the workspace root.
+    /// Path to Hawk configuration; defaults to hawk.toml in the workspace root.
     #[arg(long, value_name = "PATH")]
     config: Option<PathBuf>,
 
@@ -232,11 +232,38 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
 
     let workspace_root = metadata.workspace_root.clone().into_std_path_buf();
     let config = Config::load(&workspace_root, args.config.as_deref())?;
+    let analysis_target = AnalysisTarget::from_rustc(args.target.as_deref())?;
+    let mut production_products = vec![ProductionSelection {
+        package: &args.package,
+        binary: &args.bin,
+    }];
+    for consumer in config.production_consumers(&analysis_target) {
+        let config_path = config
+            .path()
+            .expect("configured production consumer has a configuration path");
+        validate_product(&metadata, &consumer.package, &consumer.binary).with_context(|| {
+            format!(
+                "validate production consumer in {}:{}:{}: {}",
+                config_path.display(),
+                consumer.span.line,
+                consumer.span.column,
+                consumer.reason
+            )
+        })?;
+        if !production_products
+            .iter()
+            .any(|product| product.package == consumer.package && product.binary == consumer.binary)
+        {
+            production_products.push(ProductionSelection {
+                package: &consumer.package,
+                binary: &consumer.binary,
+            });
+        }
+    }
     let manifest_path = args
         .manifest_path
         .canonicalize()
         .with_context(|| format!("resolve manifest path for {}", args.manifest_path.display()))?;
-    let crate_name = args.bin.replace('-', "_");
     let target_dir = args
         .target_dir
         .clone()
@@ -283,15 +310,16 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
         workspace_root: &workspace_root,
         manifest_path: &manifest_path,
         target_dir: &target_dir,
-        crate_name: &crate_name,
         executable: &executable,
     };
-    cargo.run(
-        "check",
-        &format!("{run_id}-production"),
-        &production_graph_dir,
-        CargoSelection::Production,
-    )?;
+    for (index, product) in production_products.iter().copied().enumerate() {
+        cargo.run(
+            "check",
+            &format!("{run_id}-production-{index}"),
+            &production_graph_dir,
+            CargoSelection::Production(product),
+        )?;
+    }
     cargo.run(
         "check",
         &format!("{run_id}-tests"),
@@ -310,7 +338,6 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
             args.bin
         );
     }
-    let analysis_target = AnalysisTarget::from_rustc(args.target.as_deref())?;
     let excluded: HashSet<String> = args.excluded_crates.iter().cloned().collect();
     if args.fix {
         let initial_findings = config.apply(
@@ -376,12 +403,14 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
             applied_fixes = true;
         }
         if applied_fixes {
-            cargo.run(
-                "check",
-                &format!("{run_id}-post-fix-production"),
-                &production_graph_dir,
-                CargoSelection::Production,
-            )?;
+            for (index, product) in production_products.iter().copied().enumerate() {
+                cargo.run(
+                    "check",
+                    &format!("{run_id}-post-fix-production-{index}"),
+                    &production_graph_dir,
+                    CargoSelection::Production(product),
+                )?;
+            }
             cargo.run(
                 "check",
                 &format!("{run_id}-post-fix-tests"),
@@ -406,13 +435,24 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
     let mut diagnostics = String::new();
     let mut diagnostic_count = 0;
     let mut has_denied_diagnostic = false;
+    let production_description = if production_products.len() == 1 {
+        format!("binary `{}`", args.bin)
+    } else {
+        "the selected production binaries".to_owned()
+    };
     for finding in &findings.findings {
         let level = lint_levels.level(finding.kind.code());
         if level.is_emitted() {
             diagnostic_count += 1;
             has_denied_diagnostic |= level == LintLevel::Deny;
-            write_diagnostic(&mut diagnostics, finding, &args.bin, &workspace_root, level)
-                .expect("formatting diagnostics into a string cannot fail");
+            write_diagnostic(
+                &mut diagnostics,
+                finding,
+                &production_description,
+                &workspace_root,
+                level,
+            )
+            .expect("formatting diagnostics into a string cannot fail");
         }
     }
     for diagnostic in &findings.config_diagnostics {
@@ -434,10 +474,24 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
         || "the host target".to_owned(),
         |target| format!("target `{target}`"),
     );
+    let configured_production_count = production_products.len() - 1;
+    let production_summary = if configured_production_count == 0 {
+        format!("`{} --bin {} --all-features`", args.package, args.bin)
+    } else if configured_production_count == 1 {
+        format!(
+            "`{} --bin {} --all-features` and 1 configured production binary",
+            args.package, args.bin
+        )
+    } else {
+        format!(
+            "`{} --bin {} --all-features` and {configured_production_count} configured production binaries",
+            args.package, args.bin
+        )
+    };
     writeln!(
         diagnostics,
-        "hawk: {} finding(s) for `{} --bin {} --all-features` and workspace tests on {}",
-        diagnostic_count, args.package, args.bin, compilation_target
+        "hawk: {} finding(s) for {} and workspace tests on {}",
+        diagnostic_count, production_summary, compilation_target
     )
     .expect("formatting diagnostics into a string cannot fail");
     anstream::AutoStream::new(std::io::stdout(), args.color.into())
@@ -455,8 +509,13 @@ struct InstrumentedCargo<'a> {
     workspace_root: &'a Path,
     manifest_path: &'a Path,
     target_dir: &'a Path,
-    crate_name: &'a str,
     executable: &'a Path,
+}
+
+#[derive(Clone, Copy)]
+struct ProductionSelection<'a> {
+    package: &'a str,
+    binary: &'a str,
 }
 
 #[derive(Clone, Copy)]
@@ -467,7 +526,7 @@ struct FixRequest<'a> {
 
 #[derive(Clone, Copy)]
 enum CargoSelection<'a> {
-    Production,
+    Production(ProductionSelection<'a>),
     Tests,
     FixProduction(FixRequest<'a>),
     FixTests(FixRequest<'a>),
@@ -492,12 +551,12 @@ impl InstrumentedCargo<'_> {
             .arg("--target-dir")
             .arg(self.target_dir);
         match selection {
-            CargoSelection::Production => {
+            CargoSelection::Production(product) => {
                 command
                     .arg("--package")
-                    .arg(&self.args.package)
+                    .arg(product.package)
                     .arg("--bin")
-                    .arg(&self.args.bin);
+                    .arg(product.binary);
             }
             CargoSelection::Tests => {
                 command.arg("--workspace").arg("--tests");
@@ -534,12 +593,19 @@ impl InstrumentedCargo<'_> {
         }
         let consumer_mode = match selection {
             CargoSelection::Tests | CargoSelection::FixTests(_) => "tests",
-            CargoSelection::Production | CargoSelection::FixProduction(_) => "production",
+            CargoSelection::Production(_) | CargoSelection::FixProduction(_) => "production",
         };
+        let root_crate = match selection {
+            CargoSelection::Production(product) => product.binary,
+            CargoSelection::Tests
+            | CargoSelection::FixProduction(_)
+            | CargoSelection::FixTests(_) => &self.args.bin,
+        }
+        .replace('-', "_");
         command
             .env("RUSTC_WORKSPACE_WRAPPER", self.executable)
             .env("HAWK_OUTPUT_DIR", graph_dir)
-            .env("HAWK_ROOT_CRATE", self.crate_name)
+            .env("HAWK_ROOT_CRATE", root_crate)
             .env("HAWK_CONSUMER_MODE", consumer_mode)
             .env("HAWK_RUN_ID", run_id);
         if let CargoSelection::FixProduction(fix_request) | CargoSelection::FixTests(fix_request) =
@@ -643,7 +709,7 @@ const EMPHASIS: Style = Style::new().bold();
 fn write_diagnostic(
     output: &mut String,
     finding: &Finding<'_>,
-    binary: &str,
+    production_description: &str,
     workspace_root: &Path,
     level: LintLevel,
 ) -> std::fmt::Result {
@@ -663,7 +729,7 @@ fn write_diagnostic(
         ),
         (FindingKind::DeadPublic, DefinitionKind::EnumVariant, _, false) => (
             format!(
-                "`{}` is a public enum variant but is not reachable from binary `{binary}`",
+                "`{}` is a public enum variant but is not reachable from {production_description}",
                 finding.definition.name
             ),
             "remove this variant",
@@ -682,7 +748,7 @@ fn write_diagnostic(
         ),
         (FindingKind::DeadPublic, DefinitionKind::Reexport, _, false) => (
             format!(
-                "public re-export `{}` has no target reachable from binary `{binary}`",
+                "public re-export `{}` has no target reachable from {production_description}",
                 finding.definition.name
             ),
             "consider restricting this re-export's visibility or removing it",
@@ -698,7 +764,7 @@ fn write_diagnostic(
         ),
         (FindingKind::DeadPublic, DefinitionKind::Module, _, false) => (
             format!(
-                "public module `{}` has no declaration reachable from binary `{binary}`",
+                "public module `{}` has no declaration reachable from {production_description}",
                 finding.definition.name
             ),
             "consider restricting this module's visibility or removing it",
@@ -714,7 +780,7 @@ fn write_diagnostic(
         ),
         (FindingKind::DeadPublic, _, _, false) => (
             format!(
-                "`{}` is public but is not reachable from binary `{binary}`",
+                "`{}` is public but is not reachable from {production_description}",
                 finding.definition.name
             ),
             "consider restricting this declaration's visibility or removing it",
@@ -1066,7 +1132,7 @@ mod tests {
         write_diagnostic(
             &mut output,
             &finding,
-            "app",
+            "binary `app`",
             Path::new(env!("CARGO_MANIFEST_DIR")),
             LintLevel::Warn,
         )
@@ -1106,7 +1172,7 @@ mod tests {
         write_diagnostic(
             &mut output,
             &finding,
-            "app",
+            "binary `app`",
             Path::new(env!("CARGO_MANIFEST_DIR")),
             LintLevel::Warn,
         )

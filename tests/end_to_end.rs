@@ -343,6 +343,39 @@ fn diagnoses_public_surface_of_a_binary_product() {
 }
 
 #[test]
+fn configured_production_binary_contributes_product_reachability() {
+    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/production_consumers/Cargo.toml");
+    let target_dir = tempfile::tempdir().expect("temporary target directory");
+    let output = Command::new(env!("CARGO_BIN_EXE_cargo-hawk"))
+        .arg("--manifest-path")
+        .arg(manifest)
+        .arg("--package")
+        .arg("app")
+        .arg("--bin")
+        .arg("app")
+        .arg("--target-dir")
+        .arg(target_dir.path())
+        .arg("--color=never")
+        .output()
+        .expect("run cargo-hawk");
+
+    assert!(
+        output.status.success(),
+        "cargo-hawk failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!stdout.contains("`secondary_api` is public"));
+    assert!(
+        stdout.contains(
+            "`unused` is public but is not reachable from the selected production binaries"
+        )
+    );
+    assert!(stdout.contains("and 1 configured production binary and workspace tests"));
+}
+
+#[test]
 fn ordered_lint_levels_control_severity_and_exit_status() {
     let manifest =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/basic/Cargo.toml");

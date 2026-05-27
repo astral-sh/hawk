@@ -14,6 +14,7 @@ pub struct Config {
     path: Option<PathBuf>,
     source: String,
     overrides: Vec<LintOverride>,
+    production: Vec<ProductionConsumer>,
 }
 
 #[derive(Clone, Debug)]
@@ -22,6 +23,15 @@ pub struct LintOverride {
     pub crate_name: String,
     pub item: String,
     pub level: OverrideLevel,
+    pub reason: String,
+    pub target: Option<Platform>,
+    pub span: ConfigSpan,
+}
+
+#[derive(Clone, Debug)]
+pub struct ProductionConsumer {
+    pub package: String,
+    pub binary: String,
     pub reason: String,
     pub target: Option<Platform>,
     pub span: ConfigSpan,
@@ -68,6 +78,8 @@ pub struct AppliedFindings<'findings, 'config> {
 struct RawConfig {
     #[serde(default, rename = "override")]
     overrides: Vec<toml::Spanned<RawLintOverride>>,
+    #[serde(default)]
+    production: Vec<toml::Spanned<RawProductionConsumer>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -78,6 +90,16 @@ struct RawLintOverride {
     crate_name: String,
     item: String,
     level: OverrideLevel,
+    reason: String,
+    target: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawProductionConsumer {
+    package: String,
+    #[serde(rename = "bin")]
+    binary: String,
     reason: String,
     target: Option<String>,
 }
@@ -144,11 +166,54 @@ impl Config {
                 span,
             });
         }
+        let mut production = Vec::new();
+        for entry in raw.production {
+            let span = config_span(&source, entry.span().start);
+            let entry = entry.into_inner();
+            if entry.reason.trim().is_empty() {
+                bail!(
+                    "production consumer in {}:{}:{} must provide a non-empty reason",
+                    path.display(),
+                    span.line,
+                    span.column
+                );
+            }
+            let target = entry
+                .target
+                .map(|target| {
+                    target.parse::<Platform>().with_context(|| {
+                        format!(
+                            "parse target selector `{target}` in {}:{}:{}",
+                            path.display(),
+                            span.line,
+                            span.column
+                        )
+                    })
+                })
+                .transpose()?;
+            production.push(ProductionConsumer {
+                package: entry.package,
+                binary: entry.binary,
+                reason: entry.reason,
+                target,
+                span,
+            });
+        }
         Ok(Self {
             path: Some(path),
             source,
             overrides,
+            production,
         })
+    }
+
+    pub fn production_consumers(
+        &self,
+        target: &AnalysisTarget,
+    ) -> impl Iterator<Item = &ProductionConsumer> {
+        self.production
+            .iter()
+            .filter(move |consumer| consumer.applies_to(target))
     }
 
     pub fn apply<'findings, 'config>(
@@ -268,6 +333,14 @@ impl LintOverride {
         self.lint == finding.kind
             && self.crate_name == finding.definition.crate_name
             && self.item == finding.definition.name
+    }
+}
+
+impl ProductionConsumer {
+    fn applies_to(&self, target: &AnalysisTarget) -> bool {
+        self.target
+            .as_ref()
+            .is_none_or(|platform| platform.matches(&target.name, &target.cfgs))
     }
 }
 
@@ -460,5 +533,37 @@ reason = "only compiled on Windows"
 
         assert_eq!(applied.findings.len(), 1);
         assert!(applied.config_diagnostics.is_empty());
+    }
+
+    #[test]
+    fn target_scoped_production_consumer_only_applies_on_matching_target() {
+        let directory = tempfile::tempdir().expect("temporary configuration directory");
+        let path = directory.path().join("hawk.toml");
+        std::fs::write(
+            &path,
+            r#"
+[[production]]
+package = "windows-runner"
+bin = "windows-runner"
+target = "cfg(windows)"
+reason = "shipped on Windows"
+"#,
+        )
+        .expect("write configuration");
+        let config = Config::load(directory.path(), Some(&path)).expect("load configuration");
+
+        let windows = config
+            .production_consumers(&target("x86_64-pc-windows-msvc", &["windows"]))
+            .collect::<Vec<_>>();
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].package, "windows-runner");
+        assert_eq!(windows[0].binary, "windows-runner");
+
+        assert_eq!(
+            config
+                .production_consumers(&target("aarch64-apple-darwin", &["unix"]))
+                .count(),
+            0
+        );
     }
 }

@@ -1,0 +1,13 @@
+[package]
+name = "secondary"
+version = "0.1.0"
+edition = "2024"
+autotests = false
+
+[[bin]]
+name = "secondary"
+path = "src/main.rs"
+test = false
+
+[dependencies]
+library = { path = "../library" }

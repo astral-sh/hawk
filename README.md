@@ -2,7 +2,7 @@
 
 `hawk` is an experimental Cargo lint tool for binary products built from
 internal Rust workspace crates. It analyzes public library items in a selected
-binary product against its production binary and workspace test consumers,
+binary product against its production binaries and workspace test consumers,
 reporting items that are unused or whose visibility exceeds those consumers'
 needs.
 
@@ -23,13 +23,14 @@ cargo build
   --bin app
 ```
 
-The selected binary and workspace test targets are analyzed under
+The selected binary, any additional production binaries configured in
+`hawk.toml`, and workspace test targets are analyzed under
 `--all-features --locked` on the host target by default. Pass `--target TRIPLE`
 to analyze another compilation target; Hawk expects any required
 cross-compilation environment to be prepared by the caller. Diagnostics apply
-to workspace library crates compiled for the selected binary or workspace
-tests, including declarations enabled only under `cfg(test)`. Those libraries
-are considered internal unless exempted:
+to workspace library crates compiled for those binaries or workspace tests,
+including declarations enabled only under `cfg(test)`. Those libraries are
+considered internal unless exempted:
 
 ```sh
 ./target/debug/cargo-hawk \
@@ -189,8 +190,31 @@ export-path provenance is available.
 
 ## Configuration
 
-Add `hawk.toml` at the workspace root to suppress an intentional finding or
-pin one as an expected finding:
+Add `hawk.toml` at the workspace root when the shipped product has additional
+binary targets in the same workspace. Each applicable `[[production]]` entry
+is built as another production consumer, so an API required by that binary is
+not diagnosed as dead or unnecessarily public:
+
+```toml
+[[production]]
+package = "uv-dev"
+bin = "uv-dev"
+reason = "developer binary shipped from this workspace"
+
+[[production]]
+package = "windows-helper"
+bin = "windows-helper"
+target = "cfg(windows)"
+reason = "Windows-only binary shipped from this workspace"
+```
+
+The additional package and binary must be targets of the selected Cargo
+workspace and are analyzed with the same `--all-features` and compilation
+target as the primary binary. An optional `target` accepts the same named
+targets and `cfg(...)` platform expressions as Cargo target dependencies.
+
+The same configuration file can suppress an intentional finding or pin one as
+an expected finding:
 
 ```toml
 [[override]]
@@ -220,14 +244,15 @@ reason = "public API retained only in the Windows build"
 and reports `hawk::unfulfilled_expectation` if that exact finding is no longer
 present. An entry whose `crate` and `item` selector no longer identifies a
 compiled item reports `hawk::unknown_item`. An optional `target` accepts the
-same named targets and `cfg(...)` platform expressions as Cargo target
-dependencies; the override is checked only while analyzing a matching target.
+same platform syntax; the override is checked only while analyzing a matching
+target.
 For newly analyzed paths, `item` uses the exported alias name (for example
 `PublicAlias`) or module path (for example `api::internal`).
 
-Overrides filter diagnostics only; they do not add reachability roots or
-preserve visibility for referenced items. Use `--config PATH` to load a
-configuration file other than the workspace-root `hawk.toml`.
+Overrides filter diagnostics only; unlike `[[production]]`, they do not add
+reachability roots or preserve visibility for referenced items. Use
+`--config PATH` to load a configuration file other than the workspace-root
+`hawk.toml`.
 With `-D warnings`, correctly suppressed diagnostics do not fail the command,
 while stale selectors and unfulfilled expectations do unless lowered or
 allowed explicitly.
