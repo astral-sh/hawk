@@ -68,9 +68,10 @@ through a public field that remains required across a crate boundary. Enum
 variant constructors and paths are edges to the specific variant, and fields
 and variants preserve their containing type. Unlike fields and inherent
 associated constants, enum variants cannot be changed to `pub(crate)`. Hawk
-reports unreachable variants as removable dead public surface, but does not
-emit an unnecessary-public finding for a reachable variant because it has no
-independent actionable visibility change.
+reports unreachable variants as dead public surface that may be removed along
+with any remaining unreachable uses, but does not emit an unnecessary-public
+finding for a reachable variant because it has no independent actionable
+visibility change.
 
 Rustc resolves downstream uses of an exported path to its underlying
 declaration; the current graph cannot recover which `pub use` was consumed.

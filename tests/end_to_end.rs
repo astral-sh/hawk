@@ -205,7 +205,7 @@ fn diagnoses_public_surface_of_a_binary_product() {
         |
     159 |     Dead,
         |     ^^^ public enum variant
-        = help: remove this variant
+        = help: consider removing this variant and its remaining uses
 
     warning[hawk::dead_public]: `DeadUnion` is public but is not reachable from binary `app`
       --> library/src/lib.rs:162:1
@@ -226,7 +226,7 @@ fn diagnoses_public_surface_of_a_binary_product() {
         |
     176 |     Unused,
         |     ^^^ public enum variant
-        = help: remove this variant
+        = help: consider removing this variant and its remaining uses
 
     warning[hawk::dead_public]: `dead_entry` is public but is not reachable from binary `app`
       --> library/src/lib.rs:190:1

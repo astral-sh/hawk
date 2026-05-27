@@ -208,9 +208,10 @@ A selected production binary is a consumer, not a library surface to reduce,
 so its crate does not receive these findings.
 
 Enum variants are a special case. Hawk can report an unreachable public
-variant as dead surface, but it does not report a reachable variant as
-unnecessarily public because Rust does not provide an independent
-`pub(crate)` modifier for a variant.
+variant as dead surface requiring removal together with any remaining
+unreachable uses, but it does not report a reachable variant as unnecessarily
+public because Rust does not provide an independent `pub(crate)` modifier for
+a variant.
 
 ## Conservative boundaries
 

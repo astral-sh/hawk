@@ -801,7 +801,7 @@ fn write_diagnostic(
                 "`{}` is a public enum variant but is not reachable from {dead_reachability_source}",
                 finding.definition.name
             ),
-            "remove this variant",
+            "consider removing this variant and its remaining uses",
             "public enum variant",
         ),
         (FindingKind::UnnecessaryPublic, DefinitionKind::EnumVariant, _) => {
@@ -1197,7 +1197,7 @@ mod tests {
     }
 
     #[test]
-    fn dead_enum_variant_diagnostic_suggests_a_valid_remediation() {
+    fn dead_enum_variant_diagnostic_accounts_for_unreachable_uses() {
         let definition = Definition {
             id: "InternalState::Active".into(),
             crate_name: "library".into(),
@@ -1227,7 +1227,7 @@ mod tests {
         insta::assert_snapshot!(output, @r###"
         warning[hawk::dead_public]: `InternalState::Active` is a public enum variant but is not reachable from binary `app`
           = note: declaration in crate `library`
-          = help: remove this variant
+          = help: consider removing this variant and its remaining uses
 
         "###);
         assert!(!output.contains("pub(crate)"));
