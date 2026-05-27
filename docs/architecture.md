@@ -292,12 +292,13 @@ With `--fix`, Hawk therefore performs a second phase:
  re-run production, non-production, and compile-only doctest analysis
 ```
 
-Only enabled, unsuppressed, actionable findings enter a fix plan. During fix
-compilations Hawk caps ordinary compiler lints so Cargo consumes Hawk's
+Only enabled, unsuppressed `hawk::unnecessary_public` findings enter a fix
+plan. Restricting dead surface without removing it can activate rustc's
+ordinary `dead_code` lint, so `hawk::dead_public` remains report-only. During
+fix compilations Hawk caps ordinary compiler lints so Cargo consumes Hawk's
 planned suggestions rather than unrelated compiler edits. It matches
 declarations across recompilations by compiler ID or equivalent source
-identity, emits `pub(crate)` replacements, and leaves enum-variant findings
-report-only.
+identity and emits `pub(crate)` replacements.
 
 The final re-analysis matters: a visibility change can alter downstream
 compilation and the remaining graph. The run succeeds only after the selected

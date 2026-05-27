@@ -101,16 +101,18 @@ Pass `--fix` to apply visibility reductions through Cargo's fix machinery:
 ```
 
 Hawk emits machine-applicable `pub` to `pub(crate)` suggestions for enabled,
-unsuppressed findings. It delegates edit application and validation to
-`cargo fix`, including Cargo's source-control safety checks; pass
+unsuppressed `hawk::unnecessary_public` findings. `hawk::dead_public` remains
+report-only because a visibility-only edit can activate rustc's `dead_code`
+lint; removing dead surface may require editing its remaining internal uses.
+Hawk delegates edit application and validation to `cargo fix`, including
+Cargo's source-control safety checks; pass
 `--allow-dirty`, `--allow-staged`, or `--allow-no-vcs` with `--fix` when the
 corresponding Cargo override is appropriate.
 
 Fixes are limited to workspace library packages in the configured production
 or non-production surface. Hawk rechecks configured binaries and
 non-production targets, including compile-only doctests, after applying
-edits. Enum variants remain report-only because Rust has no independent
-visibility modifier for a variant.
+edits. Dead declarations and enum variants remain report-only.
 
 ## Analyze another target
 

@@ -448,7 +448,7 @@ fn applies_visibility_fixes_through_cargo_fix() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("hawk: 3 finding(s)"));
+    assert!(stdout.contains("`dead_entry` is public"));
     assert!(stdout.contains("`ProductEnum::Unused`"));
     assert!(!stdout.contains("`internal_helper`"));
 
@@ -456,11 +456,11 @@ fn applies_visibility_fixes_through_cargo_fix() {
         fs::read_to_string(workspace.path().join("library/src/lib.rs")).expect("read fixed source");
     assert!(library.contains("pub(crate) fn internal_helper() {}"));
     assert!(library.contains("pub(crate) use exported::ReexportedValue;"));
-    assert!(library.contains("pub(crate) const DEAD_VALUE: u8 = 2;"));
+    assert!(library.contains("pub const DEAD_VALUE: u8 = 2;"));
     assert!(library.contains("pub(crate) constructed: u8,"));
-    assert!(library.contains("pub(crate) mod dead_outer {"));
+    assert!(library.contains("pub mod dead_outer {"));
     assert!(library.contains("pub fn dead_code_allowed_entry() {"));
-    assert!(library.contains("pub(crate) fn dead_code_allowed_helper() {}"));
+    assert!(library.contains("pub fn dead_code_allowed_helper() {}"));
     assert!(library.contains("pub enum ProductEnum {"));
     assert!(library.contains("pub fn integration_test_support() {"));
     assert!(library.contains("pub(crate) fn test_only_helper() {}"));
@@ -470,7 +470,7 @@ fn applies_visibility_fixes_through_cargo_fix() {
         .expect("read fixed test-support source");
     assert!(test_support.contains("pub fn entry() {"));
     assert!(test_support.contains("pub(crate) fn helper() {}"));
-    assert!(test_support.contains("pub(crate) fn dead_test_surface() {}"));
+    assert!(test_support.contains("pub fn dead_test_surface() {}"));
 
     let unit_support = fs::read_to_string(workspace.path().join("unit_support/src/lib.rs"))
         .expect("read fixed unit-test source");
@@ -478,6 +478,37 @@ fn applies_visibility_fixes_through_cargo_fix() {
     assert!(unit_support.contains("pub fn not_exported() {}"));
     assert!(unit_support.contains("pub(crate) fn test_entry() {"));
     assert!(unit_support.contains("pub(crate) fn test_only_helper() {}"));
+}
+
+#[test]
+fn dead_public_findings_are_not_fixed_into_dead_code_errors() {
+    let source_workspace =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/dead_public_fixes");
+    let workspace = tempfile::tempdir().expect("temporary fixture workspace");
+    copy_directory(&source_workspace, workspace.path());
+    let target_dir = tempfile::tempdir().expect("temporary target directory");
+    let output = Command::new(env!("CARGO_BIN_EXE_cargo-hawk"))
+        .arg("--manifest-path")
+        .arg(workspace.path().join("Cargo.toml"))
+        .arg("--fix")
+        .arg("--allow-no-vcs")
+        .arg("--target-dir")
+        .arg(target_dir.path())
+        .arg("--color=never")
+        .output()
+        .expect("run cargo-hawk with fixes");
+
+    assert!(
+        output.status.success(),
+        "cargo-hawk fix failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("`dead_api` is public"));
+
+    let library =
+        fs::read_to_string(workspace.path().join("library/src/lib.rs")).expect("read source");
+    assert!(library.contains("pub fn dead_api() {}"));
 }
 
 #[test]
@@ -531,6 +562,7 @@ fn doctest_consumers_preserve_required_public_visibility_during_fixes() {
         "cargo-hawk fix failed:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("`unused` is public"));
 
     let doctest = Command::new("cargo")
         .arg("test")
@@ -553,7 +585,7 @@ fn doctest_consumers_preserve_required_public_visibility_during_fixes() {
     let library =
         fs::read_to_string(workspace.path().join("library/src/lib.rs")).expect("read fixed source");
     assert!(library.contains("pub fn doc_api() {}"));
-    assert!(library.contains("pub(crate) fn unused() {}"));
+    assert!(library.contains("pub fn unused() {}"));
 }
 
 #[test]

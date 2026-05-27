@@ -363,7 +363,10 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
             .findings
             .iter()
             .filter(|finding| lint_levels.level(finding.kind.code()).is_emitted())
-            .filter(|finding| finding.definition.kind != DefinitionKind::EnumVariant)
+            // Restricting unreachable public surface to `pub(crate)` can make
+            // rustc's ordinary `dead_code` lint start firing. Such findings
+            // need coordinated removal rather than a visibility-only fix.
+            .filter(|finding| finding.kind == FindingKind::UnnecessaryPublic)
             .collect();
         let production_fix_plan = fix_plan_for(
             fixable_findings

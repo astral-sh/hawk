@@ -45,8 +45,10 @@ or allow one lint. The options apply after `hawk.toml` overrides and cover both
 visibility findings and configuration diagnostics for stale selectors or
 unfulfilled expectations. Invalid configuration and instrumented build
 failures fail independently of lint levels. With `--fix`, Hawk converts
-enabled, unsuppressed visibility findings to machine-applicable `pub(crate)`
-suggestions and delegates editing and validation to `cargo fix`.
+enabled, unsuppressed unnecessary-public findings to machine-applicable
+`pub(crate)` suggestions and delegates editing and validation to `cargo fix`.
+Dead-public findings remain report-only because narrowing unused surface can
+activate rustc's `dead_code` lint.
 
 ## Initial scope
 
@@ -144,12 +146,12 @@ provably type-checking-safe.
 
 Fixing is a second compilation phase because findings are determined only
 after Hawk merges graph fragments. Hawk builds fix plans from emitted
-findings, running package-scoped `cargo fix --lib` for production findings and
-package-scoped `cargo fix --all-targets` for findings reached through or
-declared only in the non-production graph. The latter compiles each owning
-library while retaining test configuration and validating benches and
-examples, so declarations in dev-dependency support libraries and declarations
-enabled under `#[cfg(test)]` can be edited. Fix compilations cap ordinary
+unnecessary-public findings, running package-scoped `cargo fix --lib` for
+production findings and package-scoped `cargo fix --all-targets` for findings
+reached through or declared only in the non-production graph. The latter
+compiles each owning library while retaining test configuration and validating
+benches and examples, so declarations in dev-dependency support libraries and
+declarations enabled under `#[cfg(test)]` can be edited. Fix compilations cap ordinary
 compiler lints to prevent Cargo from consuming unrelated rustc suggestions;
 Hawk's compiler wrapper matches equivalent declaration identities and emits
 the planned rustc `MachineApplicable` suggestions. Hawk finishes with another
