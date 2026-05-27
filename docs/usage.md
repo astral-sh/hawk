@@ -85,7 +85,7 @@ Hawk accepts Clippy-style ordered `-A`/`--allow`, `-W`/`--warn`, and
 ```
 
 The supported selectors are `warnings`, `hawk::dead_public`,
-`hawk::unnecessary_public`, `hawk::unknown_item`, and
+`hawk::unnecessary_public`, `hawk::unknown_item`, `hawk::ambiguous_item`, and
 `hawk::unfulfilled_expectation`. Denied diagnostics are emitted as errors and
 cause a non-zero exit status. Invalid configuration and failed instrumented
 Cargo builds fail independently of lint levels.

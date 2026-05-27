@@ -246,7 +246,8 @@ cargo-hawk --manifest-path Cargo.toml -D warnings -W hawk::unnecessary_public
 
 The visibility diagnostics are `hawk::dead_public` and
 `hawk::unnecessary_public`. Configuration validation adds
-`hawk::unknown_item` and `hawk::unfulfilled_expectation`.
+`hawk::unknown_item`, `hawk::ambiguous_item`, and
+`hawk::unfulfilled_expectation`.
 
 Hawk's workspace-level decisions do not naturally map to source attributes in
 a single crate compilation. Instead, `hawk.toml` carries exact, documented
@@ -257,15 +258,18 @@ exceptions:
 lint = "hawk::unnecessary_public"
 crate = "library"
 item = "generated_registration"
+kind = "function"
 level = "expect"
 reason = "called by generated registration that Hawk does not model"
 ```
 
 `allow` suppresses the selected finding. `expect` suppresses it while
-producing a diagnostic if the finding disappears. Overrides filter output;
-they never add graph roots or preserve public visibility. This is intentionally
-different from adding a production consumer: a real consumer changes the
-analysis, while an override records an accepted outstanding diagnostic.
+producing a diagnostic if the finding disappears. Overrides can specify
+`kind` to distinguish declarations in separate Rust namespaces; ambiguous
+unqualified overrides suppress nothing. Overrides filter output; they never
+add graph roots or preserve public visibility. This is intentionally different
+from adding a production consumer: a real consumer changes the analysis,
+while an override records an accepted outstanding diagnostic.
 
 ## Fixes
 

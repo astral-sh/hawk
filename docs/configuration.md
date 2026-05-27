@@ -51,6 +51,7 @@ reason = "retained temporarily while consumers migrate"
 lint = "hawk::unnecessary_public"
 crate = "library"
 item = "generated_registration"
+kind = "function"
 level = "expect"
 reason = "called by generated registration that Hawk does not model"
 
@@ -65,12 +66,16 @@ reason = "public API retained only in the Windows build"
 
 `allow` suppresses a matching finding. `expect` suppresses a matching finding
 and reports `hawk::unfulfilled_expectation` if that finding is no longer
-present. An override whose `crate` and `item` selector no longer identifies a
-compiled item reports `hawk::unknown_item`.
+present. An override whose selectors no longer identify a compiled item
+reports `hawk::unknown_item`. If an override without `kind` identifies
+multiple same-named declarations, Hawk reports `hawk::ambiguous_item` and
+suppresses none of them.
 
 The `item` value names Hawk's diagnostic path. For exported aliases, use the
 alias name, such as `PublicAlias`; for modules, use the module path, such as
-`api::internal`.
+`api::internal`. Add `kind` when separate Rust namespaces define declarations
+with the same path. It accepts Hawk's item-kind names, such as `function`,
+`type_alias`, and `constant`.
 
 Overrides filter diagnostics only. Unlike a `[[production]]` entry, an
 override does not add a consumer, establish reachability, or preserve public

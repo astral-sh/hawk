@@ -155,6 +155,7 @@ impl LintLevels {
                 | "hawk::dead_public"
                 | "hawk::unnecessary_public"
                 | "hawk::unknown_item"
+                | "hawk::ambiguous_item"
                 | "hawk::unfulfilled_expectation"
         ) {
             return Ok(());
@@ -937,6 +938,14 @@ fn write_config_diagnostic(
             "no matching item was found",
             "remove this override or update its `crate` and `item` selectors",
         ),
+        ConfigDiagnosticKind::AmbiguousItem => (
+            format!(
+                "override for `{}` matches multiple items named `{item}`",
+                entry.lint.code()
+            ),
+            "selector matches multiple items",
+            "add a `kind` selector or otherwise disambiguate this override",
+        ),
         ConfigDiagnosticKind::UnfulfilledExpectation => (
             format!(
                 "expected `{}` for `{item}`, but no finding was produced",
@@ -986,6 +995,7 @@ fn write_config_diagnostic(
 fn config_diagnostic_code(kind: ConfigDiagnosticKind) -> &'static str {
     match kind {
         ConfigDiagnosticKind::UnknownItem => "hawk::unknown_item",
+        ConfigDiagnosticKind::AmbiguousItem => "hawk::ambiguous_item",
         ConfigDiagnosticKind::UnfulfilledExpectation => "hawk::unfulfilled_expectation",
     }
 }

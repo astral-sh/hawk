@@ -7,7 +7,7 @@ use anyhow::{Context, Result, bail};
 use cargo_platform::{Cfg, Platform};
 use serde::Deserialize;
 
-use crate::graph::{Finding, FindingKind, Fragment};
+use crate::graph::{Definition, DefinitionKind, Finding, FindingKind, Fragment};
 
 #[derive(Debug, Default)]
 pub struct Config {
@@ -22,6 +22,7 @@ pub struct LintOverride {
     pub lint: FindingKind,
     pub crate_name: String,
     pub item: String,
+    pub definition_kind: Option<DefinitionKind>,
     pub level: OverrideLevel,
     pub reason: String,
     pub target: Option<Platform>,
@@ -59,6 +60,7 @@ pub struct ConfigSpan {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ConfigDiagnosticKind {
     UnknownItem,
+    AmbiguousItem,
     UnfulfilledExpectation,
 }
 
@@ -89,6 +91,8 @@ struct RawLintOverride {
     #[serde(rename = "crate")]
     crate_name: String,
     item: String,
+    #[serde(rename = "kind")]
+    definition_kind: Option<DefinitionKind>,
     level: OverrideLevel,
     reason: String,
     target: Option<String>,
@@ -160,6 +164,7 @@ impl Config {
                 lint,
                 crate_name: entry.crate_name,
                 item: entry.item,
+                definition_kind: entry.definition_kind,
                 level: entry.level,
                 reason: entry.reason,
                 target,
@@ -223,25 +228,38 @@ impl Config {
         test_fragments: &[Fragment],
         findings: Vec<Finding<'findings>>,
     ) -> AppliedFindings<'findings, 'config> {
-        let known_items: HashSet<(&str, &str)> = production_fragments
+        let known_items: HashSet<KnownItemIdentity<'_>> = production_fragments
             .iter()
             .chain(test_fragments)
             .flat_map(|fragment| &fragment.definitions)
-            .map(|definition| (definition.crate_name.as_str(), definition.name.as_str()))
+            .map(known_item_identity)
             .collect();
         let mut config_diagnostics = Vec::new();
+        let mut active_overrides = Vec::new();
         for entry in self
             .overrides
             .iter()
             .filter(|entry| entry.applies_to(target))
         {
-            if !known_items.contains(&(entry.crate_name.as_str(), entry.item.as_str())) {
+            let matching_items = known_items
+                .iter()
+                .filter(|item| entry.identifies(item))
+                .count();
+            if matching_items == 0 {
                 config_diagnostics.push(ConfigDiagnostic {
                     kind: ConfigDiagnosticKind::UnknownItem,
                     entry,
                 });
                 continue;
             }
+            if matching_items > 1 {
+                config_diagnostics.push(ConfigDiagnostic {
+                    kind: ConfigDiagnosticKind::AmbiguousItem,
+                    entry,
+                });
+                continue;
+            }
+            active_overrides.push(entry);
             if entry.level == OverrideLevel::Expect
                 && !findings.iter().any(|finding| entry.matches(finding))
             {
@@ -253,12 +271,7 @@ impl Config {
         }
         let findings = findings
             .into_iter()
-            .filter(|finding| {
-                !self
-                    .overrides
-                    .iter()
-                    .any(|entry| entry.applies_to(target) && entry.matches(finding))
-            })
+            .filter(|finding| !active_overrides.iter().any(|entry| entry.matches(finding)))
             .collect();
         AppliedFindings {
             findings,
@@ -272,6 +285,27 @@ impl Config {
 
     pub fn source_line(&self, line: usize) -> Option<&str> {
         self.source.lines().nth(line.checked_sub(1)?)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct KnownItemIdentity<'a> {
+    crate_name: &'a str,
+    item: &'a str,
+    kind: DefinitionKind,
+    file: Option<&'a str>,
+    line: Option<usize>,
+    column: Option<usize>,
+}
+
+fn known_item_identity(definition: &Definition) -> KnownItemIdentity<'_> {
+    KnownItemIdentity {
+        crate_name: definition.crate_name.as_str(),
+        item: definition.name.as_str(),
+        kind: definition.kind,
+        file: definition.span.as_ref().map(|span| span.file.as_str()),
+        line: definition.span.as_ref().map(|span| span.line),
+        column: definition.span.as_ref().map(|span| span.column),
     }
 }
 
@@ -329,10 +363,21 @@ impl LintOverride {
             .is_none_or(|platform| platform.matches(&target.name, &target.cfgs))
     }
 
+    fn identifies(&self, item: &KnownItemIdentity<'_>) -> bool {
+        self.crate_name == item.crate_name
+            && self.item == item.item
+            && self
+                .definition_kind
+                .is_none_or(|definition_kind| definition_kind == item.kind)
+    }
+
     fn matches(&self, finding: &Finding<'_>) -> bool {
         self.lint == finding.kind
             && self.crate_name == finding.definition.crate_name
             && self.item == finding.definition.name
+            && self
+                .definition_kind
+                .is_none_or(|kind| kind == finding.definition.kind)
     }
 }
 
@@ -396,6 +441,29 @@ mod tests {
 
     fn candidate_crates() -> HashSet<String> {
         HashSet::from(["library".to_owned()])
+    }
+
+    fn same_named_fragment() -> Fragment {
+        let mut fragment = fragment();
+        fragment.definitions = vec![
+            Definition {
+                id: "alias".into(),
+                crate_name: "library".into(),
+                name: "SameName".into(),
+                kind: DefinitionKind::TypeAlias,
+                span: None,
+                public_api: true,
+            },
+            Definition {
+                id: "constant".into(),
+                crate_name: "library".into(),
+                name: "SameName".into(),
+                kind: DefinitionKind::Constant,
+                span: None,
+                public_api: true,
+            },
+        ];
+        fragment
     }
 
     #[test]
@@ -463,6 +531,77 @@ reason = "detect stale selectors"
             applied.config_diagnostics[0].kind,
             ConfigDiagnosticKind::UnknownItem
         );
+    }
+
+    #[test]
+    fn ambiguous_item_selector_suppresses_no_findings() {
+        let directory = tempfile::tempdir().expect("temporary configuration directory");
+        let path = directory.path().join("hawk.toml");
+        std::fs::write(
+            &path,
+            r#"
+[[override]]
+lint = "hawk::dead_public"
+crate = "library"
+item = "SameName"
+level = "expect"
+reason = "ambiguous Rust namespace"
+"#,
+        )
+        .expect("write configuration");
+        let config = Config::load(directory.path(), Some(&path)).expect("load configuration");
+        let fragments = vec![same_named_fragment()];
+        let findings = analyze(&fragments, &[], &candidate_crates(), &HashSet::new());
+
+        let applied = config.apply(
+            &target("aarch64-apple-darwin", &["unix"]),
+            &fragments,
+            &[],
+            findings,
+        );
+
+        assert_eq!(applied.findings.len(), 2);
+        assert_eq!(applied.config_diagnostics.len(), 1);
+        assert_eq!(
+            applied.config_diagnostics[0].kind,
+            ConfigDiagnosticKind::AmbiguousItem
+        );
+    }
+
+    #[test]
+    fn definition_kind_disambiguates_an_override() {
+        let directory = tempfile::tempdir().expect("temporary configuration directory");
+        let path = directory.path().join("hawk.toml");
+        std::fs::write(
+            &path,
+            r#"
+[[override]]
+lint = "hawk::dead_public"
+crate = "library"
+item = "SameName"
+kind = "type_alias"
+level = "expect"
+reason = "retain the type alias"
+"#,
+        )
+        .expect("write configuration");
+        let config = Config::load(directory.path(), Some(&path)).expect("load configuration");
+        let fragments = vec![same_named_fragment()];
+        let findings = analyze(&fragments, &[], &candidate_crates(), &HashSet::new());
+
+        let applied = config.apply(
+            &target("aarch64-apple-darwin", &["unix"]),
+            &fragments,
+            &[],
+            findings,
+        );
+
+        assert_eq!(applied.findings.len(), 1);
+        assert_eq!(
+            applied.findings[0].definition.kind,
+            DefinitionKind::Constant
+        );
+        assert!(applied.config_diagnostics.is_empty());
     }
 
     #[test]

@@ -107,12 +107,15 @@ and binary target in the selected workspace, optionally scoped to a
 Cargo-style target name or `cfg(...)` platform expression, and its compiled
 references participate in production reachability and required-public
 analysis. An `[[override]]` entry identifies an exact lint, crate, and item
-path under the same optional target scoping. `allow` suppresses a matching
-finding; `expect` also produces an unfulfilled-expectation diagnostic when its
-finding disappears on an applicable target. Overrides that refer to an item
-absent from an applicable compiled graph produce an unknown-item diagnostic so
-stale configuration is visible. Overrides do not change reachability or
-required-public analysis, and suppressed findings are not eligible for fixes.
+path under the same optional target scoping, with an optional item kind to
+disambiguate declarations in separate Rust namespaces. `allow` suppresses a
+matching finding; `expect` also produces an unfulfilled-expectation diagnostic
+when its finding disappears on an applicable target. Overrides that refer to
+an item absent from an applicable compiled graph produce an unknown-item
+diagnostic; selectors matching multiple declarations produce an
+ambiguous-item diagnostic and suppress nothing. Overrides do not change
+reachability or required-public analysis, and suppressed findings are not
+eligible for fixes.
 
 ## Implementation direction
 
