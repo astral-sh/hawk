@@ -193,6 +193,7 @@ fn emit_fix(tcx: TyCtxt<'_>, visibility_span: rustc_span::Span, kind: FindingKin
 
 fn emit_fragment(tcx: TyCtxt<'_>, root_crate: &str, output_dir: &Path) -> Result<()> {
     let crate_name = tcx.crate_name(LOCAL_CRATE).to_string();
+    let crate_id = id(tcx, CRATE_DEF_ID.to_def_id());
     let is_non_production = env::var("HAWK_CONSUMER_MODE").as_deref() == Ok("non-production");
     let test_surface = is_non_production && tcx.sess.opts.test;
     let is_product_root = if is_non_production {
@@ -200,12 +201,17 @@ fn emit_fragment(tcx: TyCtxt<'_>, root_crate: &str, output_dir: &Path) -> Result
     } else {
         crate_name == root_crate && tcx.entry_fn(()).is_some()
     };
-    let fragment = collect_fragment(tcx, crate_name.clone(), is_product_root, test_surface);
-    let crate_id = id(tcx, CRATE_DEF_ID.to_def_id());
     let suffix: String = crate_id
         .chars()
         .filter(|character| character.is_ascii_alphanumeric())
         .collect();
+    let fragment = collect_fragment(
+        tcx,
+        crate_name.clone(),
+        crate_id,
+        is_product_root,
+        test_surface,
+    );
     let path = output_dir.join(format!("{crate_name}-{suffix}.json"));
     let file = File::create(&path).with_context(|| format!("create {}", path.display()))?;
     write_fragment(file, &fragment, &path)
@@ -223,6 +229,7 @@ fn write_fragment(writer: impl Write, fragment: &Fragment, path: &Path) -> Resul
 fn collect_fragment(
     tcx: TyCtxt<'_>,
     crate_name: String,
+    crate_id: String,
     is_product_root: bool,
     test_surface: bool,
 ) -> Fragment {
@@ -544,6 +551,7 @@ fn collect_fragment(
 
     Fragment {
         crate_name,
+        crate_id,
         is_product_root,
         definitions,
         edges,
@@ -869,6 +877,7 @@ mod tests {
     fn fragment_emission_reports_buffered_write_failures() {
         let fragment = Fragment {
             crate_name: "library".into(),
+            crate_id: "library".into(),
             is_product_root: false,
             definitions: vec![],
             edges: vec![],

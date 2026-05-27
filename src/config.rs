@@ -367,6 +367,7 @@ mod tests {
     fn fragment() -> Fragment {
         Fragment {
             crate_name: "library".into(),
+            crate_id: "library".into(),
             is_product_root: false,
             definitions: vec![Definition {
                 id: "unused".into(),

@@ -1,3 +1,3 @@
 fn main() {
-    library::secondary_api();
+    api::secondary_api();
 }

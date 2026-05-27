@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Fragment {
     pub crate_name: String,
+    pub crate_id: String,
     pub is_product_root: bool,
     pub definitions: Vec<Definition>,
     pub edges: Vec<Edge>,
@@ -137,6 +138,16 @@ pub fn analyze<'a>(
         .flat_map(|fragment| &fragment.definitions)
         .map(|definition| (definition.id.as_str(), definition))
         .collect();
+    let definition_crate_ids: HashMap<&str, &str> = production_fragments
+        .iter()
+        .chain(test_fragments)
+        .flat_map(|fragment| {
+            fragment
+                .definitions
+                .iter()
+                .map(|definition| (definition.id.as_str(), fragment.crate_id.as_str()))
+        })
+        .collect();
     let edges: Vec<&Edge> = production_fragments
         .iter()
         .chain(test_fragments)
@@ -172,8 +183,13 @@ pub fn analyze<'a>(
         .flat_map(|fragment| fragment.required_public_roots.iter().map(String::as_str))
         .collect();
     let no_explicitly_required = HashSet::new();
-    let externally_required_visibility =
-        required_public_visibility(&definitions, &edges, &equivalents, &no_explicitly_required);
+    let externally_required_visibility = required_public_visibility(
+        &definitions,
+        &definition_crate_ids,
+        &edges,
+        &equivalents,
+        &no_explicitly_required,
+    );
     for definition in definitions
         .values()
         .filter(|definition| definition.public_api && definition.kind == DefinitionKind::Reexport)
@@ -187,8 +203,13 @@ pub fn analyze<'a>(
             explicitly_required.insert(definition.id.as_str());
         }
     }
-    let required_public_visibility =
-        required_public_visibility(&definitions, &edges, &equivalents, &explicitly_required);
+    let required_public_visibility = required_public_visibility(
+        &definitions,
+        &definition_crate_ids,
+        &edges,
+        &equivalents,
+        &explicitly_required,
+    );
 
     let mut findings = Vec::new();
     let mut reported = HashSet::new();
@@ -201,6 +222,12 @@ pub fn analyze<'a>(
         .iter()
         .flat_map(|fragment| &fragment.definitions)
         .filter(|definition| definition.public_api)
+        .map(definition_identity)
+        .collect();
+    let production_root_definitions: HashSet<_> = production_fragments
+        .iter()
+        .filter(|fragment| fragment.is_product_root)
+        .flat_map(|fragment| &fragment.definitions)
         .map(definition_identity)
         .collect();
     for definition in production_fragments
@@ -218,9 +245,7 @@ pub fn analyze<'a>(
                 && !production_candidates.contains(&identity))
             || !candidate_crates.contains(&definition.crate_name)
             || excluded_crates.contains(&definition.crate_name)
-            || production_fragments.iter().any(|fragment| {
-                fragment.is_product_root && fragment.crate_name == definition.crate_name
-            })
+            || production_root_definitions.contains(&identity)
         {
             continue;
         }
@@ -281,6 +306,7 @@ fn is_live(definition: &Definition, edges: &[&Edge], reachable: &HashSet<&str>) 
 
 fn required_public_visibility<'a>(
     definitions: &HashMap<&'a str, &'a Definition>,
+    definition_crate_ids: &HashMap<&'a str, &'a str>,
     edges: &[&'a Edge],
     equivalents: &HashMap<&'a str, Vec<&'a str>>,
     explicitly_required: &HashSet<&'a str>,
@@ -289,9 +315,9 @@ fn required_public_visibility<'a>(
     // Rust privacy-checks every compiled item, including items outside the
     // selected product's runtime reachability graph.
     required.extend(edges.iter().filter_map(|edge| {
-        let from = definitions.get(edge.from.as_str())?;
-        let to = definitions.get(edge.to.as_str())?;
-        (from.crate_name != to.crate_name).then_some(edge.to.as_str())
+        let from = definition_crate_ids.get(edge.from.as_str())?;
+        let to = definition_crate_ids.get(edge.to.as_str())?;
+        (from != to).then_some(edge.to.as_str())
     }));
 
     let mut interface_edges: HashMap<&str, Vec<&str>> = HashMap::new();
@@ -480,6 +506,7 @@ mod tests {
         vec![
             Fragment {
                 crate_name: "app".into(),
+                crate_id: "app".into(),
                 is_product_root: true,
                 definitions: vec![node("main", "app", false)],
                 edges: vec![],
@@ -489,6 +516,7 @@ mod tests {
             },
             Fragment {
                 crate_name: "lib".into(),
+                crate_id: "lib".into(),
                 is_product_root: false,
                 definitions,
                 edges,
@@ -503,6 +531,7 @@ mod tests {
         vec![
             Fragment {
                 crate_name: "integration_test".into(),
+                crate_id: "integration_test".into(),
                 is_product_root: true,
                 definitions: vec![node("test_main", "integration_test", false)],
                 edges: vec![Edge {
@@ -516,6 +545,7 @@ mod tests {
             },
             Fragment {
                 crate_name: "lib".into(),
+                crate_id: "lib".into(),
                 is_product_root: false,
                 definitions,
                 edges,
@@ -544,6 +574,27 @@ mod tests {
                 .iter()
                 .all(|finding| finding.kind == FindingKind::DeadPublic)
         );
+    }
+
+    #[test]
+    fn product_root_named_like_a_library_only_excludes_its_own_declarations() {
+        let mut input = fragments(
+            vec![node("entry", "lib", true), node("unused", "lib", true)],
+            vec![],
+        );
+        input[0].crate_name = "lib".into();
+        input[0].definitions[0].crate_name = "lib".into();
+        input[0].edges.push(Edge {
+            from: "main".into(),
+            to: "entry".into(),
+            kind: EdgeKind::Body,
+        });
+
+        let findings = analyze(&input, &HashSet::new());
+
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, FindingKind::DeadPublic);
+        assert_eq!(findings[0].definition.id, "unused");
     }
 
     #[test]

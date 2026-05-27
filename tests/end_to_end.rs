@@ -339,7 +339,7 @@ fn diagnoses_public_surface_of_a_binary_product() {
 }
 
 #[test]
-fn configured_production_binary_contributes_product_reachability() {
+fn production_binary_named_like_a_library_does_not_suppress_its_findings() {
     let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/production_consumers/Cargo.toml");
     let target_dir = tempfile::tempdir().expect("temporary target directory");

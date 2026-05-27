@@ -5,5 +5,5 @@ reason = "primary binary shipped as part of this product"
 
 [[production]]
 package = "secondary"
-bin = "secondary"
+bin = "library"
 reason = "second binary shipped as part of this product"

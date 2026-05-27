@@ -5,9 +5,9 @@ edition = "2024"
 autotests = false
 
 [[bin]]
-name = "secondary"
+name = "library"
 path = "src/main.rs"
 test = false
 
 [dependencies]
-library = { path = "../library" }
+api = { package = "library", path = "../library" }
