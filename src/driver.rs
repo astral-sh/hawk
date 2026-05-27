@@ -102,12 +102,10 @@ fn read_fix_plan(path: &Path) -> Result<FixPlan> {
 
 fn emit_fixes(tcx: TyCtxt<'_>, fix_plan: &FixPlan) {
     let crate_items = tcx.hir_crate_items(());
+    let mut visibility_fixes = Vec::new();
     for owner in crate_items.owners() {
         let def_id = owner.def_id;
         let Some(definition_kind) = diagnostic_kind(tcx, def_id) else {
-            continue;
-        };
-        let Some(kind) = planned_fix(tcx, def_id, definition_kind, &fix_plan.targets) else {
             continue;
         };
         if !tcx.local_visibility(def_id).is_public() {
@@ -119,7 +117,10 @@ fn emit_fixes(tcx: TyCtxt<'_>, fix_plan: &FixPlan) {
             _ => None,
         };
         if let Some(visibility_span) = visibility_span {
-            emit_fix(tcx, visibility_span, kind);
+            visibility_fixes.push((
+                visibility_span,
+                planned_fix(tcx, def_id, definition_kind, &fix_plan.targets),
+            ));
         }
     }
     for item_id in crate_items.free_items() {
@@ -129,15 +130,29 @@ fn emit_fixes(tcx: TyCtxt<'_>, fix_plan: &FixPlan) {
             _ => continue,
         };
         for field in fields {
-            let Some(kind) =
-                planned_fix(tcx, field.def_id, DefinitionKind::Field, &fix_plan.targets)
-            else {
-                continue;
-            };
             if tcx.local_visibility(field.def_id).is_public() {
-                emit_fix(tcx, field.vis_span, kind);
+                visibility_fixes.push((
+                    field.vis_span,
+                    planned_fix(tcx, field.def_id, DefinitionKind::Field, &fix_plan.targets),
+                ));
             }
         }
+    }
+
+    let mut emitted_spans = Vec::new();
+    for (span, kind) in &visibility_fixes {
+        let Some(kind) = kind else {
+            continue;
+        };
+        if emitted_spans.contains(span)
+            || visibility_fixes
+                .iter()
+                .any(|(other_span, kind)| other_span == span && kind.is_none())
+        {
+            continue;
+        }
+        emit_fix(tcx, *span, *kind);
+        emitted_spans.push(*span);
     }
 }
 
