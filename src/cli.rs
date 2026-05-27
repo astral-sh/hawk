@@ -641,6 +641,7 @@ fn fix_plan_for<'a>(
                         crate_name: definition.crate_name.clone(),
                         name: definition.name.clone(),
                         definition_kind: definition.kind,
+                        span: definition.span.clone(),
                         kind: finding.kind,
                     })
             })

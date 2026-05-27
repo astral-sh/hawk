@@ -26,6 +26,7 @@ pub struct FixTarget {
     pub crate_name: String,
     pub name: String,
     pub definition_kind: DefinitionKind,
+    pub span: Option<Span>,
     pub kind: FindingKind,
 }
 

@@ -165,13 +165,22 @@ fn planned_fix(
     let id = id(tcx, def_id.to_def_id());
     let crate_name = tcx.crate_name(LOCAL_CRATE).to_string();
     let name = definition_name(tcx, def_id, definition_kind);
+    let definition_span = span(tcx, def_id);
     targets
         .iter()
         .find(|target| {
             target.id == id
                 || (target.crate_name == crate_name
                     && target.name == name
-                    && target.definition_kind == definition_kind)
+                    && target.definition_kind == definition_kind
+                    && match (&target.span, &definition_span) {
+                        (Some(target), Some(definition)) => {
+                            target.file == definition.file
+                                && target.line == definition.line
+                                && target.column == definition.column
+                        }
+                        _ => false,
+                    })
         })
         .map(|target| target.kind)
 }
