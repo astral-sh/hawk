@@ -82,3 +82,9 @@ at your option.
 Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in
 hawk by you, as defined in the Apache-2.0 license, shall be dually licensed as above, without any
 additional terms or conditions.
+
+<div align="center">
+  <a target="_blank" href="https://astral.sh" style="background:none">
+    <img src="https://raw.githubusercontent.com/astral-sh/hawk/main/assets/svg/Astral.svg" alt="Made by Astral">
+  </a>
+</div>
