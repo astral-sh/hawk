@@ -710,80 +710,48 @@ fn write_diagnostic(
     workspace_root: &Path,
     level: LintLevel,
 ) -> std::fmt::Result {
-    let (message, help, marker) = match (
-        finding.kind,
-        finding.definition.kind,
-        finding.test_only,
-        finding.test_compiled_only,
-    ) {
-        (FindingKind::DeadPublic, DefinitionKind::EnumVariant, _, true) => (
+    let dead_reachability_source = if finding.test_compiled_only {
+        "any workspace test"
+    } else {
+        production_description
+    };
+    let (message, help, marker) = match (finding.kind, finding.definition.kind, finding.test_only) {
+        (FindingKind::DeadPublic, DefinitionKind::EnumVariant, _) => (
             format!(
-                "`{}` is a public enum variant but is not reachable from any workspace test",
+                "`{}` is a public enum variant but is not reachable from {dead_reachability_source}",
                 finding.definition.name
             ),
             "remove this variant",
             "public enum variant",
         ),
-        (FindingKind::DeadPublic, DefinitionKind::EnumVariant, _, false) => (
-            format!(
-                "`{}` is a public enum variant but is not reachable from {production_description}",
-                finding.definition.name
-            ),
-            "remove this variant",
-            "public enum variant",
-        ),
-        (FindingKind::UnnecessaryPublic, DefinitionKind::EnumVariant, _, _) => {
+        (FindingKind::UnnecessaryPublic, DefinitionKind::EnumVariant, _) => {
             unreachable!("live enum variants do not have actionable visibility findings")
         }
-        (FindingKind::DeadPublic, DefinitionKind::Reexport, _, true) => (
+        (FindingKind::DeadPublic, DefinitionKind::Reexport, _) => (
             format!(
-                "public re-export `{}` has no target reachable from any workspace test",
+                "public re-export `{}` has no target reachable from {dead_reachability_source}",
                 finding.definition.name
             ),
             "consider restricting this re-export's visibility or removing it",
             "public re-export",
         ),
-        (FindingKind::DeadPublic, DefinitionKind::Reexport, _, false) => (
+        (FindingKind::DeadPublic, DefinitionKind::Module, _) => (
             format!(
-                "public re-export `{}` has no target reachable from {production_description}",
-                finding.definition.name
-            ),
-            "consider restricting this re-export's visibility or removing it",
-            "public re-export",
-        ),
-        (FindingKind::DeadPublic, DefinitionKind::Module, _, true) => (
-            format!(
-                "public module `{}` has no declaration reachable from any workspace test",
+                "public module `{}` has no declaration reachable from {dead_reachability_source}",
                 finding.definition.name
             ),
             "consider restricting this module's visibility or removing it",
             "public module",
         ),
-        (FindingKind::DeadPublic, DefinitionKind::Module, _, false) => (
+        (FindingKind::DeadPublic, _, _) => (
             format!(
-                "public module `{}` has no declaration reachable from {production_description}",
-                finding.definition.name
-            ),
-            "consider restricting this module's visibility or removing it",
-            "public module",
-        ),
-        (FindingKind::DeadPublic, _, _, true) => (
-            format!(
-                "`{}` is public but is not reachable from any workspace test",
+                "`{}` is public but is not reachable from {dead_reachability_source}",
                 finding.definition.name
             ),
             "consider restricting this declaration's visibility or removing it",
             "public declaration",
         ),
-        (FindingKind::DeadPublic, _, _, false) => (
-            format!(
-                "`{}` is public but is not reachable from {production_description}",
-                finding.definition.name
-            ),
-            "consider restricting this declaration's visibility or removing it",
-            "public declaration",
-        ),
-        (FindingKind::UnnecessaryPublic, DefinitionKind::Reexport, true, _) => (
+        (FindingKind::UnnecessaryPublic, DefinitionKind::Reexport, true) => (
             format!(
                 "public re-export `{}` is needed only by tests; it can be `pub(crate)`",
                 finding.definition.name
@@ -791,7 +759,7 @@ fn write_diagnostic(
             "change this re-export to `pub(crate) use`",
             "public re-export",
         ),
-        (FindingKind::UnnecessaryPublic, DefinitionKind::Reexport, false, _) => (
+        (FindingKind::UnnecessaryPublic, DefinitionKind::Reexport, false) => (
             format!(
                 "public re-export `{}` is not required by any compiled cross-crate use; it can be `pub(crate)`",
                 finding.definition.name
@@ -799,7 +767,7 @@ fn write_diagnostic(
             "change this re-export to `pub(crate) use`",
             "public re-export",
         ),
-        (FindingKind::UnnecessaryPublic, DefinitionKind::Module, true, _) => (
+        (FindingKind::UnnecessaryPublic, DefinitionKind::Module, true) => (
             format!(
                 "public module `{}` is needed only by tests; it can be `pub(crate)`",
                 finding.definition.name
@@ -807,7 +775,7 @@ fn write_diagnostic(
             "change this module to `pub(crate) mod`",
             "public module",
         ),
-        (FindingKind::UnnecessaryPublic, DefinitionKind::Module, false, _) => (
+        (FindingKind::UnnecessaryPublic, DefinitionKind::Module, false) => (
             format!(
                 "public module `{}` is used only within `{}`; it can be `pub(crate)`",
                 finding.definition.name, finding.definition.crate_name
@@ -815,7 +783,7 @@ fn write_diagnostic(
             "change this module to `pub(crate) mod`",
             "public module",
         ),
-        (FindingKind::UnnecessaryPublic, _, true, _) => (
+        (FindingKind::UnnecessaryPublic, _, true) => (
             format!(
                 "`{}` is public but is needed only by tests; it can be `pub(crate)`",
                 finding.definition.name
@@ -823,7 +791,7 @@ fn write_diagnostic(
             "change this declaration to `pub(crate)`",
             "public declaration",
         ),
-        (FindingKind::UnnecessaryPublic, _, false, _) => (
+        (FindingKind::UnnecessaryPublic, _, false) => (
             format!(
                 "`{}` is public but all reachable uses are within `{}`; it can be `pub(crate)`",
                 finding.definition.name, finding.definition.crate_name
