@@ -505,7 +505,7 @@ fn benchmark_consumers_preserve_required_public_visibility() {
 }
 
 #[test]
-fn does_not_fix_one_alias_from_a_grouped_public_reexport() {
+fn fixes_grouped_public_reexports_only_when_all_aliases_are_safe() {
     let source_workspace =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/grouped_reexport_fixes");
     let workspace = tempfile::tempdir().expect("temporary fixture workspace");
@@ -533,4 +533,5 @@ fn does_not_fix_one_alias_from_a_grouped_public_reexport() {
     let library =
         fs::read_to_string(workspace.path().join("library/src/lib.rs")).expect("read fixed source");
     assert!(library.contains("pub use exported::{Kept, Narrow};"));
+    assert!(library.contains("pub(crate) use split_consumers::{ProductionOnly, TestOnly};"));
 }

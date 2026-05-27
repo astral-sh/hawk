@@ -372,11 +372,18 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
                 .filter(|finding| finding.test_only || finding.test_compiled_only),
             &test_fragments,
         );
+        // A grouped `pub use` has one visibility span even when its aliases are
+        // approved by different consumer modes. Project every approved finding
+        // through each graph so fixes never name declarations absent from that
+        // compilation mode.
+        let production_emission_plan =
+            fix_plan_for(fixable_findings.iter().copied(), &production_fragments);
+        let test_emission_plan = fix_plan_for(fixable_findings.iter().copied(), &test_fragments);
         let mut applied_fixes = false;
         if !test_fix_plan.targets.is_empty() {
             let fix_packages = fix_packages(&metadata, &test_fix_plan)?;
             let fix_plan_path = graph_dir.join("test-fix-plan");
-            write_fix_plan(&fix_plan_path, &test_fix_plan)?;
+            write_fix_plan(&fix_plan_path, &test_emission_plan)?;
             cargo.run(
                 "fix",
                 &format!("{run_id}-test-fix"),
@@ -391,7 +398,7 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
         if !production_fix_plan.targets.is_empty() {
             let fix_packages = fix_packages(&metadata, &production_fix_plan)?;
             let fix_plan_path = graph_dir.join("production-fix-plan");
-            write_fix_plan(&fix_plan_path, &production_fix_plan)?;
+            write_fix_plan(&fix_plan_path, &production_emission_plan)?;
             cargo.run(
                 "fix",
                 &format!("{run_id}-production-fix"),

@@ -51,6 +51,10 @@ pub fn run_wrapper(mut args: Vec<String>) -> ExitCode {
     if fix_plan.is_some() {
         args.push("--cap-lints".to_owned());
         args.push("allow".to_owned());
+        // A Hawk visibility fix can make an import unused in one consumer
+        // mode while it remains required by another mode.
+        args.push("--allow".to_owned());
+        args.push("unused_imports".to_owned());
     }
     let mut callbacks = HawkCallbacks {
         output_dir,
@@ -108,6 +112,9 @@ fn emit_fixes(tcx: TyCtxt<'_>, fix_plan: &FixPlan) {
         let Some(definition_kind) = diagnostic_kind(tcx, def_id) else {
             continue;
         };
+        if definition_kind == DefinitionKind::Reexport && !is_named_reexport(tcx, def_id) {
+            continue;
+        }
         if !tcx.local_visibility(def_id).is_public() {
             continue;
         }
