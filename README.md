@@ -34,8 +34,9 @@ cargo build
 ```
 
 Configured production binaries and workspace non-production targets (including
-tests, benches, and examples) are analyzed under `--all-features --locked` on
-the host target by default. Pass `--target TRIPLE` to analyze another
+tests, benches, examples, and doctests) are analyzed under
+`--all-features --locked` on the host target by default. Pass `--target TRIPLE`
+to analyze another
 compilation target; Hawk expects any required cross-compilation environment to
 be prepared by the caller. Diagnostics apply to workspace library crates
 compiled for those targets, including declarations enabled only under
@@ -103,10 +104,11 @@ findings are fixed through library targets, while findings reached through or
 compiled only in the non-production pass are fixed through all targets of
 their owning packages. This covers dev-dependency support libraries even when
 their library test harness is disabled, declarations enabled under
-`cfg(test)`, and validation against benches and examples. Hawk caps ordinary
-compiler lints during the fix phase so Cargo applies Hawk's planned
-suggestions rather than unrelated compiler fixes, then rechecks all
-configured production binaries and workspace non-production targets. Enum
+`cfg(test)`, and validation against benches, examples, and doctests. Hawk caps
+ordinary compiler lints during the fix phase so Cargo applies Hawk's planned
+suggestions rather than unrelated compiler fixes, then rechecks all configured
+production binaries and workspace non-production targets, compiling doctests
+through its driver to validate documented API consumers. Enum
 variants are report-only because they have no independent visibility modifier;
 a variant finding disappears after fixing its containing enum only when the
 entire enum no longer needs to be public.
@@ -159,10 +161,10 @@ removal, but does not report reachable variants as unnecessary public surface.
 ## Non-Production Consumers
 
 Hawk keeps production and non-production compilation distinct. An item
-referenced across crate boundaries by a workspace test, bench, or example
-must remain `pub` and is not reported. Workspace test harnesses additionally
-establish reachability: a public helper reachable only along test paths,
-without a cross-crate use of its own, is reported as
+referenced across crate boundaries by a workspace test, bench, example, or
+doctest must remain `pub` and is not reported. Workspace test harnesses
+additionally establish reachability: a public helper reachable only along
+test paths, without a cross-crate use of its own, is reported as
 `hawk::unnecessary_public`, with a `pub(crate)` suggestion. Public
 declarations compiled only in test targets, including dev-dependency support
 crates and `#[cfg(test)]` items, are analyzed against workspace tests in the

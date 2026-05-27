@@ -8,8 +8,8 @@ non-production targets. They are considered closed-world unless their crates
 are explicitly excluded. The configured production binaries establish
 production reachability. Workspace tests are compiled as part of a separate
 non-production consumer graph and can also introduce test-only declarations;
-benches and examples in that graph preserve any public visibility they
-require.
+benches, examples, and doctests in that graph preserve any public visibility
+they require.
 
 The analysis includes:
 
@@ -18,7 +18,7 @@ The analysis includes:
 - one selected compilation target, defaulting to the host target;
 - production reachability from those binary targets;
 - test reachability and visibility requirements from workspace
-  non-production targets.
+  non-production targets, including doctests.
 
 Binaries are never inferred as roots: every shipped binary must be listed
 explicitly in `hawk.toml`.
@@ -116,8 +116,11 @@ required-public analysis, and suppressed findings are not eligible for fixes.
 
 ## Implementation direction
 
-`cargo hawk` invokes each configured production binary build and `cargo check
---workspace --all-targets` with `RUSTC_WORKSPACE_WRAPPER=hawk-driver`. The compiler
+`cargo hawk` invokes each configured production binary build, `cargo check
+--workspace --all-targets`, and compile-only workspace doctests with
+`RUSTC_WORKSPACE_WRAPPER=hawk-driver`. The doctest pass uses rustdoc's
+test-builder wrapper so documentation example references are emitted into the
+same non-production graph. The compiler
 driver is pinned to the workspace Rust toolchain and emits resolved graph
 fragments for each compiled workspace crate. The frontend retains production
 and test root sets, so a declaration can be production-live, test-live, or
@@ -151,4 +154,5 @@ compiler lints to prevent Cargo from consuming unrelated rustc suggestions;
 Hawk's compiler wrapper matches equivalent declaration identities and emits
 the planned rustc `MachineApplicable` suggestions. Hawk finishes with another
 instrumented check of every configured production binary and workspace
-non-production target so visibility changes are validated before completion.
+non-production target, including compile-only doctests, so visibility changes
+are validated before completion.

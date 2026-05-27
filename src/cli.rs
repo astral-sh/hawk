@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::env;
+use std::ffi::{OsStr, OsString};
 use std::fmt::{Display, Formatter, Write as _};
 use std::fs::{self, File};
 use std::io::{BufReader, Write as _};
@@ -328,6 +329,12 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
         &non_production_graph_dir,
         CargoSelection::NonProduction,
     )?;
+    cargo.run(
+        "test",
+        &format!("{run_id}-doctests"),
+        &non_production_graph_dir,
+        CargoSelection::Doctests,
+    )?;
 
     let mut production_fragments = read_fragments(&production_graph_dir)?;
     let mut test_fragments = read_fragments(&non_production_graph_dir)?;
@@ -424,6 +431,12 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
                 &format!("{run_id}-post-fix-non-production"),
                 &non_production_graph_dir,
                 CargoSelection::NonProduction,
+            )?;
+            cargo.run(
+                "test",
+                &format!("{run_id}-post-fix-doctests"),
+                &non_production_graph_dir,
+                CargoSelection::Doctests,
             )?;
             production_fragments = read_fragments(&production_graph_dir)?;
             test_fragments = read_fragments(&non_production_graph_dir)?;
@@ -533,6 +546,7 @@ struct FixRequest<'a> {
 enum CargoSelection<'a> {
     Production(ProductionSelection<'a>),
     NonProduction,
+    Doctests,
     FixProduction(FixRequest<'a>),
     FixNonProduction(FixRequest<'a>),
 }
@@ -566,6 +580,9 @@ impl InstrumentedCargo<'_> {
             CargoSelection::NonProduction => {
                 command.arg("--workspace").arg("--all-targets");
             }
+            CargoSelection::Doctests => {
+                command.arg("--workspace").arg("--doc");
+            }
             CargoSelection::FixProduction(fix_request) => {
                 for package in fix_request.packages {
                     command.arg("--package").arg(package);
@@ -597,12 +614,15 @@ impl InstrumentedCargo<'_> {
             }
         }
         let consumer_mode = match selection {
-            CargoSelection::NonProduction | CargoSelection::FixNonProduction(_) => "non-production",
+            CargoSelection::NonProduction
+            | CargoSelection::Doctests
+            | CargoSelection::FixNonProduction(_) => "non-production",
             CargoSelection::Production(_) | CargoSelection::FixProduction(_) => "production",
         };
         let root_crate = match selection {
             CargoSelection::Production(product) => product.binary.replace('-', "_"),
             CargoSelection::NonProduction
+            | CargoSelection::Doctests
             | CargoSelection::FixProduction(_)
             | CargoSelection::FixNonProduction(_) => String::new(),
         };
@@ -612,19 +632,71 @@ impl InstrumentedCargo<'_> {
             .env("HAWK_ROOT_CRATE", root_crate)
             .env("HAWK_CONSUMER_MODE", consumer_mode)
             .env("HAWK_RUN_ID", run_id);
+        if matches!(selection, CargoSelection::Doctests) {
+            command
+                .env("RUSTC_BOOTSTRAP", "1")
+                .env(
+                    "CARGO_ENCODED_RUSTDOCFLAGS",
+                    doctest_rustdoc_flags(self.executable),
+                )
+                .env_remove("RUSTDOCFLAGS");
+        }
         if let CargoSelection::FixProduction(fix_request)
         | CargoSelection::FixNonProduction(fix_request) = selection
         {
             command.env("HAWK_FIX_PLAN", fix_request.plan);
         }
-        let status = command
-            .status()
-            .with_context(|| format!("run instrumented Cargo {subcommand}"))?;
+        let status = if matches!(selection, CargoSelection::Doctests) {
+            let output = command
+                .output()
+                .with_context(|| format!("run instrumented Cargo {subcommand}"))?;
+            if !output.status.success() {
+                std::io::stdout()
+                    .write_all(&output.stdout)
+                    .context("write failing doctest compilation stdout")?;
+                std::io::stderr()
+                    .write_all(&output.stderr)
+                    .context("write failing doctest compilation stderr")?;
+            }
+            output.status
+        } else {
+            command
+                .status()
+                .with_context(|| format!("run instrumented Cargo {subcommand}"))?
+        };
         if !status.success() {
             bail!("instrumented Cargo {subcommand} failed with {status}");
         }
         Ok(())
     }
+}
+
+fn doctest_rustdoc_flags(executable: &Path) -> OsString {
+    let mut flags = if let Some(flags) = env::var_os("CARGO_ENCODED_RUSTDOCFLAGS") {
+        flags
+    } else {
+        let mut encoded = OsString::new();
+        if let Some(flags) = env::var_os("RUSTDOCFLAGS") {
+            for flag in flags.to_string_lossy().split_whitespace() {
+                push_encoded_rustdoc_flag(&mut encoded, OsStr::new(flag));
+            }
+        }
+        encoded
+    };
+    // Hawk is pinned to compiler internals; rustdoc's builder wrapper is the
+    // corresponding unstable hook needed to observe compiled doctest crates.
+    for flag in ["-Zunstable-options", "--no-run", "--test-builder-wrapper"] {
+        push_encoded_rustdoc_flag(&mut flags, OsStr::new(flag));
+    }
+    push_encoded_rustdoc_flag(&mut flags, executable.as_os_str());
+    flags
+}
+
+fn push_encoded_rustdoc_flag(flags: &mut OsString, flag: &OsStr) {
+    if !flags.is_empty() {
+        flags.push("\u{1f}");
+    }
+    flags.push(flag);
 }
 
 fn write_fix_plan(path: &Path, fix_plan: &FixPlan) -> Result<()> {
