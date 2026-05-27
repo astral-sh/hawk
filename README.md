@@ -2,9 +2,9 @@
 
 `hawk` is an experimental Cargo lint tool for binary products built from
 internal Rust workspace crates. It analyzes public library items in a
-configured binary product against its production binaries and workspace test
-consumers, reporting items that are unused or whose visibility exceeds those
-consumers' needs.
+configured binary product against its production binaries and workspace
+non-production targets, reporting items that are unused or whose visibility
+exceeds those consumers' needs.
 
 This repository is at the prototype stage.
 
@@ -30,13 +30,13 @@ cargo build
   --manifest-path /path/to/workspace/Cargo.toml
 ```
 
-Configured production binaries and workspace test targets are analyzed under
-`--all-features --locked` on the host target by default. Pass `--target TRIPLE`
-to analyze another compilation target; Hawk expects any required
-cross-compilation environment to be prepared by the caller. Diagnostics apply
-to workspace library crates compiled for those binaries or workspace tests,
-including declarations enabled only under `cfg(test)`. Those libraries are
-considered internal unless exempted:
+Configured production binaries and workspace non-production targets (including
+tests, benches, and examples) are analyzed under `--all-features --locked` on
+the host target by default. Pass `--target TRIPLE` to analyze another
+compilation target; Hawk expects any required cross-compilation environment to
+be prepared by the caller. Diagnostics apply to workspace library crates
+compiled for those targets, including declarations enabled only under
+`cfg(test)`. Those libraries are considered internal unless exempted:
 
 ```sh
 ./target/debug/cargo-hawk \
@@ -95,17 +95,18 @@ safety checks; pass `--allow-dirty`, `--allow-staged`, or `--allow-no-vcs` with
 `--fix` when the corresponding Cargo override is appropriate.
 
 Unlike `cargo clippy --fix`, Hawk applies fixes only to workspace library
-packages in the configured production or test surface. Production findings are
-fixed through library targets, while declarations needed only by tests or
-compiled only for tests are fixed through their owning packages' library and
-test targets. This covers dev-dependency support libraries even when their
-library test harness is disabled, as well as declarations enabled under
-`cfg(test)`. Hawk caps ordinary compiler lints during the fix phase so Cargo
-applies Hawk's planned suggestions rather than unrelated compiler fixes, then
-rechecks all configured production binaries and workspace tests. Enum variants are
-report-only because they have no independent visibility modifier; a variant
-finding disappears after fixing its containing enum only when the entire enum
-no longer needs to be public.
+packages in the configured production or non-production surface. Production
+findings are fixed through library targets, while findings reached through or
+compiled only in the non-production pass are fixed through all targets of
+their owning packages. This covers dev-dependency support libraries even when
+their library test harness is disabled, declarations enabled under
+`cfg(test)`, and validation against benches and examples. Hawk caps ordinary
+compiler lints during the fix phase so Cargo applies Hawk's planned
+suggestions rather than unrelated compiler fixes, then rechecks all
+configured production binaries and workspace non-production targets. Enum
+variants are report-only because they have no independent visibility modifier;
+a variant finding disappears after fixing its containing enum only when the
+entire enum no longer needs to be public.
 
 ## Cross-compilation
 
@@ -152,16 +153,18 @@ defining crate can be changed to `pub(crate)`. Enum variants have no
 independent Rust visibility modifier: Hawk diagnoses unreachable variants for
 removal, but does not report reachable variants as unnecessary public surface.
 
-## Test Consumers
+## Non-Production Consumers
 
-Hawk keeps production and test reachability distinct. An item referenced
-across crate boundaries by a workspace test must remain `pub` and is not
-reported. A public helper reachable only along test paths, without a
-cross-crate use of its own, is reported as `hawk::unnecessary_public`, with a
-`pub(crate)` suggestion. Public declarations compiled only in test targets,
-including dev-dependency support crates and `#[cfg(test)]` items, are analyzed
-against workspace tests in the same way. A public declaration unreachable
-from either applicable consumer graph remains `hawk::dead_public`.
+Hawk keeps production and non-production compilation distinct. An item
+referenced across crate boundaries by a workspace test, bench, or example
+must remain `pub` and is not reported. Workspace test harnesses additionally
+establish reachability: a public helper reachable only along test paths,
+without a cross-crate use of its own, is reported as
+`hawk::unnecessary_public`, with a `pub(crate)` suggestion. Public
+declarations compiled only in test targets, including dev-dependency support
+crates and `#[cfg(test)]` items, are analyzed against workspace tests in the
+same way. A public declaration unreachable from either applicable consumer
+graph remains `hawk::dead_public`.
 
 ## Exported paths and modules
 

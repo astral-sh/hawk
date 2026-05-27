@@ -180,10 +180,10 @@ fn emit_fragment(tcx: TyCtxt<'_>, root_crate: &str, output_dir: &Path) -> Result
     let crate_name = tcx.crate_name(LOCAL_CRATE).to_string();
     let consumer_mode = env::var("HAWK_CONSUMER_MODE");
     let is_product_root = match consumer_mode.as_deref() {
-        Ok("tests") => tcx.sess.opts.test && tcx.entry_fn(()).is_some(),
+        Ok("non-production") => tcx.sess.opts.test && tcx.entry_fn(()).is_some(),
         _ => crate_name == root_crate && tcx.entry_fn(()).is_some(),
     };
-    let test_surface = consumer_mode.as_deref() == Ok("tests") && tcx.sess.opts.test;
+    let test_surface = consumer_mode.as_deref() == Ok("non-production") && tcx.sess.opts.test;
     let fragment = collect_fragment(tcx, crate_name.clone(), is_product_root, test_surface);
     let crate_id = id(tcx, CRATE_DEF_ID.to_def_id());
     let suffix: String = crate_id

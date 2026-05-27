@@ -3,11 +3,13 @@
 ## Product model
 
 The analyzed surface is the workspace library dependencies compiled into
-configured same-workspace production binary targets or workspace test targets.
-They are considered closed-world unless their crates are explicitly excluded.
-The configured production binaries establish production reachability, and
-workspace tests are compiled as a separate consumer graph that can also
-introduce test-only declarations.
+configured same-workspace production binary targets or workspace
+non-production targets. They are considered closed-world unless their crates
+are explicitly excluded. The configured production binaries establish
+production reachability. Workspace tests are compiled as part of a separate
+non-production consumer graph and can also introduce test-only declarations;
+benches and examples in that graph preserve any public visibility they
+require.
 
 The analysis includes:
 
@@ -15,7 +17,8 @@ The analysis includes:
 - `--all-features`;
 - one selected compilation target, defaulting to the host target;
 - production reachability from those binary targets;
-- test reachability and visibility requirements from workspace test targets.
+- test reachability and visibility requirements from workspace
+  non-production targets.
 
 Binaries are never inferred as roots: every shipped binary must be listed
 explicitly in `hawk.toml`.
@@ -23,10 +26,11 @@ explicitly in `hawk.toml`.
 ## Diagnostics
 
 Configured production binaries seed production reachability but do not
-themselves receive `hawk` diagnostics. Tests can preserve public visibility,
-establish test-only reachability, and introduce diagnostic candidates from
-dev-dependencies or `#[cfg(test)]` source. Compiled workspace library
-declarations in either consumer graph can produce:
+themselves receive `hawk` diagnostics. Non-production targets can preserve
+public visibility; tests additionally establish test-only reachability and
+introduce diagnostic candidates from dev-dependencies or `#[cfg(test)]`
+source. Compiled workspace library declarations in either consumer graph can
+produce:
 
 - dead public surface: a public declaration is not reachable from the product
   or workspace tests;
@@ -113,7 +117,7 @@ required-public analysis, and suppressed findings are not eligible for fixes.
 ## Implementation direction
 
 `cargo hawk` invokes each configured production binary build and `cargo check
---workspace --tests` with `RUSTC_WORKSPACE_WRAPPER=hawk-driver`. The compiler
+--workspace --all-targets` with `RUSTC_WORKSPACE_WRAPPER=hawk-driver`. The compiler
 driver is pinned to the workspace Rust toolchain and emits resolved graph
 fragments for each compiled workspace crate. The frontend retains production
 and test root sets, so a declaration can be production-live, test-live, or
@@ -138,13 +142,13 @@ provably type-checking-safe.
 Fixing is a second compilation phase because findings are determined only
 after Hawk merges graph fragments. Hawk builds fix plans from emitted
 findings, running package-scoped `cargo fix --lib` for production findings and
-package-scoped `cargo fix --lib --tests` for findings reached through or
-declared only in the test graph. The latter compiles each owning library as a
-primary fix target while retaining test configuration, so declarations in
-dev-dependency support libraries and declarations enabled under `#[cfg(test)]`
-can be edited. Fix compilations cap ordinary compiler lints to prevent Cargo
-from consuming unrelated rustc suggestions; Hawk's compiler wrapper matches
-equivalent declaration identities and emits the planned rustc
-`MachineApplicable` suggestions. Hawk finishes with another instrumented check
-of every configured production binary and workspace tests so visibility changes
-used only by tests are validated before completion.
+package-scoped `cargo fix --all-targets` for findings reached through or
+declared only in the non-production graph. The latter compiles each owning
+library while retaining test configuration and validating benches and
+examples, so declarations in dev-dependency support libraries and declarations
+enabled under `#[cfg(test)]` can be edited. Fix compilations cap ordinary
+compiler lints to prevent Cargo from consuming unrelated rustc suggestions;
+Hawk's compiler wrapper matches equivalent declaration identities and emits
+the planned rustc `MachineApplicable` suggestions. Hawk finishes with another
+instrumented check of every configured production binary and workspace
+non-production target so visibility changes are validated before completion.

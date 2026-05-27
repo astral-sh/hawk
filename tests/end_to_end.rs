@@ -54,7 +54,7 @@ fn diagnoses_public_surface_of_a_binary_product() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stdout = anstream::adapter::strip_str(&stdout).to_string();
     let summary = format!(
-        "hawk: 39 finding(s) for `app --bin app --all-features` and workspace tests on target `{host_target}`\n"
+        "hawk: 39 finding(s) for `app --bin app --all-features` and workspace non-production targets on target `{host_target}`\n"
     );
     let diagnostics = stdout
         .strip_suffix(&summary)
@@ -362,7 +362,10 @@ fn configured_production_binary_contributes_product_reachability() {
     assert!(stdout.contains(
         "`unused` is public but is not reachable from the configured production binaries"
     ));
-    assert!(stdout.contains("for 2 configured production binaries and workspace tests"));
+    assert!(
+        stdout
+            .contains("for 2 configured production binaries and workspace non-production targets")
+    );
 }
 
 #[test]
@@ -475,4 +478,28 @@ fn applies_visibility_fixes_through_cargo_fix() {
     assert!(unit_support.contains("pub fn not_exported() {}"));
     assert!(unit_support.contains("pub(crate) fn test_entry() {"));
     assert!(unit_support.contains("pub(crate) fn test_only_helper() {}"));
+}
+
+#[test]
+fn benchmark_consumers_preserve_required_public_visibility() {
+    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/non_production_targets/Cargo.toml");
+    let target_dir = tempfile::tempdir().expect("temporary target directory");
+    let output = Command::new(env!("CARGO_BIN_EXE_cargo-hawk"))
+        .arg("--manifest-path")
+        .arg(manifest)
+        .arg("--target-dir")
+        .arg(target_dir.path())
+        .arg("--color=never")
+        .output()
+        .expect("run cargo-hawk");
+
+    assert!(
+        output.status.success(),
+        "cargo-hawk failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!stdout.contains("`bench_api` is public"));
+    assert!(stdout.contains("`unused` is public"));
 }

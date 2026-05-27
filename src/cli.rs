@@ -292,15 +292,19 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
         .to_string_lossy()
         .into_owned();
     let production_graph_dir = graph_dir.join("production");
-    let test_graph_dir = graph_dir.join("tests");
+    let non_production_graph_dir = graph_dir.join("non-production");
     fs::create_dir_all(&production_graph_dir).with_context(|| {
         format!(
             "create production graph directory {}",
             production_graph_dir.display()
         )
     })?;
-    fs::create_dir_all(&test_graph_dir)
-        .with_context(|| format!("create test graph directory {}", test_graph_dir.display()))?;
+    fs::create_dir_all(&non_production_graph_dir).with_context(|| {
+        format!(
+            "create non-production graph directory {}",
+            non_production_graph_dir.display()
+        )
+    })?;
 
     let executable = env::current_exe().context("locate hawk executable")?;
     let cargo = InstrumentedCargo {
@@ -320,13 +324,13 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
     }
     cargo.run(
         "check",
-        &format!("{run_id}-tests"),
-        &test_graph_dir,
-        CargoSelection::Tests,
+        &format!("{run_id}-non-production"),
+        &non_production_graph_dir,
+        CargoSelection::NonProduction,
     )?;
 
     let mut production_fragments = read_fragments(&production_graph_dir)?;
-    let mut test_fragments = read_fragments(&test_graph_dir)?;
+    let mut test_fragments = read_fragments(&non_production_graph_dir)?;
     if !production_fragments
         .iter()
         .any(|fragment| fragment.is_product_root)
@@ -376,8 +380,8 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
             cargo.run(
                 "fix",
                 &format!("{run_id}-test-fix"),
-                &test_graph_dir,
-                CargoSelection::FixTests(FixRequest {
+                &non_production_graph_dir,
+                CargoSelection::FixNonProduction(FixRequest {
                     plan: &fix_plan_path,
                     packages: &fix_packages,
                 }),
@@ -410,12 +414,12 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
             }
             cargo.run(
                 "check",
-                &format!("{run_id}-post-fix-tests"),
-                &test_graph_dir,
-                CargoSelection::Tests,
+                &format!("{run_id}-post-fix-non-production"),
+                &non_production_graph_dir,
+                CargoSelection::NonProduction,
             )?;
             production_fragments = read_fragments(&production_graph_dir)?;
-            test_fragments = read_fragments(&test_graph_dir)?;
+            test_fragments = read_fragments(&non_production_graph_dir)?;
         }
     }
     let findings = config.apply(
@@ -484,7 +488,7 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
     };
     writeln!(
         diagnostics,
-        "hawk: {} finding(s) for {} and workspace tests on {}",
+        "hawk: {} finding(s) for {} and workspace non-production targets on {}",
         diagnostic_count, production_summary, compilation_target
     )
     .expect("formatting diagnostics into a string cannot fail");
@@ -521,9 +525,9 @@ struct FixRequest<'a> {
 #[derive(Clone, Copy)]
 enum CargoSelection<'a> {
     Production(ProductionSelection<'a>),
-    Tests,
+    NonProduction,
     FixProduction(FixRequest<'a>),
-    FixTests(FixRequest<'a>),
+    FixNonProduction(FixRequest<'a>),
 }
 
 impl InstrumentedCargo<'_> {
@@ -552,8 +556,8 @@ impl InstrumentedCargo<'_> {
                     .arg("--bin")
                     .arg(product.binary);
             }
-            CargoSelection::Tests => {
-                command.arg("--workspace").arg("--tests");
+            CargoSelection::NonProduction => {
+                command.arg("--workspace").arg("--all-targets");
             }
             CargoSelection::FixProduction(fix_request) => {
                 for package in fix_request.packages {
@@ -561,11 +565,11 @@ impl InstrumentedCargo<'_> {
                 }
                 command.arg("--lib");
             }
-            CargoSelection::FixTests(fix_request) => {
+            CargoSelection::FixNonProduction(fix_request) => {
                 for package in fix_request.packages {
                     command.arg("--package").arg(package);
                 }
-                command.arg("--lib").arg("--tests");
+                command.arg("--all-targets");
             }
         }
         if let Some(target) = &self.args.target {
@@ -573,7 +577,7 @@ impl InstrumentedCargo<'_> {
         }
         if matches!(
             selection,
-            CargoSelection::FixProduction(_) | CargoSelection::FixTests(_)
+            CargoSelection::FixProduction(_) | CargoSelection::FixNonProduction(_)
         ) {
             if self.args.allow_dirty {
                 command.arg("--allow-dirty");
@@ -586,14 +590,14 @@ impl InstrumentedCargo<'_> {
             }
         }
         let consumer_mode = match selection {
-            CargoSelection::Tests | CargoSelection::FixTests(_) => "tests",
+            CargoSelection::NonProduction | CargoSelection::FixNonProduction(_) => "non-production",
             CargoSelection::Production(_) | CargoSelection::FixProduction(_) => "production",
         };
         let root_crate = match selection {
             CargoSelection::Production(product) => product.binary.replace('-', "_"),
-            CargoSelection::Tests
+            CargoSelection::NonProduction
             | CargoSelection::FixProduction(_)
-            | CargoSelection::FixTests(_) => String::new(),
+            | CargoSelection::FixNonProduction(_) => String::new(),
         };
         command
             .env("RUSTC_WORKSPACE_WRAPPER", self.executable)
@@ -601,8 +605,8 @@ impl InstrumentedCargo<'_> {
             .env("HAWK_ROOT_CRATE", root_crate)
             .env("HAWK_CONSUMER_MODE", consumer_mode)
             .env("HAWK_RUN_ID", run_id);
-        if let CargoSelection::FixProduction(fix_request) | CargoSelection::FixTests(fix_request) =
-            selection
+        if let CargoSelection::FixProduction(fix_request)
+        | CargoSelection::FixNonProduction(fix_request) = selection
         {
             command.env("HAWK_FIX_PLAN", fix_request.plan);
         }
