@@ -97,15 +97,13 @@ fn read_fix_plan(path: &Path) -> Result<FixPlan> {
 }
 
 fn emit_fixes(tcx: TyCtxt<'_>, fix_plan: &FixPlan) {
-    let targets: std::collections::HashMap<&str, FindingKind> = fix_plan
-        .targets
-        .iter()
-        .map(|target| (target.id.as_str(), target.kind))
-        .collect();
     let crate_items = tcx.hir_crate_items(());
     for owner in crate_items.owners() {
         let def_id = owner.def_id;
-        let Some(kind) = targets.get(id(tcx, def_id.to_def_id()).as_str()) else {
+        let Some(definition_kind) = diagnostic_kind(tcx, def_id) else {
+            continue;
+        };
+        let Some(kind) = planned_fix(tcx, def_id, definition_kind, &fix_plan.targets) else {
             continue;
         };
         if !tcx.local_visibility(def_id).is_public() {
@@ -117,7 +115,7 @@ fn emit_fixes(tcx: TyCtxt<'_>, fix_plan: &FixPlan) {
             _ => None,
         };
         if let Some(visibility_span) = visibility_span {
-            emit_fix(tcx, visibility_span, *kind);
+            emit_fix(tcx, visibility_span, kind);
         }
     }
     for item_id in crate_items.free_items() {
@@ -127,14 +125,36 @@ fn emit_fixes(tcx: TyCtxt<'_>, fix_plan: &FixPlan) {
             _ => continue,
         };
         for field in fields {
-            let Some(kind) = targets.get(id(tcx, field.def_id.to_def_id()).as_str()) else {
+            let Some(kind) =
+                planned_fix(tcx, field.def_id, DefinitionKind::Field, &fix_plan.targets)
+            else {
                 continue;
             };
             if tcx.local_visibility(field.def_id).is_public() {
-                emit_fix(tcx, field.vis_span, *kind);
+                emit_fix(tcx, field.vis_span, kind);
             }
         }
     }
+}
+
+fn planned_fix(
+    tcx: TyCtxt<'_>,
+    def_id: LocalDefId,
+    definition_kind: DefinitionKind,
+    targets: &[crate::graph::FixTarget],
+) -> Option<FindingKind> {
+    let id = id(tcx, def_id.to_def_id());
+    let crate_name = tcx.crate_name(LOCAL_CRATE).to_string();
+    let name = definition_name(tcx, def_id, definition_kind);
+    targets
+        .iter()
+        .find(|target| {
+            target.id == id
+                || (target.crate_name == crate_name
+                    && target.name == name
+                    && target.definition_kind == definition_kind)
+        })
+        .map(|target| target.kind)
 }
 
 fn emit_fix(tcx: TyCtxt<'_>, visibility_span: rustc_span::Span, kind: FindingKind) {
@@ -154,7 +174,10 @@ fn emit_fix(tcx: TyCtxt<'_>, visibility_span: rustc_span::Span, kind: FindingKin
 
 fn emit_fragment(tcx: TyCtxt<'_>, root_crate: &str, output_dir: &Path) -> Result<()> {
     let crate_name = tcx.crate_name(LOCAL_CRATE).to_string();
-    let is_product_root = crate_name == root_crate && tcx.entry_fn(()).is_some();
+    let is_product_root = match env::var("HAWK_CONSUMER_MODE").as_deref() {
+        Ok("tests") => tcx.sess.opts.test && tcx.entry_fn(()).is_some(),
+        _ => crate_name == root_crate && tcx.entry_fn(()).is_some(),
+    };
     let fragment = collect_fragment(tcx, crate_name.clone(), is_product_root);
     let crate_id = id(tcx, CRATE_DEF_ID.to_def_id());
     let suffix: String = crate_id

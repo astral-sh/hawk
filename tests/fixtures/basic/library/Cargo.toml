@@ -3,5 +3,8 @@ name = "library"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+test = false
+
 [dependencies]
 macro_dep = { path = "../macro_dep" }

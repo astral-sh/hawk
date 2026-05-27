@@ -13,7 +13,7 @@ use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser, ValueEnum};
 
 use crate::config::{AnalysisTarget, Config, ConfigDiagnostic, ConfigDiagnosticKind};
 use crate::graph::{
-    DefinitionKind, Finding, FindingKind, FixPlan, FixTarget, Fragment, Span, analyze,
+    Definition, DefinitionKind, Finding, FindingKind, FixPlan, FixTarget, Fragment, Span, analyze,
 };
 
 #[derive(Debug, Parser)]
@@ -265,6 +265,16 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
         .unwrap_or(graph_dir.as_os_str())
         .to_string_lossy()
         .into_owned();
+    let production_graph_dir = graph_dir.join("production");
+    let test_graph_dir = graph_dir.join("tests");
+    fs::create_dir_all(&production_graph_dir).with_context(|| {
+        format!(
+            "create production graph directory {}",
+            production_graph_dir.display()
+        )
+    })?;
+    fs::create_dir_all(&test_graph_dir)
+        .with_context(|| format!("create test graph directory {}", test_graph_dir.display()))?;
 
     let executable = env::current_exe().context("locate hawk executable")?;
     let cargo = InstrumentedCargo {
@@ -272,14 +282,28 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
         workspace_root: &workspace_root,
         manifest_path: &manifest_path,
         target_dir: &target_dir,
-        graph_dir: &graph_dir,
         crate_name: &crate_name,
         executable: &executable,
     };
-    cargo.run("check", &run_id, None)?;
+    cargo.run(
+        "check",
+        &format!("{run_id}-production"),
+        &production_graph_dir,
+        CargoSelection::Production,
+    )?;
+    cargo.run(
+        "check",
+        &format!("{run_id}-tests"),
+        &test_graph_dir,
+        CargoSelection::Tests,
+    )?;
 
-    let mut fragments = read_fragments(&graph_dir)?;
-    if !fragments.iter().any(|fragment| fragment.is_product_root) {
+    let mut production_fragments = read_fragments(&production_graph_dir)?;
+    let mut test_fragments = read_fragments(&test_graph_dir)?;
+    if !production_fragments
+        .iter()
+        .any(|fragment| fragment.is_product_root)
+    {
         bail!(
             "no instrumented fragment was emitted for binary `{}`; rerun with a fresh --target-dir",
             args.bin
@@ -288,38 +312,84 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
     let analysis_target = AnalysisTarget::from_rustc(args.target.as_deref())?;
     let excluded: HashSet<String> = args.excluded_crates.iter().cloned().collect();
     if args.fix {
-        let initial_findings =
-            config.apply(&analysis_target, &fragments, analyze(&fragments, &excluded));
-        let fix_plan = FixPlan {
-            targets: initial_findings
-                .findings
+        let initial_findings = config.apply(
+            &analysis_target,
+            &production_fragments,
+            analyze(&production_fragments, &test_fragments, &excluded),
+        );
+        let fixable_findings: Vec<_> = initial_findings
+            .findings
+            .iter()
+            .filter(|finding| lint_levels.level(finding.kind.code()).is_emitted())
+            .filter(|finding| finding.definition.kind != DefinitionKind::EnumVariant)
+            .collect();
+        let production_fix_plan = fix_plan_for(
+            fixable_findings
                 .iter()
-                .filter(|finding| lint_levels.level(finding.kind.code()).is_emitted())
-                .filter(|finding| finding.definition.kind != DefinitionKind::EnumVariant)
-                .map(|finding| FixTarget {
-                    id: finding.definition.id.clone(),
-                    crate_name: finding.definition.crate_name.clone(),
-                    kind: finding.kind,
-                })
-                .collect(),
-        };
-        if !fix_plan.targets.is_empty() {
-            let fix_packages = fix_packages(&metadata, &fix_plan)?;
-            let fix_plan_path = graph_dir.join("fix-plan");
-            write_fix_plan(&fix_plan_path, &fix_plan)?;
+                .copied()
+                .filter(|finding| !finding.test_only),
+            &production_fragments,
+        );
+        let test_fix_plan = fix_plan_for(
+            fixable_findings
+                .iter()
+                .copied()
+                .filter(|finding| finding.test_only),
+            &test_fragments,
+        );
+        let mut applied_fixes = false;
+        if !test_fix_plan.targets.is_empty() {
+            let fix_packages = fix_packages(&metadata, &test_fix_plan)?;
+            let fix_plan_path = graph_dir.join("test-fix-plan");
+            write_fix_plan(&fix_plan_path, &test_fix_plan)?;
             cargo.run(
                 "fix",
-                &format!("{run_id}-fix"),
-                Some(FixRequest {
+                &format!("{run_id}-test-fix"),
+                &test_graph_dir,
+                CargoSelection::FixTests(FixRequest {
                     plan: &fix_plan_path,
                     packages: &fix_packages,
                 }),
             )?;
-            cargo.run("check", &format!("{run_id}-post-fix"), None)?;
-            fragments = read_fragments(&graph_dir)?;
+            applied_fixes = true;
+        }
+        if !production_fix_plan.targets.is_empty() {
+            let fix_packages = fix_packages(&metadata, &production_fix_plan)?;
+            let fix_plan_path = graph_dir.join("production-fix-plan");
+            write_fix_plan(&fix_plan_path, &production_fix_plan)?;
+            cargo.run(
+                "fix",
+                &format!("{run_id}-production-fix"),
+                &production_graph_dir,
+                CargoSelection::FixProduction(FixRequest {
+                    plan: &fix_plan_path,
+                    packages: &fix_packages,
+                }),
+            )?;
+            applied_fixes = true;
+        }
+        if applied_fixes {
+            cargo.run(
+                "check",
+                &format!("{run_id}-post-fix-production"),
+                &production_graph_dir,
+                CargoSelection::Production,
+            )?;
+            cargo.run(
+                "check",
+                &format!("{run_id}-post-fix-tests"),
+                &test_graph_dir,
+                CargoSelection::Tests,
+            )?;
+            production_fragments = read_fragments(&production_graph_dir)?;
+            test_fragments = read_fragments(&test_graph_dir)?;
         }
     }
-    let findings = config.apply(&analysis_target, &fragments, analyze(&fragments, &excluded));
+    let findings = config.apply(
+        &analysis_target,
+        &production_fragments,
+        analyze(&production_fragments, &test_fragments, &excluded),
+    );
     let mut diagnostics = String::new();
     let mut diagnostic_count = 0;
     let mut has_denied_diagnostic = false;
@@ -353,7 +423,7 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
     );
     writeln!(
         diagnostics,
-        "hawk: {} finding(s) for `{} --bin {} --all-features` on {}",
+        "hawk: {} finding(s) for `{} --bin {} --all-features` and workspace tests on {}",
         diagnostic_count, args.package, args.bin, compilation_target
     )
     .expect("formatting diagnostics into a string cannot fail");
@@ -372,7 +442,6 @@ struct InstrumentedCargo<'a> {
     workspace_root: &'a Path,
     manifest_path: &'a Path,
     target_dir: &'a Path,
-    graph_dir: &'a Path,
     crate_name: &'a str,
     executable: &'a Path,
 }
@@ -383,12 +452,21 @@ struct FixRequest<'a> {
     packages: &'a [String],
 }
 
+#[derive(Clone, Copy)]
+enum CargoSelection<'a> {
+    Production,
+    Tests,
+    FixProduction(FixRequest<'a>),
+    FixTests(FixRequest<'a>),
+}
+
 impl InstrumentedCargo<'_> {
     fn run(
         &self,
         subcommand: &str,
         run_id: &str,
-        fix_request: Option<FixRequest<'_>>,
+        graph_dir: &Path,
+        selection: CargoSelection<'_>,
     ) -> Result<()> {
         let mut command = Command::new("cargo");
         command
@@ -400,22 +478,37 @@ impl InstrumentedCargo<'_> {
             .arg("--locked")
             .arg("--target-dir")
             .arg(self.target_dir);
-        if let Some(fix_request) = fix_request {
-            for package in fix_request.packages {
-                command.arg("--package").arg(package);
+        match selection {
+            CargoSelection::Production => {
+                command
+                    .arg("--package")
+                    .arg(&self.args.package)
+                    .arg("--bin")
+                    .arg(&self.args.bin);
             }
-            command.arg("--lib");
-        } else {
-            command
-                .arg("--package")
-                .arg(&self.args.package)
-                .arg("--bin")
-                .arg(&self.args.bin);
+            CargoSelection::Tests => {
+                command.arg("--workspace").arg("--tests");
+            }
+            CargoSelection::FixProduction(fix_request) => {
+                for package in fix_request.packages {
+                    command.arg("--package").arg(package);
+                }
+                command.arg("--lib");
+            }
+            CargoSelection::FixTests(fix_request) => {
+                for package in fix_request.packages {
+                    command.arg("--package").arg(package);
+                }
+                command.arg("--lib").arg("--tests");
+            }
         }
         if let Some(target) = &self.args.target {
             command.arg("--target").arg(target);
         }
-        if fix_request.is_some() {
+        if matches!(
+            selection,
+            CargoSelection::FixProduction(_) | CargoSelection::FixTests(_)
+        ) {
             if self.args.allow_dirty {
                 command.arg("--allow-dirty");
             }
@@ -426,12 +519,19 @@ impl InstrumentedCargo<'_> {
                 command.arg("--allow-no-vcs");
             }
         }
+        let consumer_mode = match selection {
+            CargoSelection::Tests | CargoSelection::FixTests(_) => "tests",
+            CargoSelection::Production | CargoSelection::FixProduction(_) => "production",
+        };
         command
             .env("RUSTC_WORKSPACE_WRAPPER", self.executable)
-            .env("HAWK_OUTPUT_DIR", self.graph_dir)
+            .env("HAWK_OUTPUT_DIR", graph_dir)
             .env("HAWK_ROOT_CRATE", self.crate_name)
+            .env("HAWK_CONSUMER_MODE", consumer_mode)
             .env("HAWK_RUN_ID", run_id);
-        if let Some(fix_request) = fix_request {
+        if let CargoSelection::FixProduction(fix_request) | CargoSelection::FixTests(fix_request) =
+            selection
+        {
             command.env("HAWK_FIX_PLAN", fix_request.plan);
         }
         let status = command
@@ -447,6 +547,42 @@ impl InstrumentedCargo<'_> {
 fn write_fix_plan(path: &Path, fix_plan: &FixPlan) -> Result<()> {
     let file = File::create(path).with_context(|| format!("create {}", path.display()))?;
     serde_json::to_writer(file, fix_plan).with_context(|| format!("serialize {}", path.display()))
+}
+
+fn fix_plan_for<'a>(
+    findings: impl Iterator<Item = &'a Finding<'a>>,
+    fragments: &[Fragment],
+) -> FixPlan {
+    FixPlan {
+        targets: findings
+            .flat_map(|finding| {
+                fragments
+                    .iter()
+                    .flat_map(|fragment| &fragment.definitions)
+                    .filter(move |definition| same_declaration(finding.definition, definition))
+                    .map(move |definition| FixTarget {
+                        id: definition.id.clone(),
+                        crate_name: definition.crate_name.clone(),
+                        name: definition.name.clone(),
+                        definition_kind: definition.kind,
+                        kind: finding.kind,
+                    })
+            })
+            .collect(),
+    }
+}
+
+fn same_declaration(left: &Definition, right: &Definition) -> bool {
+    left.crate_name == right.crate_name
+        && left.name == right.name
+        && left.kind == right.kind
+        && match (&left.span, &right.span) {
+            (Some(left), Some(right)) => {
+                left.file == right.file && left.line == right.line && left.column == right.column
+            }
+            (None, None) => true,
+            _ => false,
+        }
 }
 
 fn fix_packages(metadata: &cargo_metadata::Metadata, fix_plan: &FixPlan) -> Result<Vec<String>> {
@@ -488,8 +624,8 @@ fn write_diagnostic(
     workspace_root: &Path,
     level: LintLevel,
 ) -> std::fmt::Result {
-    let (message, help, marker) = match (finding.kind, finding.definition.kind) {
-        (FindingKind::DeadPublic, DefinitionKind::EnumVariant) => (
+    let (message, help, marker) = match (finding.kind, finding.definition.kind, finding.test_only) {
+        (FindingKind::DeadPublic, DefinitionKind::EnumVariant, _) => (
             format!(
                 "`{}` is a public enum variant but is not reachable from binary `{binary}`",
                 finding.definition.name
@@ -497,10 +633,10 @@ fn write_diagnostic(
             "remove this variant",
             "public enum variant",
         ),
-        (FindingKind::UnnecessaryPublic, DefinitionKind::EnumVariant) => {
+        (FindingKind::UnnecessaryPublic, DefinitionKind::EnumVariant, _) => {
             unreachable!("live enum variants do not have actionable visibility findings")
         }
-        (FindingKind::DeadPublic, DefinitionKind::Reexport) => (
+        (FindingKind::DeadPublic, DefinitionKind::Reexport, _) => (
             format!(
                 "public re-export `{}` has no target reachable from binary `{binary}`",
                 finding.definition.name
@@ -508,7 +644,7 @@ fn write_diagnostic(
             "consider restricting this re-export's visibility or removing it",
             "public re-export",
         ),
-        (FindingKind::DeadPublic, DefinitionKind::Module) => (
+        (FindingKind::DeadPublic, DefinitionKind::Module, _) => (
             format!(
                 "public module `{}` has no declaration reachable from binary `{binary}`",
                 finding.definition.name
@@ -516,7 +652,7 @@ fn write_diagnostic(
             "consider restricting this module's visibility or removing it",
             "public module",
         ),
-        (FindingKind::DeadPublic, _) => (
+        (FindingKind::DeadPublic, _, _) => (
             format!(
                 "`{}` is public but is not reachable from binary `{binary}`",
                 finding.definition.name
@@ -524,7 +660,15 @@ fn write_diagnostic(
             "consider restricting this declaration's visibility or removing it",
             "public declaration",
         ),
-        (FindingKind::UnnecessaryPublic, DefinitionKind::Reexport) => (
+        (FindingKind::UnnecessaryPublic, DefinitionKind::Reexport, true) => (
+            format!(
+                "public re-export `{}` is needed only by tests; it can be `pub(crate)`",
+                finding.definition.name
+            ),
+            "change this re-export to `pub(crate) use`",
+            "public re-export",
+        ),
+        (FindingKind::UnnecessaryPublic, DefinitionKind::Reexport, false) => (
             format!(
                 "public re-export `{}` is not required by any compiled cross-crate use; it can be `pub(crate)`",
                 finding.definition.name
@@ -532,7 +676,15 @@ fn write_diagnostic(
             "change this re-export to `pub(crate) use`",
             "public re-export",
         ),
-        (FindingKind::UnnecessaryPublic, DefinitionKind::Module) => (
+        (FindingKind::UnnecessaryPublic, DefinitionKind::Module, true) => (
+            format!(
+                "public module `{}` is needed only by tests; it can be `pub(crate)`",
+                finding.definition.name
+            ),
+            "change this module to `pub(crate) mod`",
+            "public module",
+        ),
+        (FindingKind::UnnecessaryPublic, DefinitionKind::Module, false) => (
             format!(
                 "public module `{}` is used only within `{}`; it can be `pub(crate)`",
                 finding.definition.name, finding.definition.crate_name
@@ -540,7 +692,15 @@ fn write_diagnostic(
             "change this module to `pub(crate) mod`",
             "public module",
         ),
-        (FindingKind::UnnecessaryPublic, _) => (
+        (FindingKind::UnnecessaryPublic, _, true) => (
+            format!(
+                "`{}` is public but is needed only by tests; it can be `pub(crate)`",
+                finding.definition.name
+            ),
+            "change this declaration to `pub(crate)`",
+            "public declaration",
+        ),
+        (FindingKind::UnnecessaryPublic, _, false) => (
             format!(
                 "`{}` is public but all reachable uses are within `{}`; it can be `pub(crate)`",
                 finding.definition.name, finding.definition.crate_name
@@ -838,6 +998,7 @@ mod tests {
         let finding = Finding {
             kind: FindingKind::UnnecessaryPublic,
             definition: &definition,
+            test_only: false,
         };
         let mut output = String::new();
 
@@ -876,6 +1037,7 @@ mod tests {
         let finding = Finding {
             kind: FindingKind::DeadPublic,
             definition: &definition,
+            test_only: false,
         };
         let mut output = String::new();
 

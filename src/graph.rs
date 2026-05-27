@@ -24,6 +24,8 @@ pub struct FixPlan {
 pub struct FixTarget {
     pub id: String,
     pub crate_name: String,
+    pub name: String,
+    pub definition_kind: DefinitionKind,
     pub kind: FindingKind,
 }
 
@@ -109,6 +111,7 @@ impl FindingKind {
 pub struct Finding<'a> {
     pub kind: FindingKind,
     pub definition: &'a Definition,
+    pub test_only: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -122,34 +125,48 @@ struct DefinitionIdentity<'a> {
 }
 
 pub fn analyze<'a>(
-    fragments: &'a [Fragment],
+    production_fragments: &'a [Fragment],
+    test_fragments: &'a [Fragment],
     excluded_crates: &HashSet<String>,
 ) -> Vec<Finding<'a>> {
-    let definitions: HashMap<&str, &Definition> = fragments
+    let definitions: HashMap<&str, &Definition> = production_fragments
         .iter()
+        .chain(test_fragments)
         .flat_map(|fragment| &fragment.definitions)
         .map(|definition| (definition.id.as_str(), definition))
         .collect();
-    let edges: Vec<&Edge> = fragments
+    let edges: Vec<&Edge> = production_fragments
         .iter()
+        .chain(test_fragments)
         .flat_map(|fragment| &fragment.edges)
         .collect();
     let equivalents = equivalent_definitions(&definitions);
     let adjacency = adjacency(&edges, &equivalents);
 
-    let production_roots = fragments
+    let production_roots = production_fragments
         .iter()
         .filter(|fragment| fragment.is_product_root)
         .flat_map(|fragment| fragment.roots.iter().map(String::as_str))
         .chain(
-            fragments
+            production_fragments
                 .iter()
                 .flat_map(|fragment| fragment.conservative_roots.iter().map(String::as_str)),
         );
     let production = reachable(production_roots, &adjacency);
-
-    let mut explicitly_required: HashSet<&str> = fragments
+    let test_roots = test_fragments
         .iter()
+        .filter(|fragment| fragment.is_product_root)
+        .flat_map(|fragment| fragment.roots.iter().map(String::as_str))
+        .chain(
+            test_fragments
+                .iter()
+                .flat_map(|fragment| fragment.conservative_roots.iter().map(String::as_str)),
+        );
+    let tests = reachable(test_roots, &adjacency);
+
+    let mut explicitly_required: HashSet<&str> = production_fragments
+        .iter()
+        .chain(test_fragments)
         .flat_map(|fragment| fragment.required_public_roots.iter().map(String::as_str))
         .collect();
     let no_explicitly_required = HashSet::new();
@@ -173,10 +190,13 @@ pub fn analyze<'a>(
 
     let mut findings = Vec::new();
     let mut reported = HashSet::new();
-    for definition in definitions.values() {
+    for definition in production_fragments
+        .iter()
+        .flat_map(|fragment| &fragment.definitions)
+    {
         if !definition.public_api
             || excluded_crates.contains(&definition.crate_name)
-            || fragments.iter().any(|fragment| {
+            || production_fragments.iter().any(|fragment| {
                 fragment.is_product_root && fragment.crate_name == definition.crate_name
             })
         {
@@ -191,17 +211,13 @@ pub fn analyze<'a>(
             continue;
         }
 
-        let is_production_live = if definition.kind == DefinitionKind::Reexport {
-            reexport_targets(definition.id.as_str(), &edges)
-                .iter()
-                .any(|target| production.contains(target))
-        } else {
-            production.contains(definition.id.as_str())
-        };
-        if !is_production_live {
+        let is_production_live = is_live(definition, &edges, &production);
+        let is_test_live = is_live(definition, &edges, &tests);
+        if !is_production_live && !is_test_live {
             findings.push(Finding {
                 kind: FindingKind::DeadPublic,
                 definition,
+                test_only: false,
             });
             continue;
         }
@@ -213,6 +229,7 @@ pub fn analyze<'a>(
         findings.push(Finding {
             kind: FindingKind::UnnecessaryPublic,
             definition,
+            test_only: !is_production_live && is_test_live,
         });
     }
 
@@ -225,6 +242,16 @@ pub fn analyze<'a>(
         )
     });
     findings
+}
+
+fn is_live(definition: &Definition, edges: &[&Edge], reachable: &HashSet<&str>) -> bool {
+    if definition.kind == DefinitionKind::Reexport {
+        reexport_targets(definition.id.as_str(), edges)
+            .iter()
+            .any(|target| reachable.contains(target))
+    } else {
+        reachable.contains(definition.id.as_str())
+    }
 }
 
 fn required_public_visibility<'a>(
@@ -382,8 +409,18 @@ fn reachable<'a>(
 
 #[cfg(test)]
 mod tests {
-    use super::{Definition, DefinitionKind, Edge, EdgeKind, FindingKind, Fragment, analyze};
+    use super::{
+        Definition, DefinitionKind, Edge, EdgeKind, Finding, FindingKind, Fragment,
+        analyze as analyze_with_tests,
+    };
     use std::collections::HashSet;
+
+    fn analyze<'a>(
+        fragments: &'a [Fragment],
+        excluded_crates: &HashSet<String>,
+    ) -> Vec<Finding<'a>> {
+        analyze_with_tests(fragments, &[], excluded_crates)
+    }
 
     fn node(id: &str, crate_name: &str, public_api: bool) -> Definition {
         Definition {
@@ -415,6 +452,33 @@ mod tests {
                 definitions: vec![node("main", "app", false)],
                 edges: vec![],
                 roots: vec!["main".into()],
+                conservative_roots: vec![],
+                required_public_roots: vec![],
+            },
+            Fragment {
+                crate_name: "lib".into(),
+                is_product_root: false,
+                definitions,
+                edges,
+                roots: vec![],
+                conservative_roots: vec![],
+                required_public_roots: vec![],
+            },
+        ]
+    }
+
+    fn test_fragments(definitions: Vec<Definition>, edges: Vec<Edge>) -> Vec<Fragment> {
+        vec![
+            Fragment {
+                crate_name: "integration_test".into(),
+                is_product_root: true,
+                definitions: vec![node("test_main", "integration_test", false)],
+                edges: vec![Edge {
+                    from: "test_main".into(),
+                    to: "test_entry".into(),
+                    kind: EdgeKind::Body,
+                }],
+                roots: vec!["test_main".into()],
                 conservative_roots: vec![],
                 required_public_roots: vec![],
             },
@@ -471,6 +535,38 @@ mod tests {
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].kind, FindingKind::UnnecessaryPublic);
         assert_eq!(findings[0].definition.id, "helper");
+        assert!(!findings[0].test_only);
+    }
+
+    #[test]
+    fn integration_test_api_is_public_while_its_helper_can_be_narrowed() {
+        let input = fragments(
+            vec![node("entry", "lib", true), node("helper", "lib", true)],
+            vec![Edge {
+                from: "entry".into(),
+                to: "helper".into(),
+                kind: EdgeKind::Body,
+            }],
+        );
+        let mut test_entry = node("test_entry", "lib", true);
+        test_entry.name = "entry".into();
+        let mut test_helper = node("test_helper", "lib", true);
+        test_helper.name = "helper".into();
+        let test_input = test_fragments(
+            vec![test_entry, test_helper],
+            vec![Edge {
+                from: "test_entry".into(),
+                to: "test_helper".into(),
+                kind: EdgeKind::Body,
+            }],
+        );
+
+        let findings = analyze_with_tests(&input, &test_input, &HashSet::new());
+
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, FindingKind::UnnecessaryPublic);
+        assert_eq!(findings[0].definition.id, "helper");
+        assert!(findings[0].test_only);
     }
 
     #[test]

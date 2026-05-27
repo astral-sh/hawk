@@ -2,28 +2,36 @@
 
 ## Product model
 
-The analyzed unit is one explicitly selected Cargo binary target. All
-workspace library dependencies compiled into that binary are considered
-closed-world unless their crates are explicitly excluded.
+The analyzed surface is the workspace library dependencies compiled into one
+explicitly selected Cargo binary target. They are considered closed-world
+unless their crates are explicitly excluded. The selected binary establishes
+production reachability, and workspace tests are compiled as a separate
+consumer graph for those library declarations.
 
-The MVP analyzes:
+The analysis includes:
 
 - one binary target;
 - `--all-features`;
 - one selected compilation target, defaulting to the host target;
-- production reachability only.
+- production reachability from the selected binary;
+- test reachability and visibility requirements from workspace test targets.
 
-Alternate products and test-only reachability are future analysis modes rather
-than implicit roots.
+Alternate binary products remain future analysis modes rather than implicit
+roots.
 
 ## Diagnostics
 
-The selected binary seeds reachability but does not itself receive `hawk`
-diagnostics. Compiled workspace library dependencies can produce:
+The selected binary seeds production reachability but does not itself receive
+`hawk` diagnostics. Tests can preserve public visibility or establish
+test-only reachability, but declarations in crates compiled only for tests are
+not diagnostic candidates. Compiled workspace library dependencies in the
+selected binary can produce:
 
-- dead public surface: a public declaration is not reachable from the product;
-- unnecessary public visibility: a live public declaration has no live
-  cross-crate consumer and can be restricted to `pub(crate)`.
+- dead public surface: a public declaration is not reachable from the product
+  or workspace tests;
+- unnecessary public visibility: a production-live or test-live public
+  declaration has no compiled cross-crate consumer and can be restricted to
+  `pub(crate)`.
 
 Hawk emits warnings and exits successfully by default. Clippy-style ordered
 `-A`/`-W`/`-D` options control lint levels; `-D warnings` enforces all Hawk
@@ -99,13 +107,15 @@ required-public analysis, and suppressed findings are not eligible for fixes.
 
 ## Implementation direction
 
-`cargo hawk` invokes the selected Cargo build with
-`RUSTC_WORKSPACE_WRAPPER=hawk-driver`. The compiler driver is pinned to the
-workspace Rust toolchain and emits resolved graph fragments for each compiled
-workspace crate. The frontend merges those fragments and traverses from the
-selected binary entry point. If Cargo compiles the same workspace crate more
-than once, equivalent source declarations are merged by crate, name, kind, and
-span before diagnostics are emitted.
+`cargo hawk` invokes both the selected binary build and `cargo check
+--workspace --tests` with `RUSTC_WORKSPACE_WRAPPER=hawk-driver`. The compiler
+driver is pinned to the workspace Rust toolchain and emits resolved graph
+fragments for each compiled workspace crate. The frontend retains the two root
+sets, so a declaration can be production-live, test-live, or dead, while
+combining compiled cross-crate visibility requirements from both passes. If
+Cargo compiles the same workspace crate more than once, equivalent source
+declarations are merged by crate, name, kind, and span before diagnostics are
+emitted.
 
 Reference edges distinguish implementation-body reachability from public
 interface exposure. Cross-crate references from all compiled items preserve
@@ -118,10 +128,13 @@ the target kind and absence of potential external consumers make narrowing
 provably type-checking-safe.
 
 Fixing is a second compilation phase because findings are determined only
-after Hawk merges graph fragments for the selected binary. Hawk first builds
-a fix plan from emitted findings, then runs `cargo fix --lib` for the
-workspace library packages that own planned edits while its compiler wrapper
-emits rustc `MachineApplicable` suggestions. It finishes with another
-instrumented check of the selected binary, preserving the production-only
-product model rather than compiling tests or unrelated workspace products as
-additional roots.
+after Hawk merges graph fragments. Hawk builds fix plans from emitted
+findings, running package-scoped `cargo fix --lib` for production findings and
+package-scoped `cargo fix --lib --tests` for test-only findings. The latter
+compiles each owning library as a primary fix target while retaining test
+configuration, so test-support dependencies as well as `cfg(test)` items can
+be edited without applying unrelated workspace fixes. Its compiler wrapper
+matches equivalent declaration identities and emits rustc `MachineApplicable`
+suggestions. Hawk finishes with another instrumented check of the selected
+binary and workspace tests so visibility changes used only by tests are
+validated before completion.

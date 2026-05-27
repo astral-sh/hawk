@@ -1,9 +1,10 @@
 # hawk
 
 `hawk` is an experimental Cargo lint tool for binary products built from
-internal Rust workspace crates. It analyzes a selected binary as a closed
-world and reports public library items that are not needed by that product or
-whose visibility exceeds the needs of the product.
+internal Rust workspace crates. It analyzes public library items in a selected
+binary product against its production binary and workspace test consumers,
+reporting items that are unused or whose visibility exceeds those consumers'
+needs.
 
 This repository is at the prototype stage.
 
@@ -22,11 +23,13 @@ cargo build
   --bin app
 ```
 
-The selected binary is analyzed under `--all-features --locked` on the host
-target by default. Pass `--target TRIPLE` to analyze another compilation
-target; Hawk expects any required cross-compilation environment to be prepared
-by the caller. All workspace library crates compiled for that binary are
-considered internal unless exempted:
+The selected binary and workspace test targets are analyzed under
+`--all-features --locked` on the host target by default. Pass `--target TRIPLE`
+to analyze another compilation target; Hawk expects any required
+cross-compilation environment to be prepared by the caller. Diagnostics apply
+only to workspace library crates compiled for the selected binary; workspace
+tests participate as consumers of those crates. Those libraries are considered
+internal unless exempted:
 
 ```sh
 ./target/debug/cargo-hawk \
@@ -92,11 +95,15 @@ application and validation to `cargo fix`, including Cargo's source-control
 safety checks; pass `--allow-dirty`, `--allow-staged`, or `--allow-no-vcs` with
 `--fix` when the corresponding Cargo override is appropriate.
 
-Unlike `cargo clippy --fix`, Hawk applies fixes only to library targets in the
-selected production product, then rechecks that selected binary. Enum variants
-are report-only because they have no independent visibility modifier; a
-variant finding disappears after fixing its containing enum only when the
-entire enum no longer needs to be public.
+Unlike `cargo clippy --fix`, Hawk applies fixes only to library packages in the
+selected production product. Production findings are fixed through library
+targets, while declarations needed only by tests are fixed through their
+owning packages' library and test targets. This allows `cfg(test)` declarations
+and test-support dependencies to be edited without applying unrelated fixes
+throughout the workspace. Hawk then rechecks the selected binary and workspace
+tests. Enum variants are report-only because they have no independent
+visibility modifier; a variant finding disappears after fixing its containing
+enum only when the entire enum no longer needs to be public.
 
 ## Cross-compilation
 
@@ -144,6 +151,15 @@ For fields and inherent associated constants, a live item used only inside its
 defining crate can be changed to `pub(crate)`. Enum variants have no
 independent Rust visibility modifier: Hawk diagnoses unreachable variants for
 removal, but does not report reachable variants as unnecessary public surface.
+
+## Test Consumers
+
+Hawk keeps production and test reachability distinct. An item referenced
+across crate boundaries by a workspace test must remain `pub` and is not
+reported. A public helper reachable only along test paths, without a
+cross-crate use of its own, is reported as `hawk::unnecessary_public`, with a
+`pub(crate)` suggestion. A public declaration unreachable from both the
+selected binary and workspace tests remains `hawk::dead_public`.
 
 ## Exported paths and modules
 

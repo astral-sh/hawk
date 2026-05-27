@@ -58,7 +58,7 @@ fn diagnoses_public_surface_of_a_binary_product() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stdout = anstream::adapter::strip_str(&stdout).to_string();
     let summary = format!(
-        "hawk: 34 finding(s) for `app --bin app --all-features` on target `{host_target}`\n"
+        "hawk: 35 finding(s) for `app --bin app --all-features` and workspace tests on target `{host_target}`\n"
     );
     let diagnostics = stdout
         .strip_suffix(&summary)
@@ -288,6 +288,13 @@ fn diagnoses_public_surface_of_a_binary_product() {
         |     ^^^ public module
         = help: consider restricting this module's visibility or removing it
 
+    warning[hawk::unnecessary_public]: `test_only_helper` is public but is needed only by tests; it can be `pub(crate)`
+      --> library/src/lib.rs:289:1
+        |
+    289 | pub fn test_only_helper() {}
+        | ^^^ public declaration
+        = help: change this declaration to `pub(crate)`
+
     warning[hawk::unknown_item]: override for `hawk::dead_public` references unknown item `library::removed_api`
       --> hawk.toml:15:1
        |
@@ -341,7 +348,7 @@ fn ordered_lint_levels_control_severity_and_exit_status() {
     assert!(stdout.contains("warning[hawk::unnecessary_public]"));
     assert!(stdout.contains("error[hawk::unfulfilled_expectation]"));
     assert!(!stdout.contains("hawk::unknown_item"));
-    assert!(stdout.contains("hawk: 33 finding(s)"));
+    assert!(stdout.contains("hawk: 34 finding(s)"));
 }
 
 #[test]
@@ -385,4 +392,6 @@ fn applies_visibility_fixes_through_cargo_fix() {
     assert!(library.contains("pub fn dead_code_allowed_entry() {"));
     assert!(library.contains("pub(crate) fn dead_code_allowed_helper() {}"));
     assert!(library.contains("pub enum ProductEnum {"));
+    assert!(library.contains("pub fn integration_test_support() {"));
+    assert!(library.contains("pub(crate) fn test_only_helper() {}"));
 }

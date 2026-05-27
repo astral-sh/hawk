@@ -281,3 +281,9 @@ pub fn archived_mirrored_fields() -> ArchivedMirroredFields {
         required_through_archive: 1,
     }
 }
+
+pub fn integration_test_support() {
+    test_only_helper();
+}
+
+pub fn test_only_helper() {}
