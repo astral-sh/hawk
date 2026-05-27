@@ -501,6 +501,10 @@ fn benchmark_consumers_preserve_required_public_visibility() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(!stdout.contains("`bench_api` is public"));
+    assert!(
+        !stdout.contains("`BenchMode::OnlyBench`"),
+        "benchmark-executed variant was diagnosed:\n{stdout}"
+    );
     assert!(stdout.contains("`unused` is public"));
 }
 

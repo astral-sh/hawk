@@ -213,7 +213,9 @@ fn emit_fragment(tcx: TyCtxt<'_>, root_crate: &str, output_dir: &Path) -> Result
     let is_non_production = env::var("HAWK_CONSUMER_MODE").as_deref() == Ok("non-production");
     let test_surface = is_non_production && tcx.sess.opts.test;
     let is_product_root = if is_non_production {
-        test_surface && tcx.entry_fn(()).is_some()
+        // Non-production executables, including custom tests and benchmarks,
+        // can have entry points without `--test` but still consume APIs.
+        tcx.entry_fn(()).is_some()
     } else {
         crate_name == root_crate && tcx.entry_fn(()).is_some()
     };
