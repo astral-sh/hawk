@@ -19,9 +19,35 @@ products.
 - Applies machine-applicable `pub(crate)` fixes through `cargo fix`.
 - Uses Clippy-style `-A`/`-W`/`-D` lint levels for incremental CI adoption.
 
+## Installation
+
+Hawk uses `rustc_private` and must be compiled with its pinned Rust toolchain.
+Install Rust 1.95.0 with the required compiler development component:
+
+```sh
+rustup toolchain install 1.95.0 --component rustc-dev
+```
+
+To install the current development version from Git:
+
+```sh
+RUSTC_BOOTSTRAP=1 cargo +1.95.0 install --locked \
+  --git https://github.com/astral-sh/hawk cargo-hawk
+```
+
+Once Hawk is published on crates.io as `cargo-hawk`, install a released
+version with:
+
+```sh
+RUSTC_BOOTSTRAP=1 cargo +1.95.0 install --locked cargo-hawk
+```
+
+`RUSTC_BOOTSTRAP=1` is required during installation because `cargo install`
+does not use this repository's Cargo configuration when it compiles the
+installed package.
+
 ## Getting started
 
-Hawk currently requires its pinned Rust toolchain and uses `rustc_private`.
 Declare each shipped binary in a workspace-root `hawk.toml`:
 
 ```toml
@@ -31,22 +57,21 @@ bin = "app"
 reason = "shipped application binary"
 ```
 
-Build Hawk and analyze the workspace:
+Analyze the workspace:
 
 ```sh
-cargo build
-./target/debug/cargo-hawk \
+cargo hawk \
   --manifest-path /path/to/workspace/Cargo.toml
 ```
 
 To enforce findings in CI or apply visibility fixes:
 
 ```sh
-./target/debug/cargo-hawk \
+cargo hawk \
   --manifest-path /path/to/workspace/Cargo.toml \
   -D warnings
 
-./target/debug/cargo-hawk \
+cargo hawk \
   --manifest-path /path/to/workspace/Cargo.toml \
   --fix
 ```
