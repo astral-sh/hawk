@@ -6,8 +6,6 @@
 
 Released on 2026-05-28.
 
-### Other changes
-
 - Add Cargo fix support for visibility findings ([#27](https://github.com/astral-sh/hawk/pull/27))
 - Add Hawk lint override configuration ([#17](https://github.com/astral-sh/hawk/pull/17))
 - Add Made by Astral footer ([#47](https://github.com/astral-sh/hawk/pull/47))
@@ -29,6 +27,7 @@ Released on 2026-05-28.
 - Clarify dead enum variant remediation ([#53](https://github.com/astral-sh/hawk/pull/53))
 - Configure production binary consumers ([#31](https://github.com/astral-sh/hawk/pull/31))
 - Deduplicate diagnostic source rendering ([#19](https://github.com/astral-sh/hawk/pull/19))
+- Diagnose associated type aliases ([#11](https://github.com/astral-sh/hawk/pull/11))
 - Diagnose dead public unions ([#10](https://github.com/astral-sh/hawk/pull/10))
 - Disambiguate same-named override targets ([#52](https://github.com/astral-sh/hawk/pull/52))
 - Distinguish product roots with matching crate names ([#42](https://github.com/astral-sh/hawk/pull/42))
@@ -41,14 +40,13 @@ Released on 2026-05-28.
 - Fix grouped re-exports across consumer plans ([#45](https://github.com/astral-sh/hawk/pull/45))
 - Limit fixes to unnecessary public visibility ([#51](https://github.com/astral-sh/hawk/pull/51))
 - Omit unsupported Windows release artifact ([#61](https://github.com/astral-sh/hawk/pull/61))
+- Preserve existing graph directory files ([#9](https://github.com/astral-sh/hawk/pull/9))
+- Preserve public trait implementation interface types ([#16](https://github.com/astral-sh/hawk/pull/16))
 - Preserve visibility required by generated fields ([#26](https://github.com/astral-sh/hawk/pull/26))
 - Render rustc-style CLI diagnostics ([#12](https://github.com/astral-sh/hawk/pull/12))
+- Report fragment flush failures ([#8](https://github.com/astral-sh/hawk/pull/8))
 - Root non-production executables for liveness ([#41](https://github.com/astral-sh/hawk/pull/41))
 - Set up continuous integration ([#2](https://github.com/astral-sh/hawk/pull/2))
 - Simplify accumulated public-surface analysis ([#7](https://github.com/astral-sh/hawk/pull/7))
 - Simplify consumer reachability handling ([#34](https://github.com/astral-sh/hawk/pull/34))
 - Streamline Hawk README ([#46](https://github.com/astral-sh/hawk/pull/46))
-- [codex] Diagnose associated type aliases ([#11](https://github.com/astral-sh/hawk/pull/11))
-- [codex] Preserve existing graph directory files ([#9](https://github.com/astral-sh/hawk/pull/9))
-- [codex] Preserve public trait implementation interface types ([#16](https://github.com/astral-sh/hawk/pull/16))
-- [codex] Report fragment flush failures ([#8](https://github.com/astral-sh/hawk/pull/8))
