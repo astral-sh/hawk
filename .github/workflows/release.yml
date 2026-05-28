@@ -16,7 +16,7 @@
 name: Release
 permissions: {}
 
-# This task will run whenever you push a git tag that looks like a version
+# This task will run whenever you workflow_dispatch with a tag that looks like a version
 # like "1.0.0", "v0.1.0-prerelease.1", "my-app/0.1.0", "releases/v1.0.0", etc.
 # Various formats will be parsed into a VERSION and an optional PACKAGE_NAME, where
 # PACKAGE_NAME must be the name of a Cargo package in your workspace, and VERSION
@@ -39,24 +39,28 @@ permissions: {}
 # will be marked as a prerelease.
 on:
   pull_request:
-  push:
-    tags:
-      - "**[0-9]+.[0-9]+.[0-9]+*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release Tag
+        required: true
+        default: dry-run
+        type: string
 
 jobs:
   # Run 'dist plan' (or host) to determine what tasks we need to do
   plan:
     runs-on: "ubuntu-22.04"
     permissions:
-      contents: write
+      contents: read
     outputs:
       val: ${{ steps.plan.outputs.manifest }}
-      tag: ${{ !github.event.pull_request && github.ref_name || '' }}
-      publishing: ${{ !github.event.pull_request }}
+      tag: ${{ (inputs.tag != 'dry-run' && inputs.tag) || '' }}
+      publishing: ${{ inputs.tag && inputs.tag != 'dry-run' }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       EVENT_NAME: ${{ github.event_name }}
-      RELEASE_TAG: ${{ github.ref_name }}
+      RELEASE_TAG: ${{ inputs.tag }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
         with:
@@ -79,7 +83,7 @@ jobs:
       # but also really annoying to build CI around when it needs secrets to work right.)
       - id: plan
         run: |
-          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+          if [[ "$EVENT_NAME" == "pull_request" || "$RELEASE_TAG" == "dry-run" ]]; then
             dist plan --output-format=json > plan-dist-manifest.json
           else
             dist host --steps=create --tag="$RELEASE_TAG" --output-format=json > plan-dist-manifest.json
@@ -99,7 +103,7 @@ jobs:
     # Let the initial task tell us to not run (currently very blunt)
     needs:
       - plan
-    if: ${{ fromJson(needs.plan.outputs.val).ci.github.artifacts_matrix.include != null && (needs.plan.outputs.publishing == 'true' || fromJson(needs.plan.outputs.val).ci.github.pr_run_mode == 'upload') }}
+    if: ${{ fromJson(needs.plan.outputs.val).ci.github.artifacts_matrix.include != null && (needs.plan.outputs.publishing == 'true' || fromJson(needs.plan.outputs.val).ci.github.pr_run_mode == 'upload') || inputs.tag == 'dry-run' }}
     strategy:
       fail-fast: false
       # Target platforms/runners are computed by dist in create-release.
@@ -247,7 +251,7 @@ jobs:
       RELEASE_TAG: ${{ needs.plan.outputs.tag }}
     runs-on: "ubuntu-22.04"
     permissions:
-      contents: write
+      contents: read
     outputs:
       val: ${{ steps.host.outputs.manifest }}
     steps:
@@ -268,6 +272,7 @@ jobs:
           pattern: artifacts-*
           path: target/distrib/
           merge-multiple: true
+      # This is a harmless no-op for GitHub Releases, hosting for that happens in "announce".
       - id: host
         shell: bash
         run: |
@@ -281,30 +286,6 @@ jobs:
           # Overwrite the previous copy
           name: artifacts-dist-manifest
           path: dist-manifest.json
-      # Create a GitHub Release while uploading all files to it
-      - name: "Download GitHub Artifacts"
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
-        with:
-          pattern: artifacts-*
-          path: artifacts
-          merge-multiple: true
-      - name: Cleanup
-        run: |
-          # Remove the granular manifests
-          rm -f artifacts/*-dist-manifest.json
-      - name: Create GitHub Release
-        env:
-          PRERELEASE_FLAG: "${{ fromJson(steps.host.outputs.manifest).announcement_is_prerelease && '--prerelease' || '' }}"
-          ANNOUNCEMENT_TITLE: "${{ fromJson(steps.host.outputs.manifest).announcement_title }}"
-          ANNOUNCEMENT_BODY: "${{ fromJson(steps.host.outputs.manifest).announcement_github_body }}"
-          RELEASE_COMMIT: "${{ github.sha }}"
-          RELEASE_TAG: "${{ needs.plan.outputs.tag }}"
-        run: |
-          # Write and read notes from a file to avoid quoting breaking things
-          echo "$ANNOUNCEMENT_BODY" > $RUNNER_TEMP/notes.txt
-
-          gh release create "$RELEASE_TAG" --target "$RELEASE_COMMIT" $PRERELEASE_FLAG --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/notes.txt" artifacts/*
-
   custom-publish-crates:
     needs:
       - plan
@@ -318,6 +299,7 @@ jobs:
       "contents": "read"
       "id-token": "write"
 
+  # Create a GitHub Release while uploading all files to it
   announce:
     needs:
       - plan
@@ -329,7 +311,7 @@ jobs:
     if: ${{ always() && needs.host.result == 'success' && (needs.custom-publish-crates.result == 'skipped' || needs.custom-publish-crates.result == 'success') }}
     runs-on: "ubuntu-22.04"
     permissions:
-      contents: read
+      contents: write
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
@@ -337,3 +319,26 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
+      # Create a GitHub Release while uploading all files to it
+      - name: "Download GitHub Artifacts"
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          pattern: artifacts-*
+          path: artifacts
+          merge-multiple: true
+      - name: Cleanup
+        run: |
+          # Remove the granular manifests
+          rm -f artifacts/*-dist-manifest.json
+      - name: Create GitHub Release
+        env:
+          PRERELEASE_FLAG: "${{ fromJson(needs.host.outputs.val).announcement_is_prerelease && '--prerelease' || '' }}"
+          ANNOUNCEMENT_TITLE: "${{ fromJson(needs.host.outputs.val).announcement_title }}"
+          ANNOUNCEMENT_BODY: "${{ fromJson(needs.host.outputs.val).announcement_github_body }}"
+          RELEASE_COMMIT: "${{ github.sha }}"
+          RELEASE_TAG: "${{ needs.plan.outputs.tag }}"
+        run: |
+          # Write and read notes from a file to avoid quoting breaking things
+          echo "$ANNOUNCEMENT_BODY" > $RUNNER_TEMP/notes.txt
+
+          gh release create "$RELEASE_TAG" --target "$RELEASE_COMMIT" $PRERELEASE_FLAG --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/notes.txt" artifacts/*
