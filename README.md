@@ -5,6 +5,9 @@
 
 A workspace-aware Cargo lint for unnecessary public Rust APIs.
 
+**Experimental:** This project was authored by GPT-5.5 and is not intended
+for public consumption. Use at your own risk.
+
 Hawk finds `pub` declarations that are unused, or can be restricted to
 `pub(crate)`, when a Cargo workspace builds one or more closed-world binary
 products.
