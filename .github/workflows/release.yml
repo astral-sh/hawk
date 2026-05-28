@@ -14,7 +14,8 @@
 # title/body based on your changelogs.
 
 name: Release
-permissions: {}
+permissions:
+  "contents": "write"
 
 # This task will run whenever you workflow_dispatch with a tag that looks like a version
 # like "1.0.0", "v0.1.0-prerelease.1", "my-app/0.1.0", "releases/v1.0.0", etc.
@@ -51,16 +52,13 @@ jobs:
   # Run 'dist plan' (or host) to determine what tasks we need to do
   plan:
     runs-on: "ubuntu-22.04"
-    permissions:
-      contents: read
     outputs:
       val: ${{ steps.plan.outputs.manifest }}
       tag: ${{ (inputs.tag != 'dry-run' && inputs.tag) || '' }}
+      tag-flag: ${{ inputs.tag && inputs.tag != 'dry-run' && format('--tag={0}', inputs.tag) || '' }}
       publishing: ${{ inputs.tag && inputs.tag != 'dry-run' }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      EVENT_NAME: ${{ github.event_name }}
-      RELEASE_TAG: ${{ inputs.tag }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
         with:
@@ -83,11 +81,7 @@ jobs:
       # but also really annoying to build CI around when it needs secrets to work right.)
       - id: plan
         run: |
-          if [[ "$EVENT_NAME" == "pull_request" || "$RELEASE_TAG" == "dry-run" ]]; then
-            dist plan --output-format=json > plan-dist-manifest.json
-          else
-            dist host --steps=create --tag="$RELEASE_TAG" --output-format=json > plan-dist-manifest.json
-          fi
+          dist ${{ (inputs.tag && inputs.tag != 'dry-run' && format('host --steps=create --tag={0}', inputs.tag)) || 'plan' }} --output-format=json > plan-dist-manifest.json
           echo "dist ran successfully"
           cat plan-dist-manifest.json
           echo "manifest=$(jq -c "." plan-dist-manifest.json)" >> "$GITHUB_OUTPUT"
@@ -118,14 +112,10 @@ jobs:
       # - N "local" tasks that build each platform's binaries and platform-specific installers
       matrix: ${{ fromJson(needs.plan.outputs.val).ci.github.artifacts_matrix }}
     runs-on: ${{ matrix.runner }}
-    container: ${{ matrix.container && matrix.container.image || null }} # zizmor: ignore[unpinned-images] dist controls the runner image from this release plan
-    permissions:
-      contents: read
+    container: ${{ matrix.container && matrix.container.image || null }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       BUILD_MANIFEST_NAME: target/distrib/${{ join(matrix.targets, '-') }}-dist-manifest.json
-      RELEASE_TAG: ${{ needs.plan.outputs.tag }}
-      DIST_ARGS: ${{ matrix.dist_args }}
     steps:
       - name: enable windows longpaths
         run: |
@@ -142,7 +132,7 @@ jobs:
             echo "$HOME/.cargo/bin" >> $GITHUB_PATH
           fi
       - name: Install dist
-        run: ${{ matrix.install_dist.run }} # zizmor: ignore[template-injection] dist generates this installation command
+        run: ${{ matrix.install_dist.run }}
       # Get the dist-manifest
       - name: Fetch local artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
@@ -151,18 +141,12 @@ jobs:
           path: target/distrib/
           merge-multiple: true
       - name: Install dependencies
-        run:
-          | # zizmor: ignore[template-injection] dist generates platform package installation commands
+        run: |
           ${{ matrix.packages_install }}
       - name: Build artifacts
-        shell: bash
         run: |
           # Actually do builds and make zips and whatnot
-          tag_args=()
-          if [[ -n "$RELEASE_TAG" ]]; then
-            tag_args+=(--tag="$RELEASE_TAG")
-          fi
-          dist build "${tag_args[@]}" --print=linkage --output-format=json $DIST_ARGS > dist-manifest.json
+          dist build ${{ needs.plan.outputs.tag-flag }} --print=linkage --output-format=json ${{ matrix.dist_args }} > dist-manifest.json
           echo "dist ran successfully"
       - id: cargo-dist
         name: Post-build
@@ -191,12 +175,9 @@ jobs:
       - plan
       - build-local-artifacts
     runs-on: "ubuntu-22.04"
-    permissions:
-      contents: read
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       BUILD_MANIFEST_NAME: target/distrib/global-dist-manifest.json
-      RELEASE_TAG: ${{ needs.plan.outputs.tag }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
         with:
@@ -218,11 +199,7 @@ jobs:
       - id: cargo-dist
         shell: bash
         run: |
-          tag_args=()
-          if [[ -n "$RELEASE_TAG" ]]; then
-            tag_args+=(--tag="$RELEASE_TAG")
-          fi
-          dist build "${tag_args[@]}" --output-format=json "--artifacts=global" > dist-manifest.json
+          dist build ${{ needs.plan.outputs.tag-flag }} --output-format=json "--artifacts=global" > dist-manifest.json
           echo "dist ran successfully"
 
           # Parse out what we just built and upload it to scratch storage
@@ -248,10 +225,7 @@ jobs:
     if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      RELEASE_TAG: ${{ needs.plan.outputs.tag }}
     runs-on: "ubuntu-22.04"
-    permissions:
-      contents: read
     outputs:
       val: ${{ steps.host.outputs.manifest }}
     steps:
@@ -272,11 +246,11 @@ jobs:
           pattern: artifacts-*
           path: target/distrib/
           merge-multiple: true
-      # This is a harmless no-op for GitHub Releases, hosting for that happens in "announce".
+      # This is a harmless no-op for GitHub Releases, hosting for that happens in "announce"
       - id: host
         shell: bash
         run: |
-          dist host --tag="$RELEASE_TAG" --steps=upload --steps=release --output-format=json > dist-manifest.json
+          dist host ${{ needs.plan.outputs.tag-flag }} --steps=upload --steps=release --output-format=json > dist-manifest.json
           echo "artifacts uploaded and released successfully"
           cat dist-manifest.json
           echo "manifest=$(jq -c "." dist-manifest.json)" >> "$GITHUB_OUTPUT"
@@ -286,6 +260,7 @@ jobs:
           # Overwrite the previous copy
           name: artifacts-dist-manifest
           path: dist-manifest.json
+
   custom-publish-crates:
     needs:
       - plan
@@ -294,7 +269,8 @@ jobs:
     uses: ./.github/workflows/publish-crates.yml
     with:
       plan: ${{ needs.plan.outputs.val }}
-    # crates.io trusted publishing uses GitHub OIDC rather than repository secrets.
+    secrets: inherit
+    # publish jobs get escalated permissions
     permissions:
       "contents": "read"
       "id-token": "write"
@@ -310,8 +286,6 @@ jobs:
     # "host" however must run to completion, no skipping allowed!
     if: ${{ always() && needs.host.result == 'success' && (needs.custom-publish-crates.result == 'skipped' || needs.custom-publish-crates.result == 'success') }}
     runs-on: "ubuntu-22.04"
-    permissions:
-      contents: write
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
@@ -336,9 +310,8 @@ jobs:
           ANNOUNCEMENT_TITLE: "${{ fromJson(needs.host.outputs.val).announcement_title }}"
           ANNOUNCEMENT_BODY: "${{ fromJson(needs.host.outputs.val).announcement_github_body }}"
           RELEASE_COMMIT: "${{ github.sha }}"
-          RELEASE_TAG: "${{ needs.plan.outputs.tag }}"
         run: |
           # Write and read notes from a file to avoid quoting breaking things
           echo "$ANNOUNCEMENT_BODY" > $RUNNER_TEMP/notes.txt
 
-          gh release create "$RELEASE_TAG" --target "$RELEASE_COMMIT" $PRERELEASE_FLAG --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/notes.txt" artifacts/*
+          gh release create "${{ needs.plan.outputs.tag }}" --target "$RELEASE_COMMIT" $PRERELEASE_FLAG --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/notes.txt" artifacts/*
