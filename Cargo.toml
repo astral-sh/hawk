@@ -26,8 +26,3 @@ toml = "0.8.23"
 
 [dev-dependencies]
 insta = { version = "1.43.2", default-features = false }
-
-# The profile that 'dist' will build with
-[profile.dist]
-inherits = "release"
-lto = "thin"

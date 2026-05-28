@@ -39,8 +39,9 @@ unnecessarily public symbols across crates within a single workspace.
 
 ## Installation
 
-Hawk uses `rustc_private` and must be compiled with its pinned Rust toolchain.
-Install Rust 1.95.0 with the required compiler development component:
+Hawk uses `rustc_private` and must be compiled against its pinned Rust
+toolchain. Prebuilt binaries are not supported. Install Rust 1.95.0 with the
+required compiler development component:
 
 ```sh
 rustup toolchain install 1.95.0 --component rustc-dev
@@ -53,8 +54,7 @@ RUSTC_BOOTSTRAP=1 cargo +1.95.0 install --locked \
   --git https://github.com/astral-sh/hawk cargo-hawk
 ```
 
-Once Hawk is published on crates.io as `cargo-hawk`, install a released
-version with:
+Install a released version from crates.io with:
 
 ```sh
 RUSTC_BOOTSTRAP=1 cargo +1.95.0 install --locked cargo-hawk

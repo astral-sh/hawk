@@ -1,12 +1,8 @@
-# Publish cargo-hawk to crates.io as a custom dist publish job.
+# Publish cargo-hawk to crates.io from the release workflow.
 name: Publish to crates.io
 
 on:
   workflow_call:
-    inputs:
-      plan:
-        required: true
-        type: string
 
 permissions: {}
 
