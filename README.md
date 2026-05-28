@@ -1,6 +1,7 @@
 # hawk
 
 [![CI](https://github.com/astral-sh/hawk/actions/workflows/ci.yml/badge.svg)](https://github.com/astral-sh/hawk/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/cargo-hawk.svg)](https://crates.io/crates/cargo-hawk)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
 A workspace-aware Cargo lint for unnecessary public Rust APIs.
