@@ -526,6 +526,28 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
     })
 }
 
+pub fn write_error(raw_args: &[String], error: &anyhow::Error) -> Result<()> {
+    let mut output = String::new();
+    writeln!(
+        output,
+        "{}: {}",
+        styled("error", ERROR),
+        styled(format_args!("{error:#}"), EMPHASIS)
+    )
+    .expect("formatting an error into a string cannot fail");
+    anstream::AutoStream::new(std::io::stderr(), terminal_color(raw_args).into())
+        .write_all(output.as_bytes())
+        .context("write error output")
+}
+
+fn terminal_color(raw_args: &[String]) -> TerminalColor {
+    let mut raw_args = raw_args.to_owned();
+    if raw_args.get(1).is_some_and(|argument| argument == "hawk") {
+        raw_args.remove(1);
+    }
+    Args::try_parse_from(raw_args).map_or_else(|_| TerminalColor::default(), |args| args.color)
+}
+
 struct InstrumentedCargo<'a> {
     args: &'a Args,
     workspace_root: &'a Path,

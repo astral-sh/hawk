@@ -381,15 +381,15 @@ fn requires_a_configured_production_binary() {
         .arg(configuration.path())
         .arg("--target-dir")
         .arg(target_dir.path())
-        .arg("--color=never")
+        .arg("--color=always")
         .output()
         .expect("run cargo-hawk");
 
     assert!(!output.status.success());
-    assert!(
-        String::from_utf8_lossy(&output.stderr)
-            .contains("no applicable production binaries configured")
-    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains('\u{1b}'));
+    let stderr = anstream::adapter::strip_str(&stderr).to_string();
+    assert!(stderr.contains("error: no applicable production binaries configured"));
 }
 
 #[test]

@@ -19,10 +19,12 @@ fn main() -> std::process::ExitCode {
         return driver::run_wrapper(args);
     }
 
-    match cli::run(args) {
+    match cli::run(args.clone()) {
         Ok(exit_code) => exit_code,
         Err(error) => {
-            eprintln!("hawk: {error:#}");
+            if let Err(output_error) = cli::write_error(&args, &error) {
+                eprintln!("hawk: {error:#}: {output_error:#}");
+            }
             std::process::ExitCode::FAILURE
         }
     }
