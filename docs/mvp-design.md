@@ -5,9 +5,9 @@
 The analyzed surface is the workspace library dependencies compiled into
 configured same-workspace production binary targets or workspace
 non-production targets. They are considered closed-world unless their crates
-are explicitly excluded. The configured production binaries establish
+are explicitly excluded. The configured production targets establish
 production reachability. Workspace tests are compiled as part of a separate
-non-production consumer graph and can also introduce test-only declarations;
+non-production graph and can also introduce test-only declarations;
 benches, examples, and doctests in that graph preserve any public visibility
 they require.
 
@@ -25,14 +25,14 @@ explicitly in `hawk.toml`.
 
 ## Diagnostics
 
-Configured production binaries seed production reachability but do not
+Configured production targets seed production reachability but do not
 themselves receive `hawk` diagnostics. Non-production targets can preserve
 public visibility; tests additionally establish test-only reachability and
 introduce diagnostic candidates from dev-dependencies or `#[cfg(test)]`
-source. Compiled workspace library declarations in either consumer graph can
+source. Compiled workspace library declarations in either graph can
 produce:
 
-- dead public surface: a public declaration is not reachable from the product
+- dead public surface: a public declaration is not reachable from production
   or workspace tests;
 - unnecessary public visibility: a production-live or test-live public
   declaration has no compiled cross-crate consumer and can be restricted to
@@ -41,7 +41,7 @@ produce:
 Hawk emits warnings and exits successfully by default. Clippy-style ordered
 `-A`/`-W`/`-D` options control lint levels; `-D warnings` enforces all Hawk
 diagnostics in CI, while a later per-diagnostic option can incrementally lower
-or allow one lint. The options apply after `hawk.toml` overrides and cover both
+or allow one lint. The options apply after `hawk.toml` suppressions and cover both
 visibility findings and configuration diagnostics for stale selectors or
 unfulfilled expectations. Invalid configuration and instrumented build
 failures fail independently of lint levels. With `--fix`, Hawk converts
@@ -58,7 +58,7 @@ variants, selected public re-exports, and public modules. For a named public
 re-export of a modeled local non-module declaration, Hawk diagnoses the
 exported path only if no compiled cross-crate reference to its target (or a
 required interface related to it) exists. A target unreachable from the
-selected product produces a dead-export finding; a target used without a
+configured production target produces a dead-export finding; a target used without a
 possible external consumer produces an unnecessary-public finding for the
 `use`. Targets of public re-exports remain required-public roots because
 narrowing only the declaration fails with `E0365`.
@@ -96,7 +96,7 @@ Direct trait-associated item diagnostics are represented by the containing
 trait, because trait items do not carry their own visibility. Types assigned
 by associated type definitions in publicly reachable trait implementations are
 treated as required-public roots because restricting them can make the crate
-fail to compile (`E0446`) even without a product call path. Trait method
+fail to compile (`E0446`) even without a production call path. Trait method
 interface edges are recorded so a type returned across a compiled crate
 boundary also remains public. Trait implementation bodies are conservatively
 rooted so indirect trait dispatch does not turn into dead-public false
@@ -104,11 +104,11 @@ positives. Any compiled cross-crate reference prevents a visibility diagnostic
 because rustc privacy-checks dead items as well as production-reachable ones
 and `pub` is the narrowest Rust visibility available for those uses.
 
-An optional workspace-root `hawk.toml` configures production binaries and
-diagnostic overrides. A `[[production]]` entry names a package
-and binary target in the selected workspace, optionally scoped to a
-Cargo-style target name or `cfg(...)` platform expression, and its compiled
-references participate in production reachability and required-public
+An optional workspace-root `hawk.toml` configures production targets,
+diagnostic overrides, and broad diagnostic exclusions. A `[[production]]`
+entry names a package and binary target in the selected workspace, optionally
+scoped to a Cargo-style target name or `cfg(...)` platform expression, and its
+compiled references participate in production reachability and required-public
 analysis. An `[[override]]` entry identifies an exact lint, crate, and item
 path under the same optional target scoping, with an optional item kind to
 disambiguate declarations in separate Rust namespaces. `allow` suppresses a
@@ -118,11 +118,13 @@ an item absent from an applicable compiled graph produce an unknown-item
 diagnostic; selectors matching multiple declarations produce an
 ambiguous-item diagnostic and suppress nothing. Overrides do not change
 reachability or required-public analysis, and suppressed findings are not
-eligible for fixes.
+eligible for fixes. A `[[exclude]]` entry names a crate and either a module
+subtree or source file, suppressing all findings in that scope without changing
+the analysis; it is intended for source areas such as generated code.
 
 ## Implementation direction
 
-`cargo hawk` invokes each configured production binary build, `cargo check
+`cargo hawk` invokes each configured production target build, `cargo check
 --workspace --all-targets`, and compile-only workspace doctests with
 `RUSTC_WORKSPACE_WRAPPER=hawk-driver`. The doctest pass uses rustdoc's
 test-builder wrapper so documentation example references are emitted into the
@@ -159,6 +161,6 @@ declarations enabled under `#[cfg(test)]` can be edited. Fix compilations cap or
 compiler lints to prevent Cargo from consuming unrelated rustc suggestions;
 Hawk's compiler wrapper matches equivalent declaration identities and emits
 the planned rustc `MachineApplicable` suggestions. Hawk finishes with another
-instrumented check of every configured production binary and workspace
+instrumented check of every configured production target and workspace
 non-production target, including compile-only doctests, so visibility changes
 are validated before completion.

@@ -14,6 +14,7 @@ pub struct Config {
     path: Option<PathBuf>,
     source: String,
     overrides: Vec<LintOverride>,
+    exclusions: Vec<DiagnosticExclusion>,
     production: Vec<ProductionConsumer>,
 }
 
@@ -27,6 +28,19 @@ pub struct LintOverride {
     pub reason: String,
     pub target: Option<Platform>,
     pub span: ConfigSpan,
+}
+
+#[derive(Clone, Debug)]
+struct DiagnosticExclusion {
+    crate_name: String,
+    selector: ExclusionSelector,
+    target: Option<Platform>,
+}
+
+#[derive(Clone, Debug)]
+enum ExclusionSelector {
+    Module(String),
+    File(String),
 }
 
 #[derive(Clone, Debug)]
@@ -80,6 +94,8 @@ pub struct AppliedFindings<'findings, 'config> {
 struct RawConfig {
     #[serde(default, rename = "override")]
     overrides: Vec<toml::Spanned<RawLintOverride>>,
+    #[serde(default, rename = "exclude")]
+    exclusions: Vec<toml::Spanned<RawDiagnosticExclusion>>,
     #[serde(default)]
     production: Vec<toml::Spanned<RawProductionConsumer>>,
 }
@@ -94,6 +110,17 @@ struct RawLintOverride {
     #[serde(rename = "kind")]
     definition_kind: Option<DefinitionKind>,
     level: OverrideLevel,
+    reason: String,
+    target: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawDiagnosticExclusion {
+    #[serde(rename = "crate")]
+    crate_name: String,
+    module: Option<String>,
+    file: Option<String>,
     reason: String,
     target: Option<String>,
 }
@@ -171,6 +198,67 @@ impl Config {
                 span,
             });
         }
+        let mut exclusions = Vec::new();
+        for entry in raw.exclusions {
+            let span = config_span(&source, entry.span().start);
+            let entry = entry.into_inner();
+            if entry.reason.trim().is_empty() {
+                bail!(
+                    "exclusion in {}:{}:{} must provide a non-empty reason",
+                    path.display(),
+                    span.line,
+                    span.column
+                );
+            }
+            let selector = match (entry.module, entry.file) {
+                (Some(module), None) if !module.trim().is_empty() => {
+                    ExclusionSelector::Module(module)
+                }
+                (None, Some(file)) if !file.trim().is_empty() => ExclusionSelector::File(file),
+                (Some(_), None) => {
+                    bail!(
+                        "exclusion in {}:{}:{} must provide a non-empty `module` selector",
+                        path.display(),
+                        span.line,
+                        span.column
+                    );
+                }
+                (None, Some(_)) => {
+                    bail!(
+                        "exclusion in {}:{}:{} must provide a non-empty `file` selector",
+                        path.display(),
+                        span.line,
+                        span.column
+                    );
+                }
+                (Some(_), Some(_)) | (None, None) => {
+                    bail!(
+                        "exclusion in {}:{}:{} must provide exactly one of `module` or `file`",
+                        path.display(),
+                        span.line,
+                        span.column
+                    );
+                }
+            };
+            let target = entry
+                .target
+                .map(|target| {
+                    target.parse::<Platform>().with_context(|| {
+                        format!(
+                            "parse target selector `{target}` in {}:{}:{}",
+                            path.display(),
+                            span.line,
+                            span.column
+                        )
+                    })
+                })
+                .transpose()?;
+            exclusions.push(DiagnosticExclusion {
+                crate_name: entry.crate_name,
+                selector,
+                target,
+            });
+        }
         let mut production = Vec::new();
         for entry in raw.production {
             let span = config_span(&source, entry.span().start);
@@ -208,6 +296,7 @@ impl Config {
             path: Some(path),
             source,
             overrides,
+            exclusions,
             production,
         })
     }
@@ -269,9 +358,18 @@ impl Config {
                 });
             }
         }
+        let active_exclusions = self
+            .exclusions
+            .iter()
+            .filter(|entry| entry.applies_to(target))
+            .filter(|entry| known_items.iter().any(|item| entry.identifies(item)))
+            .collect::<Vec<_>>();
         let findings = findings
             .into_iter()
-            .filter(|finding| !active_overrides.iter().any(|entry| entry.matches(finding)))
+            .filter(|finding| {
+                !active_overrides.iter().any(|entry| entry.matches(finding))
+                    && !active_exclusions.iter().any(|entry| entry.matches(finding))
+            })
             .collect();
         AppliedFindings {
             findings,
@@ -381,6 +479,45 @@ impl LintOverride {
     }
 }
 
+impl DiagnosticExclusion {
+    fn applies_to(&self, target: &AnalysisTarget) -> bool {
+        self.target
+            .as_ref()
+            .is_none_or(|platform| platform.matches(&target.name, &target.cfgs))
+    }
+
+    fn identifies(&self, item: &KnownItemIdentity<'_>) -> bool {
+        self.crate_name == item.crate_name
+            && match &self.selector {
+                ExclusionSelector::Module(module) => {
+                    item.kind == DefinitionKind::Module && item.item == module
+                }
+                ExclusionSelector::File(file) => {
+                    item.file.is_some_and(|item_file| item_file == file)
+                }
+            }
+    }
+
+    fn matches(&self, finding: &Finding<'_>) -> bool {
+        self.crate_name == finding.definition.crate_name
+            && match &self.selector {
+                ExclusionSelector::Module(module) => {
+                    finding.definition.name == *module
+                        || finding
+                            .definition
+                            .name
+                            .strip_prefix(module)
+                            .is_some_and(|suffix| suffix.starts_with("::"))
+                }
+                ExclusionSelector::File(file) => finding
+                    .definition
+                    .span
+                    .as_ref()
+                    .is_some_and(|span| span.file == *file),
+            }
+    }
+}
+
 impl ProductionConsumer {
     fn applies_to(&self, target: &AnalysisTarget) -> bool {
         self.target
@@ -407,7 +544,7 @@ mod tests {
     use cargo_platform::Cfg;
 
     use super::{AnalysisTarget, Config, ConfigDiagnosticKind};
-    use crate::graph::{Definition, DefinitionKind, FindingKind, Fragment, analyze};
+    use crate::graph::{Definition, DefinitionKind, FindingKind, Fragment, Span, analyze};
 
     fn fragment() -> Fragment {
         Fragment {
@@ -460,6 +597,61 @@ mod tests {
                 name: "SameName".into(),
                 kind: DefinitionKind::Constant,
                 span: None,
+                public_api: true,
+            },
+        ];
+        fragment
+    }
+
+    fn scoped_fragment() -> Fragment {
+        let mut fragment = fragment();
+        fragment.definitions = vec![
+            Definition {
+                id: "generated".into(),
+                crate_name: "library".into(),
+                name: "generated".into(),
+                kind: DefinitionKind::Module,
+                span: Some(Span {
+                    file: "library/src/generated.rs".into(),
+                    line: 1,
+                    column: 1,
+                }),
+                public_api: true,
+            },
+            Definition {
+                id: "generated-unused".into(),
+                crate_name: "library".into(),
+                name: "generated::unused".into(),
+                kind: DefinitionKind::Function,
+                span: Some(Span {
+                    file: "library/src/generated.rs".into(),
+                    line: 2,
+                    column: 1,
+                }),
+                public_api: true,
+            },
+            Definition {
+                id: "outside".into(),
+                crate_name: "library".into(),
+                name: "outside".into(),
+                kind: DefinitionKind::Function,
+                span: Some(Span {
+                    file: "library/src/lib.rs".into(),
+                    line: 1,
+                    column: 1,
+                }),
+                public_api: true,
+            },
+            Definition {
+                id: "generatedish".into(),
+                crate_name: "library".into(),
+                name: "generatedish".into(),
+                kind: DefinitionKind::Function,
+                span: Some(Span {
+                    file: "library/src/lib.rs".into(),
+                    line: 2,
+                    column: 1,
+                }),
                 public_api: true,
             },
         ];
@@ -673,6 +865,163 @@ reason = "only compiled on Windows"
 
         assert_eq!(applied.findings.len(), 1);
         assert!(applied.config_diagnostics.is_empty());
+    }
+
+    #[test]
+    fn module_exclusion_suppresses_its_diagnostic_subtree() {
+        let directory = tempfile::tempdir().expect("temporary configuration directory");
+        let path = directory.path().join("hawk.toml");
+        std::fs::write(
+            &path,
+            r#"
+[[exclude]]
+crate = "library"
+module = "generated"
+reason = "generated public declarations"
+"#,
+        )
+        .expect("write configuration");
+        let config = Config::load(directory.path(), Some(&path)).expect("load configuration");
+        let fragments = vec![scoped_fragment()];
+
+        let applied = config.apply(
+            &target("aarch64-apple-darwin", &["unix"]),
+            &fragments,
+            &[],
+            analyze(&fragments, &[], &candidate_crates(), &HashSet::new()),
+        );
+
+        assert_eq!(
+            applied
+                .findings
+                .iter()
+                .map(|finding| finding.definition.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["outside", "generatedish"]
+        );
+        assert!(applied.config_diagnostics.is_empty());
+    }
+
+    #[test]
+    fn module_exclusion_requires_a_module_with_that_path() {
+        let directory = tempfile::tempdir().expect("temporary configuration directory");
+        let path = directory.path().join("hawk.toml");
+        std::fs::write(
+            &path,
+            r#"
+[[exclude]]
+crate = "library"
+module = "outside"
+reason = "not actually a module"
+"#,
+        )
+        .expect("write configuration");
+        let config = Config::load(directory.path(), Some(&path)).expect("load configuration");
+        let fragments = vec![scoped_fragment()];
+
+        let applied = config.apply(
+            &target("aarch64-apple-darwin", &["unix"]),
+            &fragments,
+            &[],
+            analyze(&fragments, &[], &candidate_crates(), &HashSet::new()),
+        );
+
+        assert_eq!(applied.findings.len(), 4);
+    }
+
+    #[test]
+    fn file_exclusion_suppresses_all_diagnostics_in_that_source_file() {
+        let directory = tempfile::tempdir().expect("temporary configuration directory");
+        let path = directory.path().join("hawk.toml");
+        std::fs::write(
+            &path,
+            r#"
+[[exclude]]
+crate = "library"
+file = "library/src/generated.rs"
+reason = "generated source file"
+"#,
+        )
+        .expect("write configuration");
+        let config = Config::load(directory.path(), Some(&path)).expect("load configuration");
+        let fragments = vec![scoped_fragment()];
+
+        let applied = config.apply(
+            &target("aarch64-apple-darwin", &["unix"]),
+            &fragments,
+            &[],
+            analyze(&fragments, &[], &candidate_crates(), &HashSet::new()),
+        );
+
+        assert_eq!(
+            applied
+                .findings
+                .iter()
+                .map(|finding| finding.definition.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["outside", "generatedish"]
+        );
+        assert!(applied.config_diagnostics.is_empty());
+    }
+
+    #[test]
+    fn exclusion_only_applies_on_matching_target() {
+        let directory = tempfile::tempdir().expect("temporary configuration directory");
+        let path = directory.path().join("hawk.toml");
+        std::fs::write(
+            &path,
+            r#"
+[[exclude]]
+crate = "library"
+module = "generated"
+target = "cfg(windows)"
+reason = "generated only on Windows"
+"#,
+        )
+        .expect("write configuration");
+        let config = Config::load(directory.path(), Some(&path)).expect("load configuration");
+        let fragments = vec![scoped_fragment()];
+
+        let windows = config.apply(
+            &target("x86_64-pc-windows-msvc", &["windows"]),
+            &fragments,
+            &[],
+            analyze(&fragments, &[], &candidate_crates(), &HashSet::new()),
+        );
+        assert_eq!(windows.findings.len(), 2);
+
+        let unix = config.apply(
+            &target("aarch64-apple-darwin", &["unix"]),
+            &fragments,
+            &[],
+            analyze(&fragments, &[], &candidate_crates(), &HashSet::new()),
+        );
+        assert_eq!(unix.findings.len(), 4);
+    }
+
+    #[test]
+    fn exclusion_requires_one_scope_selector() {
+        let directory = tempfile::tempdir().expect("temporary configuration directory");
+        let path = directory.path().join("hawk.toml");
+        std::fs::write(
+            &path,
+            r#"
+[[exclude]]
+crate = "library"
+module = "generated"
+file = "library/src/generated.rs"
+reason = "invalid broad selection"
+"#,
+        )
+        .expect("write configuration");
+
+        let error = Config::load(directory.path(), Some(&path))
+            .expect_err("reject ambiguous exclusion selector");
+        assert!(
+            error
+                .to_string()
+                .contains("must provide exactly one of `module` or `file`")
+        );
     }
 
     #[test]

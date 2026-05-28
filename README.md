@@ -12,7 +12,7 @@ products.
 ## Highlights
 
 - Analyzes public surface across an entire Cargo workspace, starting from
-  configured production binaries.
+  configured production targets.
 - Reports `hawk::dead_public` for unused public items and
   `hawk::unnecessary_public` for visibility that can be restricted.
 - Models production separately from tests, benches, examples, and doctests.
@@ -55,8 +55,8 @@ To enforce findings in CI or apply visibility fixes:
 
 - [Using Hawk](docs/usage.md): running analysis, CI enforcement, fixes, and
   cross-compilation.
-- [Configuration](docs/configuration.md): product binaries, overrides, and
-  target selectors.
+- [Configuration](docs/configuration.md): production targets, overrides,
+  exclusions, and target selectors.
 - [Architecture](docs/architecture.md): how Hawk differs from Clippy and how
   the workspace analysis is implemented.
 - [MVP design](docs/mvp-design.md): the original analysis scope and design

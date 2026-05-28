@@ -1,7 +1,7 @@
 # Using Hawk
 
-Hawk analyzes public declarations in workspace library crates against a
-configured binary product and workspace non-production consumers. This guide
+Hawk analyzes public declarations in workspace library crates against
+configured production targets and workspace non-production targets. This guide
 covers invoking the tool; see [Configuration](configuration.md) for the
 `hawk.toml` reference and [Architecture](architecture.md) for the analysis
 model.
@@ -17,10 +17,10 @@ directly as Cargo's compiler wrapper.
 cargo build
 ```
 
-## Configure a product
+## Configure production targets
 
-Add each binary shipped as part of the product to `hawk.toml` at the root of
-the workspace being analyzed:
+Declare each shipped binary as a production target in `hawk.toml` at the root
+of the workspace being analyzed:
 
 ```toml
 [[production]]
@@ -30,7 +30,7 @@ reason = "shipped application binary"
 ```
 
 Every configured package and binary must be a target of that workspace. Hawk
-does not infer product entry points: an API used by an omitted binary can be
+does not infer production targets: an API used by an omitted binary can be
 reported as unnecessary or dead. See [Configuration](configuration.md) for
 multiple binaries, target-scoped entries, and accepted findings.
 
@@ -41,14 +41,15 @@ multiple binaries, target-scoped entries, and accepted findings.
   --manifest-path /path/to/workspace/Cargo.toml
 ```
 
-Configured production binaries and workspace non-production targets are
+Configured production targets and workspace non-production targets are
 analyzed under `--all-features --locked` on the host target by default. The
 non-production surface includes tests, benches, examples, and compile-only
 doctests. Diagnostics apply to workspace library crates compiled for those
 targets, including declarations enabled only under `cfg(test)`.
 
 Workspace libraries are treated as internal unless exempted. Exclude a
-library crate whose public API is consumed outside the analyzed product:
+library crate whose public API is consumed outside the configured production
+targets:
 
 ```sh
 ./target/debug/cargo-hawk \
@@ -110,7 +111,7 @@ Cargo's source-control safety checks; pass
 corresponding Cargo override is appropriate.
 
 Fixes are limited to workspace library packages in the configured production
-or non-production surface. Hawk rechecks configured binaries and
+or non-production surface. Hawk rechecks configured production targets and
 non-production targets, including compile-only doctests, after applying
 edits. Dead declarations and enum variants remain report-only.
 
@@ -120,7 +121,7 @@ Pass `--target TRIPLE` to analyze another compilation target. Hawk forwards
 the target to Cargo but does not install a target SDK or configure a cross
 linker.
 
-For example, a macOS host can analyze a Windows MSVC product using
+For example, a macOS host can analyze Windows MSVC production targets using
 [`cargo-xwin`](https://github.com/rust-cross/cargo-xwin). From the Hawk
 checkout, prepare the pinned toolchain once:
 
@@ -144,5 +145,5 @@ eval "$(cargo xwin env --quiet \
   --target "$target"
 ```
 
-Target-scoped product entries and expectations can keep platform-specific
+Target-scoped production entries and expectations can keep platform-specific
 surfaces explicit; see [Configuration](configuration.md).

@@ -8,7 +8,7 @@ A binary product such as `uv` or `ruff` may be split across many internal
 library crates. Rust requires cross-crate references to cross a `pub`
 boundary, even when no external library API is intended. Rustc and Clippy see
 each of those crate boundaries; Hawk additionally knows which workspace
-binaries constitute the shipped product and which workspace targets consume
+binaries constitute the production targets and which workspace targets consume
 code only outside production.
 
 This document describes the implementation on `main`. It compares Hawk with
@@ -22,10 +22,10 @@ one Clippy lint.
 | User entry point             | `cargo clippy`, or `clippy-driver` directly                                                   | `cargo-hawk`                                                                                     |
 | Cargo integration            | Sets `RUSTC_WORKSPACE_WRAPPER=clippy-driver`                                                  | Sets `RUSTC_WORKSPACE_WRAPPER` to the `cargo-hawk` executable itself                             |
 | Compiler integration         | A `rustc_driver` callback registers Clippy lint passes with rustc's lint store                | A `rustc_driver` callback inspects analyzed HIR/type context and serializes graph fragments      |
-| Unit of analysis             | One rustc invocation at a time                                                                | All instrumented crate compilations from the selected product and non-production surface         |
+| Unit of analysis             | One rustc invocation at a time                                                                | All instrumented crate compilations from selected production targets and non-production surface  |
 | When diagnostics are decided | During the compiler lint pass that finds the condition                                        | After Cargo completes, when graph fragments have been merged and traversed                       |
 | Meaning of a public item     | Rust/Clippy lint semantics within the compilation being checked                               | A declaration that may be unnecessary under an explicit closed-world product model               |
-| Suppression and severity     | Rust lint attributes and command-line lint levels, plus Clippy configuration where applicable | Clippy-style command-line levels plus exact, reasoned `hawk.toml` overrides                      |
+| Suppression and severity     | Rust lint attributes and command-line lint levels, plus Clippy configuration where applicable | Clippy-style command-line levels plus reasoned `hawk.toml` overrides and scoped exclusions       |
 | Automatic fixes              | The lint emits suggestions; `cargo clippy --fix` delegates application to `cargo fix`         | Graph analysis first writes a fix plan; a second compiler pass emits suggestions for `cargo fix` |
 
 The shared foundation is deliberate. Both tools run as Cargo compiler
@@ -37,7 +37,7 @@ The architectural split is equally deliberate. A normal Clippy lint can
 observe everything it needs during the crate currently being compiled. Hawk
 must distinguish:
 
-- an internal `pub` item reached from a selected production binary;
+- an internal `pub` item reached from a selected production target;
 - an item needed across a crate boundary and therefore required to remain
   `pub`;
 - an item used only by tests;
@@ -50,9 +50,9 @@ its lint decision as a workspace-level post-processing step.
 ## Product model
 
 Hawk treats workspace library crates as internal implementation crates unless
-the caller excludes them with `--exclude-crate`. It does not infer the product
-from every binary that happens to compile. Each shipped binary is stated in
-`hawk.toml`:
+the caller excludes them with `--exclude-crate`. It does not infer production
+targets from every binary that happens to compile. Each production target is
+stated in `hawk.toml`:
 
 ```toml
 [[production]]
@@ -74,13 +74,13 @@ compiles workspace non-production targets under
   dev-dependency support crates as diagnostic candidates.
 
 All instrumented builds currently use `--all-features` and one selected target
-triple. A `target = "cfg(...)"` selector on a production entry or override
-limits it to applicable target configurations.
+triple. A `target = "cfg(...)"` selector on a production entry, override, or
+exclusion limits it to applicable target configurations.
 
 This is the central semantic difference from Clippy. Running Clippy over a
 workspace changes which crates are checked, but it does not define the
 workspace as the complete external consumer of its internal libraries. Hawk's
-configured product model does.
+configured production-target model does.
 
 ## Execution pipeline
 
@@ -96,7 +96,7 @@ An analysis run proceeds as follows:
      |
      | read Cargo metadata, hawk.toml, lint levels, and target cfg
      v
- cargo check --package <product> --bin <product>   (once per product binary)
+ cargo check --package <package> --bin <target>    (once per production target)
  cargo check --workspace --all-targets              (non-production surface)
  cargo test --workspace --doc                       (compile-only doctests)
      |
@@ -108,14 +108,15 @@ An analysis run proceeds as follows:
      v
  graph::analyze(production fragments, non-production fragments)
      |
-     | apply hawk.toml overrides and command-line levels
+     | apply hawk.toml suppressions and command-line levels
      v
  rustc-shaped Hawk diagnostics
 ```
 
 Every Cargo invocation includes `--all-features --locked`, a shared target
 directory, and optional `--target`. Environment variables identify the
-fragment output directory, selected product root, consumer mode, and run ID.
+fragment output directory, selected production-target root, analysis mode,
+and run ID.
 For doctests, Hawk additionally uses rustdoc's test-builder wrapper to route
 the generated test crates through the compiler wrapper without executing
 them. The run ID is tracked as compiler dependency input so Cargo does not
@@ -136,7 +137,7 @@ contains:
 - definitions, including source location, item kind, and whether the item is
   a public-surface candidate;
 - typed reference edges extracted from bodies and public interfaces;
-- entry-point roots when the crate is a selected product or non-production
+- entry-point roots when the crate is a selected production target or non-production
   executable;
 - conservative roots for code whose indirect execution cannot be safely
   recovered from direct call edges;
@@ -168,7 +169,7 @@ expand this test-only candidate surface.
 | `VisibilityRequirement` | A visibility relationship must be preserved even though it is not runtime reachability. |
 
 Separating body reachability from visibility requirements is essential. An
-item can be absent from product execution while still requiring `pub` because
+item can be absent from production execution while still requiring `pub` because
 some compiled cross-crate signature, re-export, or generated interface relies
 on its visibility.
 
@@ -181,7 +182,7 @@ identities using crate name, diagnostic path, item kind, and source span.
 
 The analysis then computes two reachability closures:
 
-- **production live** begins at each configured product binary entry point;
+- **production live** begins at each configured production target entry point;
 - **non-production live** begins at executable entry points compiled for
   tests, benches, examples, or doctests.
 
@@ -193,7 +194,7 @@ Separately, Hawk computes the declarations whose public visibility is
 required. Any compiled cross-crate reference requires the referenced
 declaration to retain visibility, regardless of whether the referencing item
 is reachable from a selected root: rustc privacy-checks compiled code, not
-only product-runtime code. The requirement propagates along interface,
+only production runtime code. The requirement propagates along interface,
 re-export, visibility-parent, and explicit visibility-requirement edges.
 
 For each public candidate in a non-excluded workspace library crate:
@@ -204,8 +205,8 @@ For each public candidate in a non-excluded workspace library crate:
 | Live in production or non-production, but not required public     | `hawk::unnecessary_public` |
 | Required public by a compiled cross-crate consumer or interface   | no visibility finding      |
 
-A selected production binary is a consumer, not a library surface to reduce,
-so its crate does not receive these findings.
+A selected production target is not a library surface to reduce, so its crate
+does not receive these findings.
 
 Enum variants are a special case. Hawk can report an unreachable public
 variant as dead surface requiring removal together with any remaining
@@ -220,7 +221,7 @@ longer compiles. Workspace-global analysis adds several privacy-specific
 boundaries:
 
 - A compiled cross-crate use preserves `pub` even if the use is outside
-  product reachability.
+  production reachability.
 - Named local re-exports are analyzed only where the target can be modeled
   soundly. Glob re-exports, module re-exports, and unmodeled or external
   targets remain conservative false negatives.
@@ -251,7 +252,7 @@ The visibility diagnostics are `hawk::dead_public` and
 `hawk::unfulfilled_expectation`.
 
 Hawk's workspace-level decisions do not naturally map to source attributes in
-a single crate compilation. Instead, `hawk.toml` carries exact, documented
+a single crate compilation. Instead, `hawk.toml` carries documented
 exceptions:
 
 ```toml
@@ -267,10 +268,12 @@ reason = "called by generated registration that Hawk does not model"
 `allow` suppresses the selected finding. `expect` suppresses it while
 producing a diagnostic if the finding disappears. Overrides can specify
 `kind` to distinguish declarations in separate Rust namespaces; ambiguous
-unqualified overrides suppress nothing. Overrides filter output; they never
-add graph roots or preserve public visibility. This is intentionally different
-from adding a production consumer: a real consumer changes the analysis,
-while an override records an accepted outstanding diagnostic.
+unqualified overrides suppress nothing. A reasoned `[[exclude]]` entry can
+instead suppress every finding under a module diagnostic path or in one
+source file, for example generated source. Overrides and exclusions filter
+output; they never add graph roots or preserve public visibility. This is
+intentionally different from defining a production target: a production target
+changes the analysis, while suppression records an accepted diagnostic scope.
 
 ## Fixes
 
@@ -307,19 +310,19 @@ identity and emits `pub(crate)` replacements.
 
 The final re-analysis matters: a visibility change can alter downstream
 compilation and the remaining graph. The run succeeds only after the selected
-product, non-production targets, and compile-only doctests compile in their
+production targets, non-production targets, and compile-only doctests compile in their
 edited state.
 
 ## Implementation map
 
-| File                  | Responsibility                                                                                                   |
-| --------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| `src/main.rs`         | Dispatch between the user-facing command and wrapper execution.                                                  |
-| `src/cli.rs`          | Cargo metadata, product selection, instrumented Cargo runs, diagnostic rendering, lint levels, and the fix loop. |
-| `src/driver.rs`       | `rustc_driver` callback, HIR/type-based fragment collection, and suggestion emission during fix compilations.    |
-| `src/graph.rs`        | Serialized graph model, global reachability and visibility analysis, findings, and fix-plan representation.      |
-| `src/config.rs`       | `hawk.toml` parsing, target selectors, production declarations, and exact override validation.                   |
-| `tests/end_to_end.rs` | User-facing behavior across Cargo builds, diagnostics, configuration, and fixes.                                 |
+| File                  | Responsibility                                                                                                             |
+| --------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `src/main.rs`         | Dispatch between the user-facing command and wrapper execution.                                                            |
+| `src/cli.rs`          | Cargo metadata, production target selection, instrumented Cargo runs, diagnostic rendering, lint levels, and the fix loop. |
+| `src/driver.rs`       | `rustc_driver` callback, HIR/type-based fragment collection, and suggestion emission during fix compilations.              |
+| `src/graph.rs`        | Serialized graph model, global reachability and visibility analysis, findings, and fix-plan representation.                |
+| `src/config.rs`       | `hawk.toml` parsing, target selectors, production declarations, exact overrides, and scoped exclusions.                    |
+| `tests/end_to_end.rs` | User-facing behavior across Cargo builds, diagnostics, configuration, and fixes.                                           |
 
 ## References
 

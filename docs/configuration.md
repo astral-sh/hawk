@@ -3,10 +3,9 @@
 Hawk reads `hawk.toml` from the workspace root by default. Use
 `--config PATH` to select a different configuration file.
 
-## Production consumers
+## Production targets
 
-List every binary shipped as part of the analyzed product with a
-`[[production]]` entry:
+Declare every shipped binary in the analysis with a `[[production]]` entry:
 
 ```toml
 [[production]]
@@ -26,14 +25,14 @@ target = "cfg(windows)"
 reason = "Windows-only binary shipped from this workspace"
 ```
 
-Each applicable entry is built as a production consumer, so declarations
+Each applicable production target is built for analysis, so declarations
 required by that binary are not reported as dead or unnecessarily public.
 Every package and binary must be a target of the selected Cargo workspace. At
-least one production binary must apply to the analyzed target.
+least one production target must apply to the analyzed target.
 
 All configured binaries are analyzed with the same `--all-features` and
-compilation target. Hawk intentionally does not infer product binaries from
-the workspace: if a binary is an intended consumer, configure it explicitly.
+compilation target. Hawk intentionally does not infer production targets from
+the workspace: configure each intended target explicitly.
 
 ## Overrides
 
@@ -78,14 +77,43 @@ with the same path. It accepts Hawk's item-kind names, such as `function`,
 `type_alias`, and `constant`.
 
 Overrides filter diagnostics only. Unlike a `[[production]]` entry, an
-override does not add a consumer, establish reachability, or preserve public
-visibility for referenced declarations.
+override does not define a production target, establish reachability, or
+preserve public visibility for referenced declarations.
+
+## Exclusions
+
+Use an exclusion when an entire module subtree or source file is outside the
+diagnostic surface, for example generated code:
+
+```toml
+[[exclude]]
+crate = "library"
+module = "generated_bindings"
+reason = "generated from the protocol schema"
+
+[[exclude]]
+crate = "platform"
+file = "platform/src/generated.rs"
+reason = "generated platform bindings"
+```
+
+An exclusion must provide exactly one of `module` or `file`. A module selector
+uses Hawk's diagnostic path and suppresses the selected module and all
+descendants, such as `generated_bindings::Message`. A file selector matches
+the source path printed in diagnostics. Both forms suppress all Hawk findings
+in their selected scope.
+
+Exclusions filter diagnostics and fixes only; they do not change reachability
+or preserve visibility. Prefer an exact `[[override]]` when an individual
+diagnostic is an intentional exception that should remain audited with
+`expect`. Exclusions are not expectations and do not diagnose a selected
+scope that currently produces no findings.
 
 ## Target selectors
 
-Both `[[production]]` and `[[override]]` accept an optional `target`. The
-value uses the same named targets and `cfg(...)` platform expressions as Cargo
-target dependencies:
+`[[production]]`, `[[override]]`, and `[[exclude]]` accept an optional
+`target`. The value uses the same named targets and `cfg(...)` platform
+expressions as Cargo target dependencies:
 
 ```toml
 [[production]]
@@ -109,9 +137,9 @@ that are not compiled on that target.
 
 ## External library boundaries
 
-`hawk.toml` defines product consumers and diagnostic exceptions. To omit an
+`hawk.toml` defines production targets and diagnostic exceptions. To omit an
 entire workspace library crate because it exposes a supported API outside the
-closed-world product, pass `--exclude-crate`:
+closed-world analysis, pass `--exclude-crate`:
 
 ```sh
 ./target/debug/cargo-hawk \
