@@ -12,6 +12,21 @@ Hawk finds `pub` declarations that are unused, or can be restricted to
 `pub(crate)`, when a Cargo workspace builds one or more closed-world binary
 products.
 
+## Motivation
+
+Hawk is intended for projects like [Ruff](https://github.com/astral-sh/ruff)
+and [uv](https://github.com/astral-sh/uv), where the product is a binary but
+the workspace itself is decomposed into many crates. In such projects, the
+workspace is largely the only client of its `pub` APIs: `pub` is commonly
+needed only to make symbols visible across crates within the workspace.
+
+`rustc`'s `dead_code` lint identifies unused, unexported items, and its
+opt-in `unreachable_pub` lint identifies `pub` items that cannot be reached
+outside a single crate. It does not perform the closed-world analysis needed
+to decide which workspace-internal `pub` APIs are actually required. Hawk
+assumes that the workspace represents the world and identifies dead code and
+unnecessarily public symbols across crates within a single workspace.
+
 ## Highlights
 
 - Analyzes public surface across an entire Cargo workspace, starting from
