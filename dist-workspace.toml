@@ -11,8 +11,8 @@ ci = "github"
 dispatch-releases = true
 # Create the GitHub release and tag after the crates.io publish step succeeds.
 github-release = "announce"
-# Ship prebuilt cargo-hawk binary archives without additional package-manager installers.
-installers = []
+# Generate a curl-based installer for the supported macOS and Linux archives.
+installers = ["shell"]
 # Publish only the cargo-hawk package to crates.io after release artifacts are hosted.
 publish-jobs = ["./publish-crates"]
 # The crates.io publisher authenticates through GitHub OIDC.
