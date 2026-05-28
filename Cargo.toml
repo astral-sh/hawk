@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT OR Apache-2.0"
-description = "Closed-world public API lints for Cargo binary products"
+description = "Workspace-aware public API lints"
 repository = "https://github.com/astral-sh/hawk"
 readme = "README.md"
 
