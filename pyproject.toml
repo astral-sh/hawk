@@ -1,0 +1,14 @@
+[tool.rooster]
+changelog-contributors = false
+major-labels = []
+minor-labels = ["breaking"]
+ignore-labels = ["internal", "ci", "testing"]
+version-format = "cargo"
+version_files = ["Cargo.toml"]
+
+[tool.rooster.section-labels]
+"Breaking changes" = ["breaking"]
+"Enhancements" = ["enhancement"]
+"Bug fixes" = ["bug"]
+"Documentation" = ["documentation"]
+"Other changes" = ["__unknown__"]
