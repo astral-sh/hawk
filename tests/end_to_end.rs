@@ -454,30 +454,30 @@ fn applies_visibility_fixes_through_cargo_fix() {
 
     let library =
         fs::read_to_string(workspace.path().join("library/src/lib.rs")).expect("read fixed source");
-    assert!(library.contains("pub(crate) fn internal_helper() {}"));
+    assert!(library.contains("fn internal_helper() {}"));
     assert!(library.contains("pub(crate) use exported::ReexportedValue;"));
     assert!(library.contains("pub const DEAD_VALUE: u8 = 2;"));
-    assert!(library.contains("pub(crate) constructed: u8,"));
+    assert!(library.contains("constructed: u8,"));
     assert!(library.contains("pub mod dead_outer {"));
     assert!(library.contains("pub fn dead_code_allowed_entry() {"));
     assert!(library.contains("pub fn dead_code_allowed_helper() {}"));
     assert!(library.contains("pub enum ProductEnum {"));
     assert!(library.contains("pub fn integration_test_support() {"));
-    assert!(library.contains("pub(crate) fn test_only_helper() {}"));
+    assert!(library.contains("fn test_only_helper() {}"));
     assert!(library.contains("use std::fmt::Debug;"));
 
     let test_support = fs::read_to_string(workspace.path().join("test_support/src/lib.rs"))
         .expect("read fixed test-support source");
     assert!(test_support.contains("pub fn entry() {"));
-    assert!(test_support.contains("pub(crate) fn helper() {}"));
+    assert!(test_support.contains("fn helper() {}"));
     assert!(test_support.contains("pub fn dead_test_surface() {}"));
 
     let unit_support = fs::read_to_string(workspace.path().join("unit_support/src/lib.rs"))
         .expect("read fixed unit-test source");
     assert!(unit_support.contains("pub fn product_entry() {}"));
     assert!(unit_support.contains("pub fn not_exported() {}"));
-    assert!(unit_support.contains("pub(crate) fn test_entry() {"));
-    assert!(unit_support.contains("pub(crate) fn test_only_helper() {}"));
+    assert!(unit_support.contains("fn test_entry() {"));
+    assert!(unit_support.contains("fn test_only_helper() {}"));
 }
 
 #[test]
@@ -647,5 +647,77 @@ fn fixes_only_the_matching_cfg_alternative_declaration() {
     let library =
         fs::read_to_string(workspace.path().join("library/src/lib.rs")).expect("read fixed source");
     assert!(library.contains("#[cfg(not(test))]\npub fn dual() {}"));
-    assert!(library.contains("#[cfg(test)]\npub(crate) fn dual() {}"));
+    assert!(library.contains("#[cfg(test)]\nfn dual() {}"));
+}
+
+#[test]
+fn removes_unnecessary_restricted_visibility_by_default() {
+    let source_workspace =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/crate_visibility_fixes");
+    let workspace = tempfile::tempdir().expect("temporary fixture workspace");
+    copy_directory(&source_workspace, workspace.path());
+    let target_dir = tempfile::tempdir().expect("temporary target directory");
+    let output = Command::new(env!("CARGO_BIN_EXE_cargo-hawk"))
+        .arg("--manifest-path")
+        .arg(workspace.path().join("Cargo.toml"))
+        .arg("--fix")
+        .arg("--allow-no-vcs")
+        .arg("--target-dir")
+        .arg(target_dir.path())
+        .arg("--color=never")
+        .output()
+        .expect("run cargo-hawk with fixes");
+
+    assert!(
+        output.status.success(),
+        "cargo-hawk fix failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let library =
+        fs::read_to_string(workspace.path().join("library/src/lib.rs")).expect("read fixed source");
+    assert!(library.contains("pub(crate) fn run() {"));
+    assert!(library.contains("    fn private_helper() {}"));
+    assert!(library.contains("    fn private_parent_visible_helper() {}"));
+    assert!(library.contains("    fn private_formatted_helper() {}"));
+    assert!(library.contains("    fn parent_helper() {}"));
+    assert!(library.contains("        pub(crate) fn call_parent_helper() {"));
+    assert!(library.contains("    pub(crate) mod api {"));
+}
+
+#[test]
+fn narrows_crate_visibility_to_the_required_module_scope_when_enabled() {
+    let source_workspace =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/crate_visibility_fixes");
+    let workspace = tempfile::tempdir().expect("temporary fixture workspace");
+    copy_directory(&source_workspace, workspace.path());
+    let target_dir = tempfile::tempdir().expect("temporary target directory");
+    let output = Command::new(env!("CARGO_BIN_EXE_cargo-hawk"))
+        .arg("--manifest-path")
+        .arg(workspace.path().join("Cargo.toml"))
+        .arg("--fix")
+        .arg("--allow-no-vcs")
+        .arg("--target-dir")
+        .arg(target_dir.path())
+        .arg("--color=never")
+        .arg("-W")
+        .arg("hawk::unnecessary_crate_visibility")
+        .output()
+        .expect("run cargo-hawk with fixes");
+
+    assert!(
+        output.status.success(),
+        "cargo-hawk fix failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let library =
+        fs::read_to_string(workspace.path().join("library/src/lib.rs")).expect("read fixed source");
+    assert!(library.contains("pub(super) fn run() {"));
+    assert!(library.contains("    fn private_helper() {}"));
+    assert!(library.contains("    fn private_parent_visible_helper() {}"));
+    assert!(library.contains("    fn private_formatted_helper() {}"));
+    assert!(library.contains("    fn parent_helper() {}"));
+    assert!(library.contains("        pub(super) fn call_parent_helper() {"));
+    assert!(library.contains("    pub(crate) mod api {"));
 }

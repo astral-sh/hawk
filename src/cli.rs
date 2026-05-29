@@ -154,6 +154,8 @@ impl LintLevels {
             "warnings"
                 | "hawk::dead_public"
                 | "hawk::unnecessary_public"
+                | "hawk::unnecessary_restricted_visibility"
+                | "hawk::unnecessary_crate_visibility"
                 | "hawk::unknown_item"
                 | "hawk::ambiguous_item"
                 | "hawk::unfulfilled_expectation"
@@ -166,12 +168,24 @@ impl LintLevels {
     }
 
     fn level(&self, code: &str) -> LintLevel {
-        self.overrides
-            .iter()
-            .filter(|(selector, _)| selector == "warnings" || selector == code)
-            .map(|(_, level)| *level)
-            .next_back()
-            .unwrap_or_default()
+        self.overrides.iter().fold(
+            default_lint_level(code),
+            |level, (selector, override_level)| {
+                if selector == code || (selector == "warnings" && level.is_emitted()) {
+                    *override_level
+                } else {
+                    level
+                }
+            },
+        )
+    }
+}
+
+fn default_lint_level(code: &str) -> LintLevel {
+    if code == "hawk::unnecessary_crate_visibility" {
+        LintLevel::Allow
+    } else {
+        LintLevel::default()
     }
 }
 
@@ -349,96 +363,114 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
     }
     let excluded: HashSet<String> = args.excluded_crates.iter().cloned().collect();
     if args.fix {
-        let initial_findings = config.apply(
-            &analysis_target,
-            &production_fragments,
-            &test_fragments,
-            analyze(
+        let mut fix_iteration = 0;
+        loop {
+            let initial_findings = config.apply(
+                &analysis_target,
                 &production_fragments,
                 &test_fragments,
-                &candidate_crates,
-                &excluded,
-            ),
-        );
-        let fixable_findings: Vec<_> = initial_findings
-            .findings
-            .iter()
-            .filter(|finding| lint_levels.level(finding.kind.code()).is_emitted())
-            // Restricting unreachable public surface to `pub(crate)` can make
-            // rustc's ordinary `dead_code` lint start firing. Such findings
-            // need coordinated removal rather than a visibility-only fix.
-            .filter(|finding| finding.kind == FindingKind::UnnecessaryPublic)
-            .collect();
-        let production_fix_plan = fix_plan_for(
-            fixable_findings
+                analyze(
+                    &production_fragments,
+                    &test_fragments,
+                    &candidate_crates,
+                    &excluded,
+                ),
+            );
+            let fixable_findings: Vec<_> = initial_findings
+                .findings
                 .iter()
-                .copied()
-                .filter(|finding| !finding.test_only && !finding.test_compiled_only),
-            &production_fragments,
-        );
-        let test_fix_plan = fix_plan_for(
-            fixable_findings
-                .iter()
-                .copied()
-                .filter(|finding| finding.test_only || finding.test_compiled_only),
-            &test_fragments,
-        );
-        // A grouped `pub use` has one visibility span even when its aliases are
-        // approved by different consumer modes. Project every approved finding
-        // through each graph so fixes never name declarations absent from that
-        // compilation mode.
-        let production_emission_plan =
-            fix_plan_for(fixable_findings.iter().copied(), &production_fragments);
-        let test_emission_plan = fix_plan_for(fixable_findings.iter().copied(), &test_fragments);
-        let mut applied_fixes = false;
-        if !test_fix_plan.targets.is_empty() {
-            let fix_packages = fix_packages(&metadata, &test_fix_plan)?;
-            let fix_plan_path = graph_dir.join("test-fix-plan");
-            write_fix_plan(&fix_plan_path, &test_emission_plan)?;
-            cargo.run(
-                "fix",
-                &format!("{run_id}-test-fix"),
-                &non_production_graph_dir,
-                CargoSelection::FixNonProduction(FixRequest {
-                    plan: &fix_plan_path,
-                    packages: &fix_packages,
-                }),
-            )?;
-            applied_fixes = true;
-        }
-        if !production_fix_plan.targets.is_empty() {
-            let fix_packages = fix_packages(&metadata, &production_fix_plan)?;
-            let fix_plan_path = graph_dir.join("production-fix-plan");
-            write_fix_plan(&fix_plan_path, &production_emission_plan)?;
-            cargo.run(
-                "fix",
-                &format!("{run_id}-production-fix"),
-                &production_graph_dir,
-                CargoSelection::FixProduction(FixRequest {
-                    plan: &fix_plan_path,
-                    packages: &fix_packages,
-                }),
-            )?;
-            applied_fixes = true;
-        }
-        if applied_fixes {
+                .filter(|finding| lint_levels.level(finding.kind.code()).is_emitted())
+                // Restricting unreachable public surface to `pub(crate)` can
+                // make rustc's ordinary `dead_code` lint start firing. Such
+                // findings need coordinated removal rather than a
+                // visibility-only fix.
+                .filter(|finding| {
+                    matches!(
+                        finding.kind,
+                        FindingKind::UnnecessaryRestrictedVisibility
+                            | FindingKind::UnnecessaryCrateVisibility
+                    ) || (fix_iteration == 0 && finding.kind == FindingKind::UnnecessaryPublic)
+                })
+                .collect();
+            let production_fix_plan = fix_plan_for(
+                fixable_findings
+                    .iter()
+                    .copied()
+                    .filter(|finding| !finding.test_only && !finding.test_compiled_only),
+                &production_fragments,
+            );
+            let test_fix_plan = fix_plan_for(
+                fixable_findings
+                    .iter()
+                    .copied()
+                    .filter(|finding| finding.test_only || finding.test_compiled_only),
+                &test_fragments,
+            );
+            // A grouped `pub use` has one visibility span even when its aliases
+            // are approved by different consumer modes. Project every approved
+            // finding through each graph so fixes never name declarations
+            // absent from that compilation mode.
+            let production_emission_plan =
+                fix_plan_for(fixable_findings.iter().copied(), &production_fragments);
+            let test_emission_plan =
+                fix_plan_for(fixable_findings.iter().copied(), &test_fragments);
+            let mut applied_fixes = false;
+            if !test_fix_plan.targets.is_empty() {
+                let fix_packages = fix_packages(&metadata, &test_fix_plan)?;
+                let fix_plan_path = graph_dir.join(format!("test-fix-plan-{fix_iteration}"));
+                write_fix_plan(&fix_plan_path, &test_emission_plan)?;
+                cargo.run(
+                    "fix",
+                    &format!("{run_id}-test-fix-{fix_iteration}"),
+                    &non_production_graph_dir,
+                    CargoSelection::FixNonProduction(FixRequest {
+                        plan: &fix_plan_path,
+                        packages: &fix_packages,
+                    }),
+                )?;
+                applied_fixes = true;
+            }
+            if !production_fix_plan.targets.is_empty() {
+                let fix_packages = fix_packages(&metadata, &production_fix_plan)?;
+                let fix_plan_path = graph_dir.join(format!("production-fix-plan-{fix_iteration}"));
+                write_fix_plan(&fix_plan_path, &production_emission_plan)?;
+                cargo.run(
+                    "fix",
+                    &format!("{run_id}-production-fix-{fix_iteration}"),
+                    &production_graph_dir,
+                    CargoSelection::FixProduction(FixRequest {
+                        plan: &fix_plan_path,
+                        packages: &fix_packages,
+                    }),
+                )?;
+                applied_fixes = true;
+            }
+            if !applied_fixes {
+                break;
+            }
+            fix_iteration += 1;
+            if fix_iteration > 3 {
+                bail!("visibility fixes did not converge after {fix_iteration} iterations");
+            }
+            clear_fragments(&production_graph_dir)?;
+            clear_fragments(&non_production_graph_dir)?;
             for (index, product) in production_products.iter().copied().enumerate() {
                 cargo.run(
                     "check",
-                    &format!("{run_id}-post-fix-production-{index}"),
+                    &format!("{run_id}-post-fix-{fix_iteration}-production-{index}"),
                     &production_graph_dir,
                     CargoSelection::Production(product),
                 )?;
             }
             cargo.run(
                 "check",
-                &format!("{run_id}-post-fix-non-production"),
+                &format!("{run_id}-post-fix-{fix_iteration}-non-production"),
                 &non_production_graph_dir,
                 CargoSelection::NonProduction,
             )?;
             cargo.run(
                 "test",
-                &format!("{run_id}-post-fix-doctests"),
+                &format!("{run_id}-post-fix-{fix_iteration}-doctests"),
                 &non_production_graph_dir,
                 CargoSelection::Doctests,
             )?;
@@ -748,6 +780,9 @@ fn fix_plan_for<'a>(
                         definition_kind: definition.kind,
                         span: definition.span.clone(),
                         kind: finding.kind,
+                        replacement: finding
+                            .replacement
+                            .expect("fixable visibility finding has a replacement"),
                     })
             })
             .collect(),
@@ -905,6 +940,53 @@ fn write_diagnostic(
             "change this declaration to `pub(crate)`",
             "public declaration",
         ),
+        (
+            FindingKind::UnnecessaryRestrictedVisibility | FindingKind::UnnecessaryCrateVisibility,
+            DefinitionKind::EnumVariant | DefinitionKind::Reexport,
+            _,
+        ) => {
+            unreachable!("restricted visibility findings exclude variants and re-exports")
+        }
+        (FindingKind::UnnecessaryRestrictedVisibility, definition_kind, _) => {
+            let replacement = finding
+                .replacement
+                .expect("restricted visibility finding has a replacement");
+            assert_eq!(replacement, crate::graph::VisibilityReduction::Private);
+            (
+                format!(
+                    "`{}` has explicit restricted visibility but all compiled uses fit within the defining module; it can be private",
+                    finding.definition.name
+                ),
+                match definition_kind {
+                    DefinitionKind::Module => "remove this module's visibility modifier",
+                    _ => "remove this declaration's visibility modifier",
+                },
+                match definition_kind {
+                    DefinitionKind::Module => "restricted-visibility module",
+                    _ => "restricted-visibility declaration",
+                },
+            )
+        }
+        (FindingKind::UnnecessaryCrateVisibility, definition_kind, _) => {
+            let replacement = finding
+                .replacement
+                .expect("crate visibility finding has a replacement");
+            assert_eq!(replacement, crate::graph::VisibilityReduction::Super);
+            (
+                format!(
+                    "`{}` is visible throughout the crate but all compiled uses fit within the parent module; it can be `pub(super)`",
+                    finding.definition.name
+                ),
+                match definition_kind {
+                    DefinitionKind::Module => "change this module to `pub(super) mod`",
+                    _ => "change this declaration to `pub(super)`",
+                },
+                match definition_kind {
+                    DefinitionKind::Module => "crate-visible module",
+                    _ => "crate-visible declaration",
+                },
+            )
+        }
     };
     write_diagnostic_header(output, finding.kind.code(), message, level)?;
 
@@ -1177,6 +1259,22 @@ fn read_fragments(graph_dir: &Path) -> Result<Vec<Fragment>> {
     Ok(fragments)
 }
 
+fn clear_fragments(graph_dir: &Path) -> Result<()> {
+    for entry in fs::read_dir(graph_dir)
+        .with_context(|| format!("read graph directory {}", graph_dir.display()))?
+    {
+        let path = entry?.path();
+        if path
+            .extension()
+            .is_some_and(|extension| extension == "json")
+        {
+            fs::remove_file(&path)
+                .with_context(|| format!("remove fragment {}", path.display()))?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;
@@ -1200,10 +1298,15 @@ mod tests {
                 column: 1,
             }),
             public_api: true,
+            restricted_visible_api: false,
+            crate_visible_api: false,
+            visible_reexport_api: false,
+            module_scope: vec![],
         };
         let finding = Finding {
             kind: FindingKind::UnnecessaryPublic,
             definition: &definition,
+            replacement: Some(crate::graph::VisibilityReduction::Crate),
             test_only: false,
             test_compiled_only: false,
         };
@@ -1232,6 +1335,102 @@ mod tests {
     }
 
     #[test]
+    fn crate_visibility_diagnostic_names_the_required_scope() {
+        let definition = Definition {
+            id: "scoped::run".into(),
+            crate_name: "library".into(),
+            name: "scoped::run".into(),
+            kind: DefinitionKind::Function,
+            span: Some(Span {
+                file: "tests/fixtures/crate_visibility_fixes/library/src/lib.rs".into(),
+                line: 7,
+                column: 5,
+            }),
+            public_api: false,
+            restricted_visible_api: true,
+            crate_visible_api: true,
+            visible_reexport_api: false,
+            module_scope: vec!["scoped".into()],
+        };
+        let finding = Finding {
+            kind: FindingKind::UnnecessaryCrateVisibility,
+            definition: &definition,
+            replacement: Some(crate::graph::VisibilityReduction::Super),
+            test_only: false,
+            test_compiled_only: false,
+        };
+        let mut output = String::new();
+
+        write_diagnostic(
+            &mut output,
+            &finding,
+            "binary `app`",
+            Path::new(env!("CARGO_MANIFEST_DIR")),
+            LintLevel::Warn,
+        )
+        .expect("render diagnostic");
+
+        let output = anstream::adapter::strip_str(&output);
+        insta::assert_snapshot!(output, @r###"
+        warning[hawk::unnecessary_crate_visibility]: `scoped::run` is visible throughout the crate but all compiled uses fit within the parent module; it can be `pub(super)`
+          --> tests/fixtures/crate_visibility_fixes/library/src/lib.rs:7:5
+          |
+        7 |     pub(crate) fn run() {
+          |     ^^^ crate-visible declaration
+          = help: change this declaration to `pub(super)`
+
+        "###);
+    }
+
+    #[test]
+    fn restricted_visibility_diagnostic_removes_the_modifier() {
+        let definition = Definition {
+            id: "scoped::private_parent_visible_helper".into(),
+            crate_name: "library".into(),
+            name: "scoped::private_parent_visible_helper".into(),
+            kind: DefinitionKind::Function,
+            span: Some(Span {
+                file: "tests/fixtures/crate_visibility_fixes/library/src/lib.rs".into(),
+                line: 16,
+                column: 5,
+            }),
+            public_api: false,
+            restricted_visible_api: true,
+            crate_visible_api: false,
+            visible_reexport_api: false,
+            module_scope: vec!["scoped".into()],
+        };
+        let finding = Finding {
+            kind: FindingKind::UnnecessaryRestrictedVisibility,
+            definition: &definition,
+            replacement: Some(crate::graph::VisibilityReduction::Private),
+            test_only: false,
+            test_compiled_only: false,
+        };
+        let mut output = String::new();
+
+        write_diagnostic(
+            &mut output,
+            &finding,
+            "binary `app`",
+            Path::new(env!("CARGO_MANIFEST_DIR")),
+            LintLevel::Warn,
+        )
+        .expect("render diagnostic");
+
+        let output = anstream::adapter::strip_str(&output);
+        insta::assert_snapshot!(output, @r###"
+        warning[hawk::unnecessary_restricted_visibility]: `scoped::private_parent_visible_helper` has explicit restricted visibility but all compiled uses fit within the defining module; it can be private
+          --> tests/fixtures/crate_visibility_fixes/library/src/lib.rs:16:5
+           |
+        16 |     pub(super) fn private_parent_visible_helper() {}
+           |     ^^^ restricted-visibility declaration
+           = help: remove this declaration's visibility modifier
+
+        "###);
+    }
+
+    #[test]
     fn dead_enum_variant_diagnostic_accounts_for_unreachable_uses() {
         let definition = Definition {
             id: "InternalState::Active".into(),
@@ -1240,10 +1439,15 @@ mod tests {
             kind: DefinitionKind::EnumVariant,
             span: None,
             public_api: true,
+            restricted_visible_api: false,
+            crate_visible_api: false,
+            visible_reexport_api: false,
+            module_scope: vec![],
         };
         let finding = Finding {
             kind: FindingKind::DeadPublic,
             definition: &definition,
+            replacement: None,
             test_only: false,
             test_compiled_only: false,
         };
@@ -1284,9 +1488,35 @@ mod tests {
 
         assert_eq!(levels.level("hawk::dead_public"), LintLevel::Deny);
         assert_eq!(levels.level("hawk::unnecessary_public"), LintLevel::Warn);
+        assert_eq!(
+            levels.level("hawk::unnecessary_restricted_visibility"),
+            LintLevel::Deny
+        );
+        assert_eq!(
+            levels.level("hawk::unnecessary_crate_visibility"),
+            LintLevel::Allow
+        );
         assert_eq!(levels.level("hawk::unknown_item"), LintLevel::Allow);
         assert_eq!(
             levels.level("hawk::unfulfilled_expectation"),
+            LintLevel::Deny
+        );
+    }
+
+    #[test]
+    fn enabled_opt_in_lint_is_affected_by_later_warnings_group() {
+        let matches = Args::command()
+            .try_get_matches_from([
+                "cargo-hawk",
+                "-W",
+                "hawk::unnecessary_crate_visibility",
+                "-Dwarnings",
+            ])
+            .expect("parse lint-level arguments");
+        let levels = LintLevels::from_matches(&matches).expect("valid lint selectors");
+
+        assert_eq!(
+            levels.level("hawk::unnecessary_crate_visibility"),
             LintLevel::Deny
         );
     }

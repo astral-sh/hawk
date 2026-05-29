@@ -16,13 +16,14 @@ use rustc_hir::intravisit::{self, Visitor};
 use rustc_interface::interface;
 use rustc_middle::ty::{self, TyCtxt};
 use rustc_session::config::CrateType;
-use rustc_span::Pos;
 use rustc_span::Symbol;
 use rustc_span::def_id::LOCAL_CRATE;
 use rustc_span::hygiene::{ExpnKind, MacroKind};
+use rustc_span::{BytePos, Pos};
 
 use crate::graph::{
     Definition, DefinitionKind, Edge, EdgeKind, FindingKind, FixPlan, Fragment, Span,
+    VisibilityReduction,
 };
 
 pub fn is_wrapper_invocation(args: &[String]) -> bool {
@@ -115,14 +116,7 @@ fn emit_fixes(tcx: TyCtxt<'_>, fix_plan: &FixPlan) {
         if definition_kind == DefinitionKind::Reexport && !is_named_reexport(tcx, def_id) {
             continue;
         }
-        if !tcx.local_visibility(def_id).is_public() {
-            continue;
-        }
-        let visibility_span = match tcx.hir_node_by_def_id(def_id) {
-            Node::Item(item) => Some(item.vis_span),
-            Node::ImplItem(item) => item.vis_span(),
-            _ => None,
-        };
+        let visibility_span = visibility_span(tcx, def_id);
         if let Some(visibility_span) = visibility_span {
             visibility_fixes.push((
                 visibility_span,
@@ -137,12 +131,10 @@ fn emit_fixes(tcx: TyCtxt<'_>, fix_plan: &FixPlan) {
             _ => continue,
         };
         for field in fields {
-            if tcx.local_visibility(field.def_id).is_public() {
-                visibility_fixes.push((
-                    field.vis_span,
-                    planned_fix(tcx, field.def_id, DefinitionKind::Field, &fix_plan.targets),
-                ));
-            }
+            visibility_fixes.push((
+                field.vis_span,
+                planned_fix(tcx, field.def_id, DefinitionKind::Field, &fix_plan.targets),
+            ));
         }
     }
 
@@ -168,7 +160,7 @@ fn planned_fix(
     def_id: LocalDefId,
     definition_kind: DefinitionKind,
     targets: &[crate::graph::FixTarget],
-) -> Option<FindingKind> {
+) -> Option<(FindingKind, VisibilityReduction)> {
     let id = id(tcx, def_id.to_def_id());
     let crate_name = tcx.crate_name(LOCAL_CRATE).to_string();
     let name = definition_name(tcx, def_id, definition_kind);
@@ -189,10 +181,25 @@ fn planned_fix(
                         _ => false,
                     })
         })
-        .map(|target| target.kind)
+        .map(|target| (target.kind, target.replacement))
 }
 
-fn emit_fix(tcx: TyCtxt<'_>, visibility_span: rustc_span::Span, kind: FindingKind) {
+fn emit_fix(
+    tcx: TyCtxt<'_>,
+    mut visibility_span: rustc_span::Span,
+    (kind, replacement): (FindingKind, VisibilityReduction),
+) {
+    if replacement == VisibilityReduction::Private {
+        let extended = visibility_span.with_hi(visibility_span.hi() + BytePos(1));
+        if tcx
+            .sess
+            .source_map()
+            .span_to_snippet(extended)
+            .is_ok_and(|snippet| matches!(snippet.as_bytes().last(), Some(b' ' | b'\t')))
+        {
+            visibility_span = extended;
+        }
+    }
     let mut diagnostic = tcx.dcx().struct_span_warn(
         visibility_span,
         "public visibility can be restricted for the selected Hawk product",
@@ -201,7 +208,7 @@ fn emit_fix(tcx: TyCtxt<'_>, visibility_span: rustc_span::Span, kind: FindingKin
     diagnostic.span_suggestion(
         visibility_span,
         "change this visibility to",
-        "pub(crate)",
+        replacement.replacement(),
         Applicability::MachineApplicable,
     );
     diagnostic.emit();
@@ -571,6 +578,7 @@ fn collect_fragment(
         crate_name,
         crate_id,
         is_product_root,
+        test_surface,
         definitions,
         edges,
         roots,
@@ -581,8 +589,69 @@ fn collect_fragment(
 
 fn is_public_candidate(tcx: TyCtxt<'_>, def_id: LocalDefId, test_surface: bool) -> bool {
     !tcx.def_span(def_id).from_expansion()
+        && has_visibility_modifier(tcx, def_id, "pub")
         && tcx.local_visibility(def_id).is_public()
         && (test_surface || tcx.effective_visibilities(()).is_exported(def_id))
+}
+
+fn has_visibility_modifier(tcx: TyCtxt<'_>, def_id: LocalDefId, expected: &str) -> bool {
+    visibility_modifier(tcx, def_id).as_deref() == Some(expected)
+}
+
+fn visibility_modifier(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Option<String> {
+    visibility_span(tcx, def_id)
+        .and_then(|span| tcx.sess.source_map().span_to_snippet(span).ok())
+        .and_then(|visibility| compact_visibility_modifier(&visibility))
+}
+
+fn compact_visibility_modifier(visibility: &str) -> Option<String> {
+    let bytes = visibility.as_bytes();
+    let mut compact = String::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index].is_ascii_whitespace() {
+            index += 1;
+            continue;
+        }
+        if bytes[index..].starts_with(b"//") {
+            index += 2;
+            while index < bytes.len() && bytes[index] != b'\n' {
+                index += 1;
+            }
+            continue;
+        }
+        if bytes[index..].starts_with(b"/*") {
+            index += 2;
+            let mut depth = 1;
+            while index < bytes.len() && depth > 0 {
+                if bytes[index..].starts_with(b"/*") {
+                    depth += 1;
+                    index += 2;
+                } else if bytes[index..].starts_with(b"*/") {
+                    depth -= 1;
+                    index += 2;
+                } else {
+                    index += 1;
+                }
+            }
+            if depth > 0 {
+                return None;
+            }
+            continue;
+        }
+        compact.push(bytes[index] as char);
+        index += 1;
+    }
+    Some(compact)
+}
+
+fn visibility_span(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Option<rustc_span::Span> {
+    match tcx.hir_node_by_def_id(def_id) {
+        Node::Item(item) => Some(item.vis_span),
+        Node::ImplItem(item) => item.vis_span(),
+        Node::Field(field) => Some(field.vis_span),
+        _ => None,
+    }
 }
 
 fn source_file_start(tcx: TyCtxt<'_>, span: rustc_span::Span) -> u32 {
@@ -613,6 +682,16 @@ fn definition(
     kind: DefinitionKind,
     public_api: bool,
 ) -> Definition {
+    let visibility = visibility_modifier(tcx, def_id);
+    let has_explicit_visibility = visibility
+        .as_deref()
+        .is_some_and(|visibility| visibility.starts_with("pub"));
+    let restricted_visibility = (kind != DefinitionKind::Reexport
+        && !tcx.def_span(def_id).from_expansion()
+        && has_explicit_visibility)
+        .then(|| tcx.local_visibility(def_id));
+    let restricted_visible_api =
+        matches!(restricted_visibility, Some(ty::Visibility::Restricted(_)));
     Definition {
         id: id(tcx, def_id.to_def_id()),
         crate_name: crate_name.into(),
@@ -620,6 +699,12 @@ fn definition(
         kind,
         span: span(tcx, def_id),
         public_api,
+        restricted_visible_api,
+        crate_visible_api: restricted_visible_api
+            && visibility.as_deref() == Some("pub(crate)")
+            && restricted_visibility == Some(ty::Visibility::Restricted(CRATE_DEF_ID)),
+        visible_reexport_api: kind == DefinitionKind::Reexport && has_explicit_visibility,
+        module_scope: module_scope(tcx, def_id),
     }
 }
 
@@ -681,6 +766,18 @@ fn enclosing_module(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Option<LocalDefId> {
     }
     let parent = tcx.local_parent(def_id);
     (parent != CRATE_DEF_ID && tcx.def_kind(parent) == DefKind::Mod).then_some(parent)
+}
+
+fn module_scope(tcx: TyCtxt<'_>, mut def_id: LocalDefId) -> Vec<String> {
+    let mut scope = Vec::new();
+    while def_id != CRATE_DEF_ID {
+        def_id = tcx.local_parent(def_id);
+        if def_id != CRATE_DEF_ID && tcx.def_kind(def_id) == DefKind::Mod {
+            scope.push(tcx.item_name(def_id.to_def_id()).to_string());
+        }
+    }
+    scope.reverse();
+    scope
 }
 
 fn id(tcx: TyCtxt<'_>, def_id: DefId) -> String {
@@ -876,7 +973,7 @@ mod tests {
     use std::io::{self, Write};
     use std::path::Path;
 
-    use super::write_fragment;
+    use super::{compact_visibility_modifier, write_fragment};
     use crate::graph::Fragment;
 
     struct FailingWriter;
@@ -897,6 +994,7 @@ mod tests {
             crate_name: "library".into(),
             crate_id: "library".into(),
             is_product_root: false,
+            test_surface: false,
             definitions: vec![],
             edges: vec![],
             roots: vec![],
@@ -908,5 +1006,18 @@ mod tests {
             .expect_err("buffer flush should report the underlying write failure");
 
         insta::assert_snapshot!(error.to_string(), @"flush fragment.json");
+    }
+
+    #[test]
+    fn visibility_modifier_compaction_ignores_whitespace_and_comments() {
+        assert_eq!(
+            compact_visibility_modifier("pub /* outer /* nested */ comment */ ( crate )"),
+            Some("pub(crate)".into())
+        );
+        assert_eq!(
+            compact_visibility_modifier("pub // comment\n ( super )"),
+            Some("pub(super)".into())
+        );
+        assert_eq!(compact_visibility_modifier("pub /*"), None);
     }
 }

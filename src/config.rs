@@ -551,6 +551,7 @@ mod tests {
             crate_name: "library".into(),
             crate_id: "library".into(),
             is_product_root: false,
+            test_surface: false,
             definitions: vec![Definition {
                 id: "unused".into(),
                 crate_name: "library".into(),
@@ -558,6 +559,10 @@ mod tests {
                 kind: DefinitionKind::Function,
                 span: None,
                 public_api: true,
+                restricted_visible_api: false,
+                crate_visible_api: false,
+                visible_reexport_api: false,
+                module_scope: vec![],
             }],
             edges: vec![],
             roots: vec![],
@@ -590,6 +595,10 @@ mod tests {
                 kind: DefinitionKind::TypeAlias,
                 span: None,
                 public_api: true,
+                restricted_visible_api: false,
+                crate_visible_api: false,
+                visible_reexport_api: false,
+                module_scope: vec![],
             },
             Definition {
                 id: "constant".into(),
@@ -598,6 +607,10 @@ mod tests {
                 kind: DefinitionKind::Constant,
                 span: None,
                 public_api: true,
+                restricted_visible_api: false,
+                crate_visible_api: false,
+                visible_reexport_api: false,
+                module_scope: vec![],
             },
         ];
         fragment
@@ -617,6 +630,10 @@ mod tests {
                     column: 1,
                 }),
                 public_api: true,
+                restricted_visible_api: false,
+                crate_visible_api: false,
+                visible_reexport_api: false,
+                module_scope: vec![],
             },
             Definition {
                 id: "generated-unused".into(),
@@ -629,6 +646,10 @@ mod tests {
                     column: 1,
                 }),
                 public_api: true,
+                restricted_visible_api: false,
+                crate_visible_api: false,
+                visible_reexport_api: false,
+                module_scope: vec![],
             },
             Definition {
                 id: "outside".into(),
@@ -641,6 +662,10 @@ mod tests {
                     column: 1,
                 }),
                 public_api: true,
+                restricted_visible_api: false,
+                crate_visible_api: false,
+                visible_reexport_api: false,
+                module_scope: vec![],
             },
             Definition {
                 id: "generatedish".into(),
@@ -653,6 +678,10 @@ mod tests {
                     column: 1,
                 }),
                 public_api: true,
+                restricted_visible_api: false,
+                crate_visible_api: false,
+                visible_reexport_api: false,
+                module_scope: vec![],
             },
         ];
         fragment

@@ -1,0 +1,4 @@
+[[production]]
+package = "app"
+bin = "app"
+reason = "shipped application binary"

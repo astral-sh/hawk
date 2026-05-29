@@ -55,6 +55,13 @@ level = "expect"
 reason = "called by generated registration that Hawk does not model"
 
 [[override]]
+lint = "hawk::unnecessary_restricted_visibility"
+crate = "library"
+item = "platform::shared_helper"
+level = "expect"
+reason = "called by generated platform code that Hawk does not model"
+
+[[override]]
 lint = "hawk::dead_public"
 crate = "platform"
 item = "windows_only_api"

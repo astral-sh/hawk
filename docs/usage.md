@@ -86,10 +86,17 @@ Hawk accepts Clippy-style ordered `-A`/`--allow`, `-W`/`--warn`, and
 ```
 
 The supported selectors are `warnings`, `hawk::dead_public`,
-`hawk::unnecessary_public`, `hawk::unknown_item`, `hawk::ambiguous_item`, and
-`hawk::unfulfilled_expectation`. Denied diagnostics are emitted as errors and
-cause a non-zero exit status. Invalid configuration and failed instrumented
-Cargo builds fail independently of lint levels.
+`hawk::unnecessary_public`, `hawk::unnecessary_restricted_visibility`,
+`hawk::unnecessary_crate_visibility`, `hawk::unknown_item`,
+`hawk::ambiguous_item`, and `hawk::unfulfilled_expectation`. Denied diagnostics
+are emitted as errors and cause a non-zero exit status. Invalid configuration
+and failed instrumented Cargo builds fail independently of lint levels.
+
+`hawk::unnecessary_crate_visibility` is allow-by-default because preferring
+`pub(super)` over `pub(crate)` is a style choice. Enable it explicitly with
+`-W hawk::unnecessary_crate_visibility` or
+`-D hawk::unnecessary_crate_visibility`. The `warnings` group does not enable
+allow-by-default lints.
 
 ## Apply fixes
 
@@ -101,14 +108,17 @@ Pass `--fix` to apply visibility reductions through Cargo's fix machinery:
   --fix
 ```
 
-Hawk emits machine-applicable `pub` to `pub(crate)` suggestions for enabled,
-unsuppressed `hawk::unnecessary_public` findings. `hawk::dead_public` remains
-report-only because a visibility-only edit can activate rustc's `dead_code`
-lint; removing dead surface may require editing its remaining internal uses.
-Hawk delegates edit application and validation to `cargo fix`, including
-Cargo's source-control safety checks; pass
-`--allow-dirty`, `--allow-staged`, or `--allow-no-vcs` with `--fix` when the
-corresponding Cargo override is appropriate.
+Hawk emits machine-applicable suggestions for enabled, unsuppressed
+visibility findings. `hawk::unnecessary_public` reduces `pub` to `pub(crate)`.
+`hawk::unnecessary_restricted_visibility` removes an explicit restricted
+visibility modifier when the item can be private.
+`hawk::unnecessary_crate_visibility` optionally reduces `pub(crate)` to
+`pub(super)`. `hawk::dead_public` remains report-only because a
+visibility-only edit can activate rustc's `dead_code` lint; removing dead
+surface may require editing its remaining internal uses. Hawk delegates edit
+application and validation to `cargo fix`, including Cargo's source-control
+safety checks; pass `--allow-dirty`, `--allow-staged`, or `--allow-no-vcs`
+with `--fix` when the corresponding Cargo override is appropriate.
 
 Fixes are limited to workspace library packages in the configured production
 or non-production surface. Hawk rechecks configured production targets and

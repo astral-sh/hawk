@@ -4,13 +4,16 @@
 [![crates.io](https://img.shields.io/crates/v/cargo-hawk.svg)](https://crates.io/crates/cargo-hawk)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
-A workspace-aware Cargo lint for unnecessary public Rust APIs.
+A workspace-aware Cargo lint for unnecessary Rust visibility.
 
 **Experimental:** This project was authored by GPT-5.5 and is not intended
 for public consumption. Use at your own risk.
 
-Hawk finds `pub` declarations that are unused, or can be restricted to
-`pub(crate)`, when a Cargo workspace builds one or more shipped binaries.
+Hawk finds `pub` declarations that are unused or can be restricted to
+`pub(crate)` when a Cargo workspace builds one or more shipped binaries. It
+also finds explicit restricted visibility modifiers that can be removed.
+Optionally, it can suggest restricting `pub(crate)` declarations to
+`pub(super)`.
 
 ## Motivation
 
@@ -31,10 +34,14 @@ unnecessarily public symbols across crates within a single workspace.
 
 - Analyzes public surface across an entire Cargo workspace, starting from
   configured production targets.
-- Reports `hawk::dead_public` for unused public items and
-  `hawk::unnecessary_public` for visibility that can be restricted.
+- Reports `hawk::dead_public` for unused public items,
+  `hawk::unnecessary_public` for `pub` items that can become `pub(crate)`, and
+  `hawk::unnecessary_restricted_visibility` for restricted items that can
+  become private.
+- Optionally reports `hawk::unnecessary_crate_visibility` for `pub(crate)`
+  items that can become `pub(super)`.
 - Models production separately from tests, benches, examples, and doctests.
-- Applies machine-applicable `pub(crate)` fixes through `cargo fix`.
+- Applies machine-applicable visibility fixes through `cargo fix`.
 - Uses Clippy-style `-A`/`-W`/`-D` lint levels for incremental CI adoption.
 
 ## Installation

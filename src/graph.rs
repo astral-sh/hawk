@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use serde::{Deserialize, Serialize};
 
@@ -7,6 +7,8 @@ pub struct Fragment {
     pub crate_name: String,
     pub crate_id: String,
     pub is_product_root: bool,
+    #[serde(default)]
+    pub test_surface: bool,
     pub definitions: Vec<Definition>,
     pub edges: Vec<Edge>,
     pub roots: Vec<String>,
@@ -29,6 +31,7 @@ pub struct FixTarget {
     pub definition_kind: DefinitionKind,
     pub span: Option<Span>,
     pub kind: FindingKind,
+    pub replacement: VisibilityReduction,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -39,6 +42,14 @@ pub struct Definition {
     pub kind: DefinitionKind,
     pub span: Option<Span>,
     pub public_api: bool,
+    #[serde(default)]
+    pub restricted_visible_api: bool,
+    #[serde(default)]
+    pub crate_visible_api: bool,
+    #[serde(default)]
+    pub visible_reexport_api: bool,
+    #[serde(default)]
+    pub module_scope: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -90,6 +101,26 @@ pub struct Span {
 pub enum FindingKind {
     DeadPublic,
     UnnecessaryPublic,
+    UnnecessaryRestrictedVisibility,
+    UnnecessaryCrateVisibility,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VisibilityReduction {
+    Crate,
+    Super,
+    Private,
+}
+
+impl VisibilityReduction {
+    pub fn replacement(self) -> &'static str {
+        match self {
+            Self::Crate => "pub(crate)",
+            Self::Super => "pub(super)",
+            Self::Private => "",
+        }
+    }
 }
 
 impl FindingKind {
@@ -97,6 +128,8 @@ impl FindingKind {
         match self {
             Self::DeadPublic => "hawk::dead_public",
             Self::UnnecessaryPublic => "hawk::unnecessary_public",
+            Self::UnnecessaryRestrictedVisibility => "hawk::unnecessary_restricted_visibility",
+            Self::UnnecessaryCrateVisibility => "hawk::unnecessary_crate_visibility",
         }
     }
 
@@ -104,6 +137,10 @@ impl FindingKind {
         match code {
             "hawk::dead_public" => Some(Self::DeadPublic),
             "hawk::unnecessary_public" => Some(Self::UnnecessaryPublic),
+            "hawk::unnecessary_restricted_visibility" => {
+                Some(Self::UnnecessaryRestrictedVisibility)
+            }
+            "hawk::unnecessary_crate_visibility" => Some(Self::UnnecessaryCrateVisibility),
             _ => None,
         }
     }
@@ -113,6 +150,7 @@ impl FindingKind {
 pub struct Finding<'a> {
     pub kind: FindingKind,
     pub definition: &'a Definition,
+    pub replacement: Option<VisibilityReduction>,
     pub test_only: bool,
     pub test_compiled_only: bool,
 }
@@ -155,6 +193,7 @@ pub fn analyze<'a>(
         .flat_map(|fragment| &fragment.edges)
         .collect();
     let equivalents = equivalent_definitions(&definitions);
+    let required_scopes = required_scopes(&definitions, &edges, &equivalents);
     let adjacency = adjacency(&edges, &equivalents);
 
     let production_roots = production_fragments
@@ -225,9 +264,21 @@ pub fn analyze<'a>(
         .filter(|definition| definition.public_api)
         .map(definition_identity)
         .collect();
+    let production_restricted_visible_candidates: HashSet<_> = production_fragments
+        .iter()
+        .flat_map(|fragment| &fragment.definitions)
+        .filter(|definition| definition.restricted_visible_api)
+        .map(definition_identity)
+        .collect();
     let production_root_definitions: HashSet<_> = production_fragments
         .iter()
         .filter(|fragment| fragment.is_product_root)
+        .flat_map(|fragment| &fragment.definitions)
+        .map(definition_identity)
+        .collect();
+    let non_production_root_definitions: HashSet<_> = test_fragments
+        .iter()
+        .filter(|fragment| fragment.is_product_root && !fragment.test_surface)
         .flat_map(|fragment| &fragment.definitions)
         .map(definition_identity)
         .collect();
@@ -266,6 +317,7 @@ pub fn analyze<'a>(
             findings.push(Finding {
                 kind: FindingKind::DeadPublic,
                 definition,
+                replacement: None,
                 test_only: false,
                 test_compiled_only,
             });
@@ -279,6 +331,56 @@ pub fn analyze<'a>(
         findings.push(Finding {
             kind: FindingKind::UnnecessaryPublic,
             definition,
+            replacement: Some(VisibilityReduction::Crate),
+            test_only: !is_production_live && is_test_live,
+            test_compiled_only,
+        });
+    }
+
+    for definition in production_fragments
+        .iter()
+        .flat_map(|fragment| &fragment.definitions)
+        .chain(
+            test_fragments
+                .iter()
+                .flat_map(|fragment| &fragment.definitions),
+        )
+    {
+        let identity = definition_identity(definition);
+        if !definition.restricted_visible_api
+            || (production_definitions.contains(&identity)
+                && !production_restricted_visible_candidates.contains(&identity))
+            || !candidate_crates.contains(&definition.crate_name)
+            || excluded_crates.contains(&definition.crate_name)
+            || production_root_definitions.contains(&identity)
+            || (!production_definitions.contains(&identity)
+                && non_production_root_definitions.contains(&identity))
+            || reported.contains(&identity)
+        {
+            continue;
+        }
+
+        let Some(replacement) =
+            restricted_visibility_reduction(definition, &required_scopes, &equivalents)
+        else {
+            continue;
+        };
+        reported.insert(identity);
+        let test_compiled_only = !production_definitions.contains(&identity);
+        let is_production_live = is_live(definition, &edges, &production);
+        let is_test_live = is_live(definition, &edges, &tests);
+        findings.push(Finding {
+            kind: match replacement {
+                VisibilityReduction::Private => FindingKind::UnnecessaryRestrictedVisibility,
+                VisibilityReduction::Super => FindingKind::UnnecessaryCrateVisibility,
+                VisibilityReduction::Crate => {
+                    unreachable!(
+                        "restricted visibility findings always reduce below crate visibility"
+                    )
+                }
+            },
+            definition,
+            replacement: Some(replacement),
             test_only: !is_production_live && is_test_live,
             test_compiled_only,
         });
@@ -293,6 +395,169 @@ pub fn analyze<'a>(
         )
     });
     findings
+}
+
+fn restricted_visibility_reduction(
+    definition: &Definition,
+    required_scopes: &HashMap<&str, RequiredScope>,
+    equivalents: &HashMap<&str, Vec<&str>>,
+) -> Option<VisibilityReduction> {
+    if matches!(
+        definition.kind,
+        DefinitionKind::EnumVariant | DefinitionKind::Reexport
+    ) {
+        return None;
+    }
+
+    let mut required_scope = RequiredScope::default();
+    for id in std::iter::once(definition.id.as_str()).chain(
+        equivalents
+            .get(definition.id.as_str())
+            .into_iter()
+            .flatten()
+            .copied(),
+    ) {
+        if let Some(scope) = required_scopes.get(id) {
+            required_scope.merge(scope);
+        }
+    }
+    if required_scope.unknown_source
+        || required_scope.crate_name.as_deref()? != definition.crate_name
+    {
+        return None;
+    }
+    if required_scope
+        .module_scope
+        .starts_with(&definition.module_scope)
+    {
+        return Some(VisibilityReduction::Private);
+    }
+    if definition.crate_visible_api {
+        let parent_scope = definition.module_scope.split_last()?.1;
+        return required_scope
+            .module_scope
+            .starts_with(parent_scope)
+            .then_some(VisibilityReduction::Super);
+    }
+    None
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct RequiredScope {
+    crate_name: Option<String>,
+    module_scope: Vec<String>,
+    unknown_source: bool,
+}
+
+impl RequiredScope {
+    fn for_definition(definition: &Definition) -> Self {
+        Self {
+            crate_name: Some(definition.crate_name.clone()),
+            module_scope: definition.module_scope.clone(),
+            unknown_source: false,
+        }
+    }
+
+    fn unknown() -> Self {
+        Self {
+            unknown_source: true,
+            ..Self::default()
+        }
+    }
+
+    fn merge(&mut self, other: &Self) -> bool {
+        let previous = self.clone();
+        self.unknown_source |= other.unknown_source;
+        if let Some(other_crate) = &other.crate_name {
+            match &self.crate_name {
+                None => {
+                    self.crate_name = Some(other_crate.clone());
+                    self.module_scope = other.module_scope.clone();
+                }
+                Some(crate_name) if crate_name == other_crate => {
+                    let shared = self
+                        .module_scope
+                        .iter()
+                        .zip(&other.module_scope)
+                        .take_while(|(left, right)| left == right)
+                        .count();
+                    self.module_scope.truncate(shared);
+                }
+                Some(_) => self.unknown_source = true,
+            }
+        }
+        *self != previous
+    }
+}
+
+fn required_scopes<'a>(
+    definitions: &HashMap<&'a str, &'a Definition>,
+    edges: &[&'a Edge],
+    equivalents: &HashMap<&'a str, Vec<&'a str>>,
+) -> HashMap<&'a str, RequiredScope> {
+    let mut required_scopes: HashMap<&str, RequiredScope> = HashMap::new();
+    let mut propagation: HashMap<&str, Vec<&str>> = HashMap::new();
+    let mut pending = VecDeque::new();
+    for edge in edges {
+        if edge.from == edge.to || !definitions.contains_key(edge.to.as_str()) {
+            continue;
+        }
+        let source = definitions.get(edge.from.as_str());
+        let requirement = if edge.kind == EdgeKind::Reexport
+            || (edge.kind == EdgeKind::VisibilityParent
+                && source.is_some_and(|source| source.visible_reexport_api))
+        {
+            RequiredScope::unknown()
+        } else {
+            source.map_or_else(RequiredScope::unknown, |source| {
+                RequiredScope::for_definition(source)
+            })
+        };
+        if required_scopes
+            .entry(edge.to.as_str())
+            .or_default()
+            .merge(&requirement)
+        {
+            pending.push_back(edge.to.as_str());
+        }
+        if propagates_visibility_requirement(edge.kind) {
+            propagation
+                .entry(edge.from.as_str())
+                .or_default()
+                .push(edge.to.as_str());
+        }
+    }
+    for (source, targets) in equivalents {
+        propagation
+            .entry(source)
+            .or_default()
+            .extend(targets.iter().copied());
+    }
+    while let Some(source) = pending.pop_front() {
+        let Some(required_scope) = required_scopes.get(source).cloned() else {
+            continue;
+        };
+        for target in propagation.get(source).into_iter().flatten() {
+            if required_scopes
+                .entry(target)
+                .or_default()
+                .merge(&required_scope)
+            {
+                pending.push_back(target);
+            }
+        }
+    }
+    required_scopes
+}
+
+fn propagates_visibility_requirement(kind: EdgeKind) -> bool {
+    matches!(
+        kind,
+        EdgeKind::Interface
+            | EdgeKind::Reexport
+            | EdgeKind::VisibilityParent
+            | EdgeKind::VisibilityRequirement
+    )
 }
 
 fn is_live(definition: &Definition, edges: &[&Edge], reachable: &HashSet<&str>) -> bool {
@@ -323,13 +588,8 @@ fn required_public_visibility<'a>(
 
     let mut interface_edges: HashMap<&str, Vec<&str>> = HashMap::new();
     for edge in edges {
-        if matches!(
-            edge.kind,
-            EdgeKind::Interface
-                | EdgeKind::Reexport
-                | EdgeKind::VisibilityParent
-                | EdgeKind::VisibilityRequirement
-        ) && definitions.contains_key(edge.to.as_str())
+        if propagates_visibility_requirement(edge.kind)
+            && definitions.contains_key(edge.to.as_str())
         {
             interface_edges
                 .entry(edge.from.as_str())
@@ -463,7 +723,7 @@ fn reachable<'a>(
 mod tests {
     use super::{
         Definition, DefinitionKind, Edge, EdgeKind, Finding, FindingKind, Fragment,
-        analyze as analyze_with_tests,
+        VisibilityReduction, analyze as analyze_with_tests,
     };
     use std::collections::HashSet;
 
@@ -489,6 +749,10 @@ mod tests {
             kind: DefinitionKind::Function,
             span: None,
             public_api,
+            restricted_visible_api: false,
+            crate_visible_api: false,
+            visible_reexport_api: false,
+            module_scope: vec![],
         }
     }
 
@@ -503,12 +767,26 @@ mod tests {
         definition
     }
 
+    fn crate_visible_node(id: &str, module_scope: &[&str]) -> Definition {
+        let mut definition = restricted_visible_node(id, module_scope);
+        definition.crate_visible_api = true;
+        definition
+    }
+
+    fn restricted_visible_node(id: &str, module_scope: &[&str]) -> Definition {
+        let mut definition = node(id, "lib", false);
+        definition.restricted_visible_api = true;
+        definition.module_scope = module_scope.iter().map(|module| (*module).into()).collect();
+        definition
+    }
+
     fn fragments(definitions: Vec<Definition>, edges: Vec<Edge>) -> Vec<Fragment> {
         vec![
             Fragment {
                 crate_name: "app".into(),
                 crate_id: "app".into(),
                 is_product_root: true,
+                test_surface: false,
                 definitions: vec![node("main", "app", false)],
                 edges: vec![],
                 roots: vec!["main".into()],
@@ -519,6 +797,7 @@ mod tests {
                 crate_name: "lib".into(),
                 crate_id: "lib".into(),
                 is_product_root: false,
+                test_surface: false,
                 definitions,
                 edges,
                 roots: vec![],
@@ -534,6 +813,7 @@ mod tests {
                 crate_name: "integration_test".into(),
                 crate_id: "integration_test".into(),
                 is_product_root: true,
+                test_surface: true,
                 definitions: vec![node("test_main", "integration_test", false)],
                 edges: vec![Edge {
                     from: "test_main".into(),
@@ -548,6 +828,7 @@ mod tests {
                 crate_name: "lib".into(),
                 crate_id: "lib".into(),
                 is_product_root: false,
+                test_surface: false,
                 definitions,
                 edges,
                 roots: vec![],
@@ -621,6 +902,253 @@ mod tests {
         assert_eq!(findings[0].definition.id, "helper");
         assert!(!findings[0].test_only);
         assert!(!findings[0].test_compiled_only);
+    }
+
+    #[test]
+    fn crate_visible_helper_used_within_its_module_can_be_private() {
+        let input = fragments(
+            vec![
+                crate_visible_node("scoped::entry", &["scoped"]),
+                crate_visible_node("scoped::helper", &["scoped"]),
+            ],
+            vec![Edge {
+                from: "scoped::entry".into(),
+                to: "scoped::helper".into(),
+                kind: EdgeKind::Body,
+            }],
+        );
+
+        let findings = analyze(&input, &HashSet::new());
+
+        assert_eq!(findings.len(), 1);
+        assert_eq!(
+            findings[0].kind,
+            FindingKind::UnnecessaryRestrictedVisibility
+        );
+        assert_eq!(findings[0].replacement, Some(VisibilityReduction::Private));
+        assert_eq!(findings[0].definition.id, "scoped::helper");
+    }
+
+    #[test]
+    fn parent_visible_helper_used_within_its_module_can_be_private() {
+        let input = fragments(
+            vec![
+                restricted_visible_node("scoped::entry", &["scoped"]),
+                restricted_visible_node("scoped::helper", &["scoped"]),
+            ],
+            vec![Edge {
+                from: "scoped::entry".into(),
+                to: "scoped::helper".into(),
+                kind: EdgeKind::Body,
+            }],
+        );
+
+        let findings = analyze(&input, &HashSet::new());
+
+        assert_eq!(findings.len(), 1);
+        assert_eq!(
+            findings[0].kind,
+            FindingKind::UnnecessaryRestrictedVisibility
+        );
+        assert_eq!(findings[0].replacement, Some(VisibilityReduction::Private));
+        assert_eq!(findings[0].definition.id, "scoped::helper");
+    }
+
+    #[test]
+    fn crate_visible_helper_used_by_a_sibling_can_be_visible_to_its_parent() {
+        let input = fragments(
+            vec![
+                crate_visible_node("scoped::sibling::entry", &["scoped", "sibling"]),
+                crate_visible_node("scoped::nested::helper", &["scoped", "nested"]),
+            ],
+            vec![Edge {
+                from: "scoped::sibling::entry".into(),
+                to: "scoped::nested::helper".into(),
+                kind: EdgeKind::Body,
+            }],
+        );
+
+        let findings = analyze(&input, &HashSet::new());
+
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, FindingKind::UnnecessaryCrateVisibility);
+        assert_eq!(findings[0].replacement, Some(VisibilityReduction::Super));
+        assert_eq!(findings[0].definition.id, "scoped::nested::helper");
+    }
+
+    #[test]
+    fn crate_visible_helper_used_outside_its_parent_is_not_reported() {
+        let input = fragments(
+            vec![
+                crate_visible_node("outside::entry", &["outside"]),
+                crate_visible_node("scoped::nested::helper", &["scoped", "nested"]),
+            ],
+            vec![Edge {
+                from: "outside::entry".into(),
+                to: "scoped::nested::helper".into(),
+                kind: EdgeKind::Body,
+            }],
+        );
+
+        assert!(analyze(&input, &HashSet::new()).is_empty());
+    }
+
+    #[test]
+    fn crate_visible_module_accounts_for_uses_of_its_descendants() {
+        let mut module = crate_visible_node("scoped::nested", &["scoped"]);
+        module.kind = DefinitionKind::Module;
+        let mut descendant = node("scoped::nested::helper", "lib", false);
+        descendant.module_scope = vec!["scoped".into(), "nested".into()];
+        let input = fragments(
+            vec![node("entry", "lib", false), module, descendant],
+            vec![
+                Edge {
+                    from: "entry".into(),
+                    to: "scoped::nested::helper".into(),
+                    kind: EdgeKind::Body,
+                },
+                Edge {
+                    from: "scoped::nested::helper".into(),
+                    to: "scoped::nested".into(),
+                    kind: EdgeKind::VisibilityParent,
+                },
+            ],
+        );
+
+        let findings = analyze(&input, &HashSet::new());
+
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, FindingKind::UnnecessaryCrateVisibility);
+        assert_eq!(findings[0].replacement, Some(VisibilityReduction::Super));
+        assert_eq!(findings[0].definition.id, "scoped::nested");
+    }
+
+    #[test]
+    fn crate_visible_enum_accounts_for_uses_of_its_variants() {
+        let mut enumeration =
+            crate_visible_node("scoped::nested::ErrorKind", &["scoped", "nested"]);
+        enumeration.kind = DefinitionKind::Enum;
+        let mut variant = typed_node(
+            "scoped::nested::ErrorKind::UnexpectedEnd",
+            "lib",
+            false,
+            DefinitionKind::EnumVariant,
+        );
+        variant.module_scope = vec!["scoped".into(), "nested".into()];
+        let input = fragments(
+            vec![
+                crate_visible_node("scoped::sibling::entry", &["scoped", "sibling"]),
+                enumeration,
+                variant,
+            ],
+            vec![
+                Edge {
+                    from: "scoped::sibling::entry".into(),
+                    to: "scoped::nested::ErrorKind::UnexpectedEnd".into(),
+                    kind: EdgeKind::Body,
+                },
+                Edge {
+                    from: "scoped::nested::ErrorKind::UnexpectedEnd".into(),
+                    to: "scoped::nested::ErrorKind".into(),
+                    kind: EdgeKind::Interface,
+                },
+            ],
+        );
+
+        let findings = analyze(&input, &HashSet::new());
+
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, FindingKind::UnnecessaryCrateVisibility);
+        assert_eq!(findings[0].replacement, Some(VisibilityReduction::Super));
+        assert_eq!(findings[0].definition.id, "scoped::nested::ErrorKind");
+    }
+
+    #[test]
+    fn crate_visible_type_accounts_for_consumers_of_its_interface() {
+        let function = crate_visible_node("scoped::nested::read", &["scoped", "nested"]);
+        let mut error = crate_visible_node("scoped::nested::Error", &["scoped", "nested"]);
+        error.kind = DefinitionKind::Enum;
+        let input = fragments(
+            vec![
+                crate_visible_node("scoped::sibling::entry", &["scoped", "sibling"]),
+                function,
+                error,
+            ],
+            vec![
+                Edge {
+                    from: "scoped::sibling::entry".into(),
+                    to: "scoped::nested::read".into(),
+                    kind: EdgeKind::Body,
+                },
+                Edge {
+                    from: "scoped::nested::read".into(),
+                    to: "scoped::nested::Error".into(),
+                    kind: EdgeKind::Interface,
+                },
+            ],
+        );
+
+        let findings = analyze(&input, &HashSet::new());
+
+        assert_eq!(findings.len(), 2);
+        assert!(
+            findings
+                .iter()
+                .all(|finding| finding.replacement == Some(VisibilityReduction::Super))
+        );
+    }
+
+    #[test]
+    fn crate_visible_reexport_target_is_not_narrowed() {
+        let mut reexport = crate_visible_node("scoped::TargetExport", &["scoped"]);
+        reexport.kind = DefinitionKind::Reexport;
+        let input = fragments(
+            vec![reexport, crate_visible_node("scoped::Target", &["scoped"])],
+            vec![Edge {
+                from: "scoped::TargetExport".into(),
+                to: "scoped::Target".into(),
+                kind: EdgeKind::Reexport,
+            }],
+        );
+
+        assert!(analyze(&input, &HashSet::new()).is_empty());
+    }
+
+    #[test]
+    fn namespace_containing_visible_reexport_is_not_narrowed() {
+        let mut namespace = restricted_visible_node("wrapper::api", &["wrapper"]);
+        namespace.kind = DefinitionKind::Module;
+        let mut reexport = node("wrapper::api::f", "lib", false);
+        reexport.kind = DefinitionKind::Reexport;
+        reexport.visible_reexport_api = true;
+        reexport.module_scope = vec!["wrapper".into(), "api".into()];
+        let input = fragments(
+            vec![
+                namespace,
+                reexport,
+                node("sibling::call", "lib", false),
+                node("target::f", "lib", false),
+            ],
+            vec![
+                Edge {
+                    from: "wrapper::api::f".into(),
+                    to: "target::f".into(),
+                    kind: EdgeKind::Reexport,
+                },
+                Edge {
+                    from: "wrapper::api::f".into(),
+                    to: "wrapper::api".into(),
+                    kind: EdgeKind::VisibilityParent,
+                },
+                Edge {
+                    from: "sibling::call".into(),
+                    to: "target::f".into(),
+                    kind: EdgeKind::Body,
+                },
+            ],
+        );
+
+        assert!(analyze(&input, &HashSet::new()).is_empty());
     }
 
     #[test]
@@ -713,6 +1241,33 @@ mod tests {
         test_input[0]
             .definitions
             .push(node("public_test_helper", "integration_test", true));
+
+        assert!(
+            analyze_with_tests(
+                &production_input,
+                &test_input,
+                &candidate_crates(),
+                &HashSet::new(),
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn crate_visible_declarations_in_test_binary_targets_named_like_library_are_not_candidates() {
+        let production_input = fragments(vec![], vec![]);
+        let mut test_input = test_fragments(vec![], vec![]);
+        test_input[0].crate_name = "lib".into();
+        test_input[0].test_surface = false;
+        test_input[0].definitions[0].crate_name = "lib".into();
+        test_input[0]
+            .definitions
+            .push(crate_visible_node("resolver::resolve", &["resolver"]));
+        test_input[0].edges.push(Edge {
+            from: "test_main".into(),
+            to: "resolver::resolve".into(),
+            kind: EdgeKind::Body,
+        });
 
         assert!(
             analyze_with_tests(

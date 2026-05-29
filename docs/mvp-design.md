@@ -36,19 +36,27 @@ produce:
   or workspace tests;
 - unnecessary public visibility: a production-live or test-live public
   declaration has no compiled cross-crate consumer and can be restricted to
-  `pub(crate)`.
+  `pub(crate)`;
+- unnecessary restricted visibility: an explicit restricted visibility
+  modifier has compiled uses only within its defining module and can be
+  removed;
+- unnecessary crate visibility: an explicit `pub(crate)` declaration has
+  compiled uses only within its parent module and can optionally be
+  `pub(super)`.
 
 Hawk emits warnings and exits successfully by default. Clippy-style ordered
-`-A`/`-W`/`-D` options control lint levels; `-D warnings` enforces all Hawk
-diagnostics in CI, while a later per-diagnostic option can incrementally lower
-or allow one lint. The options apply after `hawk.toml` suppressions and cover both
-visibility findings and configuration diagnostics for stale selectors or
-unfulfilled expectations. Invalid configuration and instrumented build
-failures fail independently of lint levels. With `--fix`, Hawk converts
-enabled, unsuppressed unnecessary-public findings to machine-applicable
-`pub(crate)` suggestions and delegates editing and validation to `cargo fix`.
-Dead-public findings remain report-only because narrowing unused surface can
-activate rustc's `dead_code` lint.
+`-A`/`-W`/`-D` options control lint levels; `-D warnings` enforces the
+warn-by-default Hawk diagnostics in CI, while a later per-diagnostic option can
+incrementally lower or allow one lint. `hawk::unnecessary_crate_visibility`
+remains allow-by-default until explicitly enabled. The options apply after
+`hawk.toml` suppressions and cover both visibility findings and configuration
+diagnostics for stale selectors or unfulfilled expectations. Invalid
+configuration and instrumented build failures fail independently of lint
+levels. With `--fix`, Hawk converts
+enabled, unsuppressed visibility-reduction findings to machine-applicable
+suggestions and delegates editing and validation to `cargo fix`. Dead-public
+findings remain report-only because narrowing unused surface can activate
+rustc's `dead_code` lint.
 
 ## Initial scope
 
@@ -89,8 +97,15 @@ retains every public declaring module on that path, even where a different
 re-export might also expose the descendant. This can miss unnecessary module
 visibility, but does not suggest narrowing a path required by known
 consumers. Proc-macro entry points are also treated as required-public roots
-because rustc requires those attributed functions to remain public. The MVP
-suggests no visibility narrower than `pub(crate)`.
+because rustc requires those attributed functions to remain public.
+
+Explicit restricted visibility modifiers are analyzed against the lexical
+module scope of every compiled reference. Hawk suggests private visibility
+when all uses fit within the defining module. For exact `pub(crate)`
+declarations, Hawk can optionally suggest `pub(super)` when all uses fit
+within the parent module. Crate-visible re-exports remain conservative false
+negatives because rustc does not preserve enough exported-path provenance to
+prove a narrower replacement.
 
 Direct trait-associated item diagnostics are represented by the containing
 trait, because trait items do not carry their own visibility. Types assigned
@@ -148,11 +163,13 @@ Visibility-parent edges preserve public lexical module paths for declarations
 that a compiled external item may access. Public re-export candidates are
 checked against this required-visibility closure and are reported only when
 the target kind and absence of potential external consumers make narrowing
-provably type-checking-safe.
+provably type-checking-safe. Lexical module scopes attached to definitions
+also let the merged graph prove narrower visibility for explicit restricted
+visibility modifiers.
 
-Fixing is a second compilation phase because findings are determined only
-after Hawk merges graph fragments. Hawk builds fix plans from emitted
-unnecessary-public findings, running package-scoped `cargo fix --lib` for
+Fixing uses additional compilation phases because findings are determined
+only after Hawk merges graph fragments. Hawk builds fix plans from emitted
+visibility-reduction findings, running package-scoped `cargo fix --lib` for
 production findings and package-scoped `cargo fix --all-targets` for findings
 reached through or declared only in the non-production graph. The latter
 compiles each owning library while retaining test configuration and validating
@@ -160,7 +177,7 @@ benches and examples, so declarations in dev-dependency support libraries and
 declarations enabled under `#[cfg(test)]` can be edited. Fix compilations cap ordinary
 compiler lints to prevent Cargo from consuming unrelated rustc suggestions;
 Hawk's compiler wrapper matches equivalent declaration identities and emits
-the planned rustc `MachineApplicable` suggestions. Hawk finishes with another
-instrumented check of every configured production target and workspace
-non-production target, including compile-only doctests, so visibility changes
-are validated before completion.
+the planned rustc `MachineApplicable` suggestions. Hawk rechecks every
+configured production target and workspace non-production target, including
+compile-only doctests, after each round and applies newly exposed visibility
+reductions before completion.

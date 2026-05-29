@@ -134,8 +134,9 @@ not findings, during the collection phase.
 The wrapper records a `Fragment` for each compiled workspace crate. A fragment
 contains:
 
-- definitions, including source location, item kind, and whether the item is
-  a public-surface candidate;
+- definitions, including source location, item kind, lexical module scope,
+  and whether the item is a public-surface, restricted-visibility, or
+  crate-visible candidate;
 - typed reference edges extracted from bodies and public interfaces;
 - entry-point roots when the crate is a selected production target or non-production
   executable;
@@ -149,12 +150,15 @@ and associated constants, traits, named types, constants, statics, struct and
 union fields, enum variants, named local re-exports, and public modules.
 Macro-expanded declarations are not direct candidates.
 
-For production compilation, candidates must be exported according to rustc's
-effective visibility information. For a test-harness compilation, Hawk also
-admits locally public declarations so it can analyze APIs compiled only for
-tests without broadening the production surface. Non-production executables
-that are not test harnesses still contribute liveness roots, but do not
-expand this test-only candidate surface.
+For production compilation, public candidates must be exported according to
+rustc's effective visibility information. For a test-harness compilation,
+Hawk also admits locally public declarations so it can analyze APIs compiled
+only for tests without broadening the production surface. Non-production
+executables that are not test harnesses still contribute liveness roots, but
+do not expand this test-only candidate surface. Explicit restricted visibility
+modifiers are tracked separately so their compiled uses can be compared with
+their lexical module scope. Exact `pub(crate)` declarations are also tracked
+for the optional `pub(super)` reduction.
 
 ### Edge kinds
 
@@ -208,6 +212,19 @@ For each public candidate in a non-excluded workspace library crate:
 A selected production target is not a library surface to reduce, so its crate
 does not receive these findings.
 
+For each explicit restricted-visibility candidate, Hawk separately finds every
+compiled reference across production and non-production fragments:
+
+| State                                              | Result                                                     |
+| -------------------------------------------------- | ---------------------------------------------------------- |
+| Every compiled use fits within the defining module | `hawk::unnecessary_restricted_visibility`: suggest private |
+| A compiled use requires a broader scope            | no private-visibility finding                              |
+
+For an exact `pub(crate)` candidate that cannot become private, Hawk can
+additionally suggest `pub(super)` when every compiled use fits within the
+defining module's parent. This preference is reported as
+`hawk::unnecessary_crate_visibility` and is allow-by-default.
+
 Enum variants are a special case. Hawk can report an unreachable public
 variant as dead surface requiring removal together with any remaining
 unreachable uses, but it does not report a reachable variant as unnecessarily
@@ -225,6 +242,10 @@ boundaries:
 - Named local re-exports are analyzed only where the target can be modeled
   soundly. Glob re-exports, module re-exports, and unmodeled or external
   targets remain conservative false negatives.
+- Crate-visible re-exports are not reduced because rustc does not preserve
+  enough path provenance to prove which exported path a compiled use needs.
+- Modules containing explicitly visible re-exports are not reduced because
+  rustc resolves consumer paths directly to the re-export target.
 - Public module ancestors are retained when an externally required
   declaration could be addressed through that lexical path.
 - Public trait implementation interfaces can require exposed types to remain
@@ -246,9 +267,11 @@ Hawk uses Clippy-style ordered command-line levels:
 cargo-hawk --manifest-path Cargo.toml -D warnings -W hawk::unnecessary_public
 ```
 
-The visibility diagnostics are `hawk::dead_public` and
-`hawk::unnecessary_public`. Configuration validation adds
-`hawk::unknown_item`, `hawk::ambiguous_item`, and
+The visibility diagnostics are `hawk::dead_public`, `hawk::unnecessary_public`,
+`hawk::unnecessary_restricted_visibility`, and
+`hawk::unnecessary_crate_visibility`. The final lint is allow-by-default;
+enable it explicitly to prefer `pub(super)` over `pub(crate)`. Configuration
+validation adds `hawk::unknown_item`, `hawk::ambiguous_item`, and
 `hawk::unfulfilled_expectation`.
 
 Hawk's workspace-level decisions do not naturally map to source attributes in
@@ -283,7 +306,7 @@ suggestions. Hawk also delegates edits to `cargo fix`, but it cannot emit the
 correct suggestion during its initial compiler invocation: the final answer
 depends on fragments not yet collected from other targets and crates.
 
-With `--fix`, Hawk therefore performs a second phase:
+With `--fix`, Hawk therefore performs one or more fix phases:
 
 ```text
  collect fragments -> analyze -> build FixPlan
@@ -294,24 +317,28 @@ With `--fix`, Hawk therefore performs a second phase:
      |
      | HAWK_FIX_PLAN points the wrapper at selected declarations
      v
- rustc_driver emits MachineApplicable "pub(crate)" suggestions
+ rustc_driver emits MachineApplicable visibility suggestions
      |
      v
  re-run production, non-production, and compile-only doctest analysis
 ```
 
-Only enabled, unsuppressed `hawk::unnecessary_public` findings enter a fix
-plan. Restricting dead surface without removing it can activate rustc's
-ordinary `dead_code` lint, so `hawk::dead_public` remains report-only. During
-fix compilations Hawk caps ordinary compiler lints so Cargo consumes Hawk's
-planned suggestions rather than unrelated compiler edits. It matches
-declarations across recompilations by compiler ID or equivalent source
-identity and emits `pub(crate)` replacements.
+Only enabled, unsuppressed `hawk::unnecessary_public`,
+`hawk::unnecessary_restricted_visibility`, and
+`hawk::unnecessary_crate_visibility` findings enter a fix plan. Restricting
+dead surface without removing it can activate rustc's ordinary `dead_code`
+lint, so `hawk::dead_public` remains report-only. During fix compilations Hawk
+caps ordinary compiler lints so Cargo consumes Hawk's planned suggestions
+rather than unrelated compiler edits. It matches declarations across
+recompilations by compiler ID or equivalent source identity and emits the
+planned replacement.
 
-The final re-analysis matters: a visibility change can alter downstream
-compilation and the remaining graph. The run succeeds only after the selected
-production targets, non-production targets, and compile-only doctests compile in their
-edited state.
+The re-analysis matters: a `pub` to `pub(crate)` change can expose a further
+module-local reduction, and any visibility change can alter downstream
+compilation and the remaining graph. Hawk repeats the fix phase for newly
+exposed restricted-visibility findings. The run succeeds only after the
+selected production targets, non-production targets, and compile-only doctests
+compile in their edited state.
 
 ## Implementation map
 
