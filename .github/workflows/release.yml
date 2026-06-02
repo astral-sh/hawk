@@ -87,6 +87,12 @@ jobs:
           echo "manifest=$(jq -c "." plan-dist-manifest.json)" >> "$GITHUB_OUTPUT"
       - name: Validate release changelog
         run: ./scripts/check-release-changelog.sh plan-dist-manifest.json
+      - name: Validate prerelease publishing
+        run: |
+          if ! jq -e '.publish_prereleases == true' plan-dist-manifest.json >/dev/null; then
+            echo "cargo-dist is not configured to publish prerelease crates" >&2
+            exit 1
+          fi
       - name: "Upload dist-manifest.json"
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:

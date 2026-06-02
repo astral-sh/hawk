@@ -21,6 +21,8 @@ unix-archive = ".tar.gz"
 pr-run-mode = "upload"
 # Publish only the cargo-hawk package to crates.io after release artifacts are hosted.
 publish-jobs = ["./publish-crates"]
+# Publish prerelease versions to crates.io as well as GitHub Releases.
+publish-prereleases = true
 # The crates.io publisher authenticates through GitHub OIDC.
 github-custom-job-permissions = { "publish-crates" = { contents = "read", id-token = "write" } }
 # Target platforms to build apps for (Rust target-triple syntax)
