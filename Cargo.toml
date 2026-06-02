@@ -12,6 +12,10 @@ readme = "README.md"
 name = "cargo-hawk"
 path = "src/main.rs"
 
+[[bin]]
+name = "cargo-hawk-driver"
+path = "src/bin/cargo-hawk-driver.rs"
+
 [dependencies]
 anstream = "1.0.0"
 anstyle = "1.0.14"

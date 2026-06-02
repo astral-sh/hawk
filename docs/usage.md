@@ -6,12 +6,30 @@ covers invoking the tool; see [Configuration](configuration.md) for the
 `hawk.toml` reference and [Architecture](architecture.md) for the analysis
 model.
 
+## Install a prebuilt release
+
+Hawk is pinned to Rust 1.95.0 and uses `rustc_private`. A prebuilt release
+still requires the exact normal Rust toolchain, but it does not require
+`rustc-dev`, `RUSTC_BOOTSTRAP`, or a source build:
+
+```sh
+rustup toolchain install 1.95.0
+```
+
+Download the archive for your platform from
+[GitHub Releases](https://github.com/astral-sh/hawk/releases), then place both
+`cargo-hawk` and `cargo-hawk-driver` on your `PATH` in the same directory.
+Run the Cargo subcommand with the pinned toolchain:
+
+```sh
+cargo +1.95.0 hawk --manifest-path /path/to/workspace/Cargo.toml
+```
+
 ## Build Hawk
 
 Hawk is pinned to Rust 1.95.0 and uses `rustc_private`; the repository
-toolchain configuration installs `rustc-dev` when necessary. The build embeds
-the selected compiler sysroot runtime path so the resulting executable can run
-directly as Cargo's compiler wrapper.
+toolchain configuration installs `rustc-dev` when necessary. A source build
+produces a `cargo-hawk` frontend and a `cargo-hawk-driver` compiler wrapper.
 
 ```sh
 cargo build

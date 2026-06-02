@@ -41,8 +41,62 @@ jobs:
               raise SystemExit(f"CHANGELOG.md does not contain an entry for {tag}")
           PY
 
-  publish-crates:
+  build-artifacts:
+    name: Build ${{ matrix.target }}
     needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            runner: macos-14
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    env:
+      HAWK_TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Install Rust toolchain
+        run: rustup show
+      - name: Build release binaries
+        run: cargo build --release --locked --target "$HAWK_TARGET"
+      - name: Check release linkage
+        run: ./scripts/check-release-linkage.sh "$HAWK_TARGET"
+      - name: Remove compiler development component
+        run: rustup component remove rustc-dev
+      - name: Smoke test release binaries
+        env:
+          HAWK_SMOKE_FIXTURE: ${{ runner.temp }}/hawk-release-smoke
+        run: |
+          cp -R tests/fixtures/basic "$HAWK_SMOKE_FIXTURE"
+          "target/$HAWK_TARGET/release/cargo-hawk" --help
+          "target/$HAWK_TARGET/release/cargo-hawk" \
+            --manifest-path "$HAWK_SMOKE_FIXTURE/Cargo.toml" \
+            -A warnings
+      - name: Package release binaries
+        run: ./scripts/package-release.sh "$HAWK_TARGET"
+      - name: Upload release archive
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-${{ matrix.target }}
+          path: |
+            cargo-hawk-${{ matrix.target }}.tar.gz
+            cargo-hawk-${{ matrix.target }}.tar.gz.sha256
+          if-no-files-found: error
+
+  publish-crates:
+    needs:
+      - validate
+      - build-artifacts
     uses: ./.github/workflows/publish-crates.yml
     permissions:
       contents: read
@@ -52,6 +106,7 @@ jobs:
     name: Create GitHub release
     needs:
       - validate
+      - build-artifacts
       - publish-crates
     runs-on: ubuntu-latest
     permissions:
@@ -60,6 +115,12 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
+      - name: Download release archives
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: release-*
+          path: artifacts
+          merge-multiple: true
       - name: Create release notes
         env:
           RELEASE_TAG: ${{ inputs.tag }}
@@ -89,4 +150,5 @@ jobs:
             --target "$GITHUB_SHA" \
             --title "$RELEASE_TAG" \
             --notes-file "$RUNNER_TEMP/release-notes.md" \
-            "${prerelease[@]}"
+            "${prerelease[@]}" \
+            artifacts/*

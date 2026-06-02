@@ -17,16 +17,17 @@ one Clippy lint.
 
 ## Comparison with Clippy
 
-| Concern                      | Clippy                                                                                        | Hawk                                                                                             |
-| ---------------------------- | --------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
-| User entry point             | `cargo clippy`, or `clippy-driver` directly                                                   | `cargo-hawk`                                                                                     |
-| Cargo integration            | Sets `RUSTC_WORKSPACE_WRAPPER=clippy-driver`                                                  | Sets `RUSTC_WORKSPACE_WRAPPER` to the `cargo-hawk` executable itself                             |
-| Compiler integration         | A `rustc_driver` callback registers Clippy lint passes with rustc's lint store                | A `rustc_driver` callback inspects analyzed HIR/type context and serializes graph fragments      |
-| Unit of analysis             | One rustc invocation at a time                                                                | All instrumented crate compilations from selected production targets and non-production surface  |
-| When diagnostics are decided | During the compiler lint pass that finds the condition                                        | After Cargo completes, when graph fragments have been merged and traversed                       |
-| Meaning of a public item     | Rust/Clippy lint semantics within the compilation being checked                               | A declaration that may be unnecessary under an explicit closed-world product model               |
-| Suppression and severity     | Rust lint attributes and command-line lint levels, plus Clippy configuration where applicable | Clippy-style command-line levels plus reasoned `hawk.toml` overrides and scoped exclusions       |
-| Automatic fixes              | The lint emits suggestions; `cargo clippy --fix` delegates application to `cargo fix`         | Graph analysis first writes a fix plan; a second compiler pass emits suggestions for `cargo fix` |
+| Concern                       | Clippy                                                                                        | Hawk                                                                                             |
+| ----------------------------- | --------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| User entry point              | `cargo clippy`, or `clippy-driver` directly                                                   | `cargo-hawk`; `cargo-hawk-driver` is an internal executable                                      |
+| Cargo integration             | Sets `RUSTC_WORKSPACE_WRAPPER=clippy-driver`                                                  | Sets `RUSTC_WORKSPACE_WRAPPER=cargo-hawk-driver`                                                 |
+| Compiler integration          | A `rustc_driver` callback registers Clippy lint passes with rustc's lint store                | A `rustc_driver` callback inspects analyzed HIR/type context and serializes graph fragments      |
+| Unit of analysis              | One rustc invocation at a time                                                                | All instrumented crate compilations from selected production targets and non-production surface  |
+| When diagnostics are decided  | During the compiler lint pass that finds the condition                                        | After Cargo completes, when graph fragments have been merged and traversed                       |
+| Meaning of a public item      | Rust/Clippy lint semantics within the compilation being checked                               | A declaration that may be unnecessary under an explicit closed-world product model               |
+| Suppression and severity      | Rust lint attributes and command-line lint levels, plus Clippy configuration where applicable | Clippy-style command-line levels plus reasoned `hawk.toml` overrides and scoped exclusions       |
+| Automatic fixes               | The lint emits suggestions; `cargo clippy --fix` delegates application to `cargo fix`         | Graph analysis first writes a fix plan; a second compiler pass emits suggestions for `cargo fix` |
+| Compiler-coupled distribution | Ships with a matching Rust toolchain as a rustup component                                    | Release archives require the exact matching normal Rust toolchain                                |
 
 The shared foundation is deliberate. Both tools run as Cargo compiler
 wrappers, use `rustc_private` compiler APIs, produce lint-style diagnostics,
@@ -46,6 +47,29 @@ must distinguish:
 Those facts can originate in different Cargo target builds and different
 crate compilations. Hawk therefore uses rustc as a fact collector and runs
 its lint decision as a workspace-level post-processing step.
+
+## Distribution and compiler coupling
+
+Clippy and Hawk are both coupled to a particular compiler because their
+drivers link Rust compiler internals. Clippy is distributed as a rustup
+component alongside its matching compiler. Hawk is not a rustup component, so
+each prebuilt release archive contains two executables:
+
+- `cargo-hawk` is the user-facing frontend and does not link Rust compiler
+  libraries;
+- `cargo-hawk-driver` is the internal compiler wrapper and dynamically links
+  `librustc_driver`.
+
+The executables must remain in the same directory. Before starting analysis,
+the frontend verifies that the selected `rustc` release, commit hash, and host
+triple match the compiler used to build Hawk. It then supplies that compiler
+sysroot's driver-library directory when Cargo launches the wrapper. For the
+supported release targets, the normal Rust toolchain provides the runtime
+compiler library; `rustc-dev` is needed only to build Hawk itself.
+
+This makes a release archive portable between machines with the same host
+triple and exact Rust toolchain. It does not make Hawk independent of Rust or
+compatible with arbitrary compiler versions.
 
 ## Product model
 
@@ -84,10 +108,9 @@ configured production-target model does.
 
 ## Execution pipeline
 
-`cargo-hawk` is both the front-end executable and the compiler wrapper. Its
-`main` function distinguishes an ordinary CLI invocation from a
-`RUSTC_WORKSPACE_WRAPPER` invocation by checking Hawk's environment and the
-wrapped `rustc` argument.
+`cargo-hawk` is the frontend executable. It locates its sibling
+`cargo-hawk-driver`, validates the selected compiler, and configures Cargo to
+use the driver as its compiler wrapper.
 
 An analysis run proceeds as follows:
 
@@ -100,9 +123,9 @@ An analysis run proceeds as follows:
  cargo check --workspace --all-targets              (non-production surface)
  cargo test --workspace --doc                       (compile-only doctests)
      |
-     | RUSTC_WORKSPACE_WRAPPER=cargo-hawk
+     | RUSTC_WORKSPACE_WRAPPER=cargo-hawk-driver
      v
- Hawk rustc_driver callback after_analysis
+ cargo-hawk-driver rustc_driver callback after_analysis
      |
      | one JSON Fragment per compiled workspace crate
      v

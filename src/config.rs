@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -408,11 +409,12 @@ fn known_item_identity(definition: &Definition) -> KnownItemIdentity<'_> {
 }
 
 impl AnalysisTarget {
-    pub fn from_rustc(target: Option<&str>) -> Result<Self> {
+    pub fn from_rustc(target: Option<&str>, rustc: &OsStr, current_dir: &Path) -> Result<Self> {
         let name = match target {
             Some(target) => target.to_owned(),
             None => {
-                let output = Command::new("rustc")
+                let output = Command::new(rustc)
+                    .current_dir(current_dir)
                     .arg("-vV")
                     .output()
                     .context("query rustc host target")?;
@@ -427,12 +429,12 @@ impl AnalysisTarget {
                     .to_owned()
             }
         };
-        let mut rustc = Command::new("rustc");
-        rustc.arg("--print=cfg");
+        let mut rustc_command = Command::new(rustc);
+        rustc_command.current_dir(current_dir).arg("--print=cfg");
         if let Some(target) = target {
-            rustc.arg("--target").arg(target);
+            rustc_command.arg("--target").arg(target);
         }
-        let output = rustc
+        let output = rustc_command
             .output()
             .with_context(|| format!("query rustc configuration for target `{name}`"))?;
         if !output.status.success() {

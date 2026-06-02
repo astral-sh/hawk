@@ -212,6 +212,141 @@ impl From<TerminalColor> for anstream::ColorChoice {
     }
 }
 
+struct RustToolchain {
+    rustc: OsString,
+    sysroot: PathBuf,
+}
+
+impl RustToolchain {
+    fn discover(workspace_root: &Path) -> Result<Self> {
+        let rustc = env::var_os("RUSTC").unwrap_or_else(|| OsString::from("rustc"));
+        let output = Command::new(&rustc)
+            .current_dir(workspace_root)
+            .arg("-vV")
+            .output()
+            .with_context(|| format!("query selected compiler `{}`", rustc.to_string_lossy()))?;
+        if !output.status.success() {
+            bail!(
+                "query selected compiler `{}` failed with {}",
+                rustc.to_string_lossy(),
+                output.status
+            );
+        }
+        let version =
+            String::from_utf8(output.stdout).context("decode selected compiler version")?;
+        let release = rustc_version_field(&version, "release")?;
+        let commit_hash = rustc_version_field(&version, "commit-hash")?;
+        let host = rustc_version_field(&version, "host")?;
+        if release != env!("HAWK_RUSTC_RELEASE")
+            || commit_hash != env!("HAWK_RUSTC_COMMIT_HASH")
+            || host != env!("HAWK_RUSTC_HOST")
+        {
+            bail!(
+                "Hawk was built for rustc {} ({}, {}), but the selected compiler is rustc {} ({}, {}); run Hawk with the matching toolchain, for example `cargo +{} hawk`",
+                env!("HAWK_RUSTC_RELEASE"),
+                env!("HAWK_RUSTC_COMMIT_HASH"),
+                env!("HAWK_RUSTC_HOST"),
+                release,
+                commit_hash,
+                host,
+                env!("HAWK_RUSTC_RELEASE"),
+            );
+        }
+
+        let output = Command::new(&rustc)
+            .current_dir(workspace_root)
+            .arg("--print=sysroot")
+            .output()
+            .with_context(|| {
+                format!(
+                    "query selected compiler `{}` sysroot",
+                    rustc.to_string_lossy()
+                )
+            })?;
+        if !output.status.success() {
+            bail!(
+                "query selected compiler `{}` sysroot failed with {}",
+                rustc.to_string_lossy(),
+                output.status
+            );
+        }
+        let sysroot =
+            String::from_utf8(output.stdout).context("decode selected compiler sysroot")?;
+        let sysroot = PathBuf::from(sysroot.trim());
+        let library_dir = driver_library_dir(&sysroot);
+        if !library_dir.is_dir() {
+            bail!(
+                "selected compiler sysroot has no driver library directory at {}",
+                library_dir.display()
+            );
+        }
+
+        Ok(Self { rustc, sysroot })
+    }
+
+    fn rustc(&self) -> &OsStr {
+        &self.rustc
+    }
+
+    fn configure_command(&self, command: &mut Command) -> Result<()> {
+        command.env("RUSTC", &self.rustc);
+
+        let variable = driver_library_path_variable();
+        let mut paths = vec![driver_library_dir(&self.sysroot)];
+        if let Some(existing) = env::var_os(variable) {
+            paths.extend(env::split_paths(&existing));
+        }
+        let value = env::join_paths(paths)
+            .with_context(|| format!("construct {variable} for the Hawk compiler driver"))?;
+        command.env(variable, value);
+        Ok(())
+    }
+}
+
+fn rustc_version_field<'a>(version: &'a str, field: &str) -> Result<&'a str> {
+    version
+        .lines()
+        .find_map(|line| line.strip_prefix(&format!("{field}: ")))
+        .with_context(|| format!("selected compiler did not report {field}"))
+}
+
+#[cfg(windows)]
+fn driver_library_dir(sysroot: &Path) -> PathBuf {
+    sysroot.join("bin")
+}
+
+#[cfg(not(windows))]
+fn driver_library_dir(sysroot: &Path) -> PathBuf {
+    sysroot.join("lib")
+}
+
+#[cfg(target_os = "macos")]
+fn driver_library_path_variable() -> &'static str {
+    "DYLD_LIBRARY_PATH"
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn driver_library_path_variable() -> &'static str {
+    "LD_LIBRARY_PATH"
+}
+
+#[cfg(windows)]
+fn driver_library_path_variable() -> &'static str {
+    "PATH"
+}
+
+fn driver_executable() -> Result<PathBuf> {
+    let executable = env::current_exe().context("locate hawk executable")?;
+    let driver = executable.with_file_name(format!("cargo-hawk-driver{}", env::consts::EXE_SUFFIX));
+    if !driver.is_file() {
+        bail!(
+            "could not locate Hawk compiler driver at {}; install `cargo-hawk` and `cargo-hawk-driver` together",
+            driver.display()
+        );
+    }
+    Ok(driver)
+}
+
 pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
     if raw_args.get(1).is_some_and(|argument| argument == "hawk") {
         raw_args.remove(1);
@@ -238,8 +373,10 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
     let candidate_crates = workspace_library_crates(&metadata);
 
     let workspace_root = metadata.workspace_root.clone().into_std_path_buf();
+    let toolchain = RustToolchain::discover(&workspace_root)?;
     let config = Config::load(&workspace_root, args.config.as_deref())?;
-    let analysis_target = AnalysisTarget::from_rustc(args.target.as_deref())?;
+    let analysis_target =
+        AnalysisTarget::from_rustc(args.target.as_deref(), toolchain.rustc(), &workspace_root)?;
     let mut production_products: Vec<ProductionSelection<'_>> = Vec::new();
     for consumer in config.production_consumers(&analysis_target) {
         let config_path = config
@@ -322,13 +459,14 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
         )
     })?;
 
-    let executable = env::current_exe().context("locate hawk executable")?;
+    let driver = driver_executable()?;
     let cargo = InstrumentedCargo {
         args: &args,
         workspace_root: &workspace_root,
         manifest_path: &manifest_path,
         target_dir: &target_dir,
-        executable: &executable,
+        driver: &driver,
+        toolchain: &toolchain,
     };
     for (index, product) in production_products.iter().copied().enumerate() {
         cargo.run(
@@ -585,7 +723,8 @@ struct InstrumentedCargo<'a> {
     workspace_root: &'a Path,
     manifest_path: &'a Path,
     target_dir: &'a Path,
-    executable: &'a Path,
+    driver: &'a Path,
+    toolchain: &'a RustToolchain,
 }
 
 #[derive(Clone, Copy)]
@@ -627,6 +766,7 @@ impl InstrumentedCargo<'_> {
             .arg("--locked")
             .arg("--target-dir")
             .arg(self.target_dir);
+        self.toolchain.configure_command(&mut command)?;
         match selection {
             CargoSelection::Production(product) => {
                 command
@@ -685,7 +825,7 @@ impl InstrumentedCargo<'_> {
             | CargoSelection::FixNonProduction(_) => String::new(),
         };
         command
-            .env("RUSTC_WORKSPACE_WRAPPER", self.executable)
+            .env("RUSTC_WORKSPACE_WRAPPER", self.driver)
             .env("HAWK_OUTPUT_DIR", graph_dir)
             .env("HAWK_ROOT_CRATE", root_crate)
             .env("HAWK_CONSUMER_MODE", consumer_mode)
@@ -695,7 +835,7 @@ impl InstrumentedCargo<'_> {
                 .env("RUSTC_BOOTSTRAP", "1")
                 .env(
                     "CARGO_ENCODED_RUSTDOCFLAGS",
-                    doctest_rustdoc_flags(self.executable),
+                    doctest_rustdoc_flags(self.driver),
                 )
                 .env_remove("RUSTDOCFLAGS");
         }
