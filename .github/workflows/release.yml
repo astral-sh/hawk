@@ -79,6 +79,7 @@ jobs:
         env:
           HAWK_SMOKE_ARCHIVE: ${{ runner.temp }}/hawk-release-archive
           HAWK_SMOKE_FIXTURE: ${{ runner.temp }}/hawk-release-smoke
+          RUSTUP_TOOLCHAIN: 1.95.0
         run: |
           mkdir "$HAWK_SMOKE_ARCHIVE"
           tar -xzf "cargo-hawk-$HAWK_TARGET.tar.gz" -C "$HAWK_SMOKE_ARCHIVE"
