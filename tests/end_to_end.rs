@@ -2,6 +2,9 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
 fn copy_directory(source: &Path, destination: &Path) {
     fs::create_dir_all(destination).expect("create fixture copy directory");
     for entry in fs::read_dir(source).expect("read fixture directory") {
@@ -13,6 +16,80 @@ fn copy_directory(source: &Path, destination: &Path) {
             fs::copy(entry.path(), destination).expect("copy fixture file");
         }
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn honors_cargo_configured_compiler() {
+    let source_workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/basic");
+    let workspace = tempfile::tempdir().expect("temporary fixture workspace");
+    copy_directory(&source_workspace, workspace.path());
+
+    let rustc_sysroot = Command::new("rustc")
+        .arg("--print=sysroot")
+        .output()
+        .expect("read Rust compiler sysroot");
+    assert!(rustc_sysroot.status.success());
+    let rustc = Path::new(
+        std::str::from_utf8(&rustc_sysroot.stdout)
+            .expect("Rust compiler sysroot")
+            .trim(),
+    )
+    .join("bin")
+    .join(format!("rustc{}", std::env::consts::EXE_SUFFIX));
+
+    let cargo_config = workspace.path().join(".cargo");
+    fs::create_dir(&cargo_config).expect("create Cargo config directory");
+    fs::write(
+        cargo_config.join("config.toml"),
+        format!(
+            "[build]\nrustc = \"{}\"\n",
+            rustc
+                .to_string_lossy()
+                .replace('\\', "\\\\")
+                .replace('"', "\\\"")
+        ),
+    )
+    .expect("write Cargo config");
+
+    let fake_bin = tempfile::tempdir().expect("temporary fake binary directory");
+    let fake_rustc = fake_bin.path().join("rustc");
+    fs::write(
+        &fake_rustc,
+        "#!/bin/sh\n\
+         echo 'rustc 0.0.0 (fake)'\n\
+         echo 'release: 0.0.0'\n\
+         echo 'commit-hash: fake'\n\
+         echo 'host: fake'\n",
+    )
+    .expect("write fake rustc");
+    fs::set_permissions(&fake_rustc, fs::Permissions::from_mode(0o755))
+        .expect("make fake rustc executable");
+
+    let path = std::env::join_paths(std::iter::once(fake_bin.path().to_path_buf()).chain(
+        std::env::split_paths(&std::env::var_os("PATH").expect("PATH is set")),
+    ))
+    .expect("construct PATH");
+    let target_dir = tempfile::tempdir().expect("temporary target directory");
+    let output = Command::new(env!("CARGO_BIN_EXE_cargo-hawk"))
+        .arg("--manifest-path")
+        .arg(workspace.path().join("Cargo.toml"))
+        .arg("--target-dir")
+        .arg(target_dir.path())
+        .arg("-A")
+        .arg("warnings")
+        .env("PATH", path)
+        .env_remove("RUSTC")
+        .env_remove("RUSTC_WRAPPER")
+        .env_remove("RUSTC_WORKSPACE_WRAPPER")
+        .output()
+        .expect("run cargo-hawk");
+
+    assert!(
+        output.status.success(),
+        "cargo-hawk failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]

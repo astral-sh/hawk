@@ -6,6 +6,9 @@ mod graph;
 
 fn main() -> std::process::ExitCode {
     let args: Vec<String> = std::env::args().collect();
+    if let Some(exit_code) = cli::run_rustc_probe(&args) {
+        return exit_code;
+    }
     match cli::run(args.clone()) {
         Ok(exit_code) => exit_code,
         Err(error) => {

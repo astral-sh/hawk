@@ -218,8 +218,8 @@ struct RustToolchain {
 }
 
 impl RustToolchain {
-    fn discover(workspace_root: &Path) -> Result<Self> {
-        let rustc = env::var_os("RUSTC").unwrap_or_else(|| OsString::from("rustc"));
+    fn discover(workspace_root: &Path, manifest_path: &Path) -> Result<Self> {
+        let rustc = cargo_rustc(workspace_root, manifest_path)?;
         let output = Command::new(&rustc)
             .current_dir(workspace_root)
             .arg("-vV")
@@ -289,8 +289,6 @@ impl RustToolchain {
     }
 
     fn configure_command(&self, command: &mut Command) -> Result<()> {
-        command.env("RUSTC", &self.rustc);
-
         let variable = driver_library_path_variable();
         let mut paths = vec![driver_library_dir(&self.sysroot)];
         if let Some(existing) = env::var_os(variable) {
@@ -300,6 +298,54 @@ impl RustToolchain {
             .with_context(|| format!("construct {variable} for the Hawk compiler driver"))?;
         command.env(variable, value);
         Ok(())
+    }
+}
+
+fn cargo_rustc(workspace_root: &Path, manifest_path: &Path) -> Result<OsString> {
+    let probe_dir = tempfile::tempdir().context("create Cargo rustc probe directory")?;
+    let output_path = probe_dir.path().join("rustc");
+    let executable = env::current_exe().context("locate Hawk executable for Cargo rustc probe")?;
+    let output = Command::new("cargo")
+        .current_dir(workspace_root)
+        .arg("check")
+        .arg("--manifest-path")
+        .arg(manifest_path)
+        .arg("--workspace")
+        .arg("--all-targets")
+        .arg("--all-features")
+        .arg("--locked")
+        .arg("--quiet")
+        .env("RUSTC_WORKSPACE_WRAPPER", executable)
+        .env("HAWK_RUSTC_PROBE", &output_path)
+        .output()
+        .context("query Cargo's selected compiler")?;
+    let rustc = fs::read_to_string(&output_path).with_context(|| {
+        format!(
+            "Cargo did not report its selected compiler: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )
+    })?;
+    Ok(OsString::from(rustc.trim()))
+}
+
+pub fn run_rustc_probe(args: &[String]) -> Option<ExitCode> {
+    let output_path = env::var_os("HAWK_RUSTC_PROBE")?;
+    let rustc = args
+        .get(1)
+        .context("Cargo rustc probe omitted compiler path");
+    match rustc.and_then(|rustc| {
+        fs::write(&output_path, rustc).with_context(|| {
+            format!(
+                "write Cargo rustc probe result to {}",
+                output_path.display()
+            )
+        })
+    }) {
+        Ok(()) => Some(ExitCode::FAILURE),
+        Err(error) => {
+            eprintln!("hawk: {error:#}");
+            Some(ExitCode::FAILURE)
+        }
     }
 }
 
@@ -373,7 +419,11 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
     let candidate_crates = workspace_library_crates(&metadata);
 
     let workspace_root = metadata.workspace_root.clone().into_std_path_buf();
-    let toolchain = RustToolchain::discover(&workspace_root)?;
+    let manifest_path = args
+        .manifest_path
+        .canonicalize()
+        .with_context(|| format!("resolve manifest path for {}", args.manifest_path.display()))?;
+    let toolchain = RustToolchain::discover(&workspace_root, &manifest_path)?;
     let config = Config::load(&workspace_root, args.config.as_deref())?;
     let analysis_target =
         AnalysisTarget::from_rustc(args.target.as_deref(), toolchain.rustc(), &workspace_root)?;
@@ -411,10 +461,6 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
             config_path.display()
         );
     }
-    let manifest_path = args
-        .manifest_path
-        .canonicalize()
-        .with_context(|| format!("resolve manifest path for {}", args.manifest_path.display()))?;
     let target_dir = args
         .target_dir
         .clone()
