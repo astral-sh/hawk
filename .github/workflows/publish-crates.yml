@@ -3,6 +3,10 @@ name: Publish to crates.io
 
 on:
   workflow_call:
+    inputs:
+      plan:
+        required: true
+        type: string
 
 permissions: {}
 

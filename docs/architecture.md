@@ -53,19 +53,20 @@ its lint decision as a workspace-level post-processing step.
 Clippy and Hawk are both coupled to a particular compiler because their
 drivers link Rust compiler internals. Clippy is distributed as a rustup
 component alongside its matching compiler. Hawk is not a rustup component, so
-each prebuilt release archive contains two executables:
+cargo-dist packages each prebuilt release with two executables:
 
 - `cargo-hawk` is the user-facing frontend and does not link Rust compiler
   libraries;
 - `cargo-hawk-driver` is the internal compiler wrapper and dynamically links
   `librustc_driver`.
 
-The executables must remain in the same directory. Before starting analysis,
-the frontend verifies that the selected `rustc` release, commit hash, and host
-triple match the compiler used to build Hawk. It then supplies that compiler
-sysroot's driver-library directory when Cargo launches the wrapper. For the
-supported release targets, the normal Rust toolchain provides the runtime
-compiler library; `rustc-dev` is needed only to build Hawk itself.
+The archive and shell installer keep the executables in the same directory.
+Before starting analysis, the frontend verifies that the selected `rustc`
+release, commit hash, and host triple match the compiler used to build Hawk.
+It then supplies that compiler sysroot's driver-library directory when Cargo
+launches the wrapper. For the supported release targets, the normal Rust
+toolchain provides the runtime compiler library; `rustc-dev` is needed only
+to build Hawk itself.
 
 This makes a release archive portable between machines with the same host
 triple and exact Rust toolchain. It does not make Hawk independent of Rust or

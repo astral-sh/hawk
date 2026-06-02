@@ -2,8 +2,9 @@
 # Verify that a release frontend is portable across matching Rust installations.
 set -euo pipefail
 
-target="${1:?usage: check-release-linkage.sh TARGET}"
-binary_dir="${CARGO_TARGET_DIR:-target}/$target/release"
+target="${1:?usage: check-release-linkage.sh TARGET [PROFILE]}"
+profile="${2:-release}"
+binary_dir="${CARGO_TARGET_DIR:-target}/$target/$profile"
 frontend="$binary_dir/cargo-hawk"
 driver="$binary_dir/cargo-hawk-driver"
 sysroot="$(rustc --print sysroot)"

@@ -16,9 +16,18 @@ still requires the exact normal Rust toolchain, but it does not require
 rustup toolchain install 1.95.0
 ```
 
-Download the archive for your platform from
-[GitHub Releases](https://github.com/astral-sh/hawk/releases), then place both
-`cargo-hawk` and `cargo-hawk-driver` on your `PATH` in the same directory.
+Install the latest release with the standalone shell installer:
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://github.com/astral-sh/hawk/releases/latest/download/cargo-hawk-installer.sh | sh
+```
+
+The installer places `cargo-hawk` and `cargo-hawk-driver` on your `PATH` in
+the same directory. You can instead download the archive for your platform
+from [GitHub Releases](https://github.com/astral-sh/hawk/releases) and place
+both executables on your `PATH` manually.
+
 Run the Cargo subcommand with the pinned toolchain:
 
 ```sh
