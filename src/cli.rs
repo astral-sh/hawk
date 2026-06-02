@@ -1235,7 +1235,7 @@ fn default_target_dir(workspace_root: &Path) -> PathBuf {
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("workspace");
-    PathBuf::from("/private/tmp/codex-hawk-target").join(workspace)
+    env::temp_dir().join("cargo-hawk-target").join(workspace)
 }
 
 fn read_fragments(graph_dir: &Path) -> Result<Vec<Fragment>> {
@@ -1283,7 +1283,19 @@ mod tests {
 
     use crate::graph::{Definition, DefinitionKind, Finding, FindingKind, Span};
 
-    use super::{Args, LintLevel, LintLevels, write_diagnostic};
+    use super::{Args, LintLevel, LintLevels, default_target_dir, write_diagnostic};
+
+    #[test]
+    fn default_target_dir_uses_platform_temp_directory() {
+        let workspace_root = Path::new("/path/to/example-workspace");
+
+        assert_eq!(
+            default_target_dir(workspace_root),
+            std::env::temp_dir()
+                .join("cargo-hawk-target")
+                .join("example-workspace")
+        );
+    }
 
     #[test]
     fn diagnostic_rendering_includes_terminal_styles() {
