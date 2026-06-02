@@ -1,6 +1,7 @@
 name: Release
 
 on:
+  pull_request:
   workflow_dispatch:
     inputs:
       tag:
@@ -13,7 +14,7 @@ permissions: {}
 jobs:
   validate:
     name: Validate release
-    if: ${{ github.repository == 'astral-sh/hawk' }}
+    if: ${{ github.event_name == 'workflow_dispatch' && github.repository == 'astral-sh/hawk' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -43,7 +44,6 @@ jobs:
 
   build-artifacts:
     name: Build ${{ matrix.target }}
-    needs: validate
     strategy:
       fail-fast: false
       matrix:
@@ -71,19 +71,22 @@ jobs:
         run: cargo build --release --locked --target "$HAWK_TARGET"
       - name: Check release linkage
         run: ./scripts/check-release-linkage.sh "$HAWK_TARGET"
-      - name: Remove compiler development component
-        run: rustup component remove rustc-dev
-      - name: Smoke test release binaries
-        env:
-          HAWK_SMOKE_FIXTURE: ${{ runner.temp }}/hawk-release-smoke
-        run: |
-          cp -R tests/fixtures/basic "$HAWK_SMOKE_FIXTURE"
-          "target/$HAWK_TARGET/release/cargo-hawk" --help
-          "target/$HAWK_TARGET/release/cargo-hawk" \
-            --manifest-path "$HAWK_SMOKE_FIXTURE/Cargo.toml" \
-            -A warnings
       - name: Package release binaries
         run: ./scripts/package-release.sh "$HAWK_TARGET"
+      - name: Remove compiler development component
+        run: rustup component remove rustc-dev
+      - name: Smoke test release archive
+        env:
+          HAWK_SMOKE_ARCHIVE: ${{ runner.temp }}/hawk-release-archive
+          HAWK_SMOKE_FIXTURE: ${{ runner.temp }}/hawk-release-smoke
+        run: |
+          mkdir "$HAWK_SMOKE_ARCHIVE"
+          tar -xzf "cargo-hawk-$HAWK_TARGET.tar.gz" -C "$HAWK_SMOKE_ARCHIVE"
+          cp -R tests/fixtures/basic "$HAWK_SMOKE_FIXTURE"
+          "$HAWK_SMOKE_ARCHIVE/cargo-hawk-$HAWK_TARGET/cargo-hawk" --help
+          "$HAWK_SMOKE_ARCHIVE/cargo-hawk-$HAWK_TARGET/cargo-hawk" \
+            --manifest-path "$HAWK_SMOKE_FIXTURE/Cargo.toml" \
+            -A warnings
       - name: Upload release archive
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -94,6 +97,7 @@ jobs:
           if-no-files-found: error
 
   publish-crates:
+    if: ${{ github.event_name == 'workflow_dispatch' }}
     needs:
       - validate
       - build-artifacts
@@ -104,6 +108,7 @@ jobs:
 
   announce:
     name: Create GitHub release
+    if: ${{ github.event_name == 'workflow_dispatch' }}
     needs:
       - validate
       - build-artifacts
