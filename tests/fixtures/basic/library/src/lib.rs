@@ -306,3 +306,21 @@ pub fn uniform_product_fields() -> UniformProductFields {
 pub fn exercise_uniform_product_fields() {
     let _ = uniform_product_fields().used_inside_crate;
 }
+
+pub struct CfgMixedProductFields {
+    pub used_across_crates: u8,
+    pub used_inside_crate: u8,
+    #[cfg(any())]
+    private: u8,
+}
+
+pub fn cfg_mixed_product_fields() -> CfgMixedProductFields {
+    CfgMixedProductFields {
+        used_across_crates: 1,
+        used_inside_crate: 2,
+    }
+}
+
+pub fn exercise_cfg_mixed_product_fields() {
+    let _ = cfg_mixed_product_fields().used_inside_crate;
+}

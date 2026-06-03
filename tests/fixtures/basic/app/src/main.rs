@@ -16,6 +16,8 @@ fn main() {
     let _ = fields.used_across_crates;
     let _ = library::uniform_product_fields().used_across_crates;
     library::exercise_uniform_product_fields();
+    let _ = library::cfg_mixed_product_fields().used_across_crates;
+    library::exercise_cfg_mixed_product_fields();
     let _ = std::mem::offset_of!(library::OffsetFields, used_by_offset_of);
     let _ = library::exposed_payload_field().payload;
     let _ = unsafe { library::exposed_payload_union().payload };

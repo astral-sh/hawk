@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::{Context, Result};
+use rustc_ast as ast;
 use rustc_driver::{Callbacks, Compilation};
 use rustc_errors::Applicability;
 use rustc_hir as hir;
@@ -15,11 +16,13 @@ use rustc_hir::def_id::{CRATE_DEF_ID, DefId, LocalDefId};
 use rustc_hir::intravisit::{self, Visitor};
 use rustc_interface::interface;
 use rustc_middle::ty::{self, TyCtxt};
+use rustc_parse::lexer::StripTokens;
+use rustc_parse::parser::{AllowConstBlockItems, ForceCollect};
 use rustc_session::config::CrateType;
 use rustc_span::Symbol;
 use rustc_span::def_id::LOCAL_CRATE;
 use rustc_span::hygiene::{ExpnKind, MacroKind};
-use rustc_span::{BytePos, Pos};
+use rustc_span::{BytePos, FileName, Pos};
 
 use crate::graph::{
     Definition, DefinitionKind, Edge, EdgeKind, FieldGroup, FindingKind, FixPlan, Fragment, Span,
@@ -293,22 +296,7 @@ fn collect_fragment(
         });
         match item.kind {
             hir::ItemKind::Struct(_, _, data) | hir::ItemKind::Union(_, _, data) => {
-                let uniform_visibility = if !item.span.from_expansion()
-                    && data
-                        .fields()
-                        .iter()
-                        .all(|field| !tcx.def_span(field.def_id).from_expansion())
-                {
-                    let mut visibilities = data
-                        .fields()
-                        .iter()
-                        .map(|field| visibility_modifier(tcx, field.def_id).unwrap_or_default());
-                    visibilities
-                        .next()
-                        .filter(|first| visibilities.all(|visibility| visibility == *first))
-                } else {
-                    None
-                };
+                let uniform_visibility = source_field_uniform_visibility(tcx, item.span);
                 let field_group = FieldGroup {
                     parent: tcx.def_path_str(item.owner_id.def_id.to_def_id()),
                     uniform_visibility,
@@ -624,6 +612,61 @@ fn visibility_modifier(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Option<String> {
     visibility_span(tcx, def_id)
         .and_then(|span| tcx.sess.source_map().span_to_snippet(span).ok())
         .and_then(|visibility| compact_visibility_modifier(&visibility))
+}
+
+// HIR omits cfg-stripped fields, so uniformity must come from the complete source declaration.
+fn source_field_uniform_visibility(tcx: TyCtxt<'_>, item_span: rustc_span::Span) -> Option<String> {
+    if item_span.from_expansion() {
+        return None;
+    }
+    let source = tcx.sess.source_map().span_to_snippet(item_span).ok()?;
+    let mut parser = match rustc_parse::new_parser_from_source_str(
+        &tcx.sess.psess,
+        FileName::Custom(format!(
+            "hawk field declaration {}:{}",
+            item_span.lo().to_u32(),
+            item_span.hi().to_u32()
+        )),
+        source,
+        StripTokens::Nothing,
+    ) {
+        Ok(parser) => parser,
+        Err(errors) => {
+            for error in errors {
+                error.cancel();
+            }
+            return None;
+        }
+    };
+    let item = match parser.parse_item(ForceCollect::No, AllowConstBlockItems::Yes) {
+        Ok(Some(item)) => item,
+        Ok(None) => return None,
+        Err(error) => {
+            error.cancel();
+            return None;
+        }
+    };
+    let fields = match &item.kind {
+        ast::ItemKind::Struct(_, _, data) | ast::ItemKind::Union(_, _, data) => data.fields(),
+        _ => return None,
+    };
+    let visibilities: Vec<_> = fields
+        .iter()
+        .map(|field| match field.vis.kind {
+            ast::VisibilityKind::Inherited => Some(String::new()),
+            _ => tcx
+                .sess
+                .source_map()
+                .span_to_snippet(field.vis.span)
+                .ok()
+                .and_then(|visibility| compact_visibility_modifier(&visibility)),
+        })
+        .collect();
+    let first = visibilities.first()?.as_ref()?.clone();
+    visibilities
+        .iter()
+        .all(|visibility| visibility.as_ref() == Some(&first))
+        .then_some(first)
 }
 
 fn compact_visibility_modifier(visibility: &str) -> Option<String> {
