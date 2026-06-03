@@ -25,7 +25,7 @@ use rustc_span::hygiene::{ExpnKind, MacroKind};
 use rustc_span::{BytePos, FileName, Pos};
 
 use crate::graph::{
-    Definition, DefinitionKind, Edge, EdgeKind, FieldGroup, FindingKind, FixPlan, Fragment, Span,
+    Definition, DefinitionKind, Edge, EdgeKind, FindingKind, FixPlan, Fragment, Span,
     VisibilityReduction,
 };
 
@@ -296,11 +296,10 @@ fn collect_fragment(
         });
         match item.kind {
             hir::ItemKind::Struct(_, _, data) | hir::ItemKind::Union(_, _, data) => {
-                let uniform_visibility = source_field_uniform_visibility(tcx, item.span);
-                let field_group = FieldGroup {
-                    parent: tcx.def_path_str(item.owner_id.def_id.to_def_id()),
-                    source: span(tcx, item.owner_id.def_id),
-                    uniform_visibility,
+                let uniform_field_group = if source_fields_have_uniform_visibility(tcx, item.span) {
+                    span(tcx, item.owner_id.def_id)
+                } else {
+                    None
                 };
                 for field in data.fields() {
                     let field_span = tcx.def_span(field.def_id);
@@ -321,7 +320,7 @@ fn collect_fragment(
                         DefinitionKind::Field,
                         is_public_candidate(tcx, field.def_id, test_surface),
                     );
-                    field_definition.field_group = Some(field_group.clone());
+                    field_definition.uniform_field_group = uniform_field_group.clone();
                     definitions.push(field_definition);
                     defined.insert(field.def_id);
                     adt_members.push((field.def_id, item.owner_id.def_id));
@@ -616,13 +615,16 @@ fn visibility_modifier(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Option<String> {
 }
 
 // HIR omits cfg-stripped fields, so uniformity must come from the complete source declaration.
-fn source_field_uniform_visibility(tcx: TyCtxt<'_>, item_span: rustc_span::Span) -> Option<String> {
+fn source_fields_have_uniform_visibility(tcx: TyCtxt<'_>, item_span: rustc_span::Span) -> bool {
     if item_span.from_expansion() {
-        return None;
+        return false;
     }
-    let source = tcx.sess.source_map().span_to_snippet(item_span).ok()?;
+    let Ok(source) = tcx.sess.source_map().span_to_snippet(item_span) else {
+        return false;
+    };
     let mut parser = match rustc_parse::new_parser_from_source_str(
         &tcx.sess.psess,
+        // The source map otherwise reuses the first parsed snippet for later items.
         FileName::Custom(format!(
             "hawk field declaration {}:{}",
             item_span.lo().to_u32(),
@@ -636,38 +638,34 @@ fn source_field_uniform_visibility(tcx: TyCtxt<'_>, item_span: rustc_span::Span)
             for error in errors {
                 error.cancel();
             }
-            return None;
+            return false;
         }
     };
     let item = match parser.parse_item(ForceCollect::No, AllowConstBlockItems::Yes) {
         Ok(Some(item)) => item,
-        Ok(None) => return None,
+        Ok(None) => return false,
         Err(error) => {
             error.cancel();
-            return None;
+            return false;
         }
     };
     let fields = match &item.kind {
         ast::ItemKind::Struct(_, _, data) | ast::ItemKind::Union(_, _, data) => data.fields(),
-        _ => return None,
+        _ => return false,
     };
-    let visibilities: Vec<_> = fields
-        .iter()
-        .map(|field| match field.vis.kind {
-            ast::VisibilityKind::Inherited => Some(String::new()),
-            _ => tcx
-                .sess
-                .source_map()
-                .span_to_snippet(field.vis.span)
-                .ok()
-                .and_then(|visibility| compact_visibility_modifier(&visibility)),
-        })
-        .collect();
-    let first = visibilities.first()?.as_ref()?.clone();
-    visibilities
-        .iter()
-        .all(|visibility| visibility.as_ref() == Some(&first))
-        .then_some(first)
+    let mut visibilities = fields.iter().map(|field| match field.vis.kind {
+        ast::VisibilityKind::Inherited => Some(String::new()),
+        _ => tcx
+            .sess
+            .source_map()
+            .span_to_snippet(field.vis.span)
+            .ok()
+            .and_then(|visibility| compact_visibility_modifier(&visibility)),
+    });
+    let Some(Some(first)) = visibilities.next() else {
+        return false;
+    };
+    visibilities.all(|visibility| visibility.as_ref() == Some(&first))
 }
 
 fn compact_visibility_modifier(visibility: &str) -> Option<String> {
@@ -771,7 +769,7 @@ fn definition(
             && restricted_visibility == Some(ty::Visibility::Restricted(CRATE_DEF_ID)),
         visible_reexport_api: kind == DefinitionKind::Reexport && has_explicit_visibility,
         module_scope: module_scope(tcx, def_id),
-        field_group: None,
+        uniform_field_group: None,
     }
 }
 

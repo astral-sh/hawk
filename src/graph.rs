@@ -51,15 +51,7 @@ pub struct Definition {
     #[serde(default)]
     pub module_scope: Vec<String>,
     #[serde(default)]
-    pub field_group: Option<FieldGroup>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct FieldGroup {
-    pub parent: String,
-    #[serde(default)]
-    pub source: Option<Span>,
-    pub uniform_visibility: Option<String>,
+    pub uniform_field_group: Option<Span>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -99,7 +91,7 @@ pub enum DefinitionKind {
     Other,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub struct Span {
     pub file: String,
     pub line: usize,
@@ -176,6 +168,21 @@ struct DefinitionIdentity<'a> {
 }
 
 pub fn analyze<'a>(
+    production_fragments: &'a [Fragment],
+    test_fragments: &'a [Fragment],
+    candidate_crates: &HashSet<String>,
+    excluded_crates: &HashSet<String>,
+) -> Vec<Finding<'a>> {
+    analyze_with_options(
+        production_fragments,
+        test_fragments,
+        candidate_crates,
+        excluded_crates,
+        false,
+    )
+}
+
+pub fn analyze_with_options<'a>(
     production_fragments: &'a [Fragment],
     test_fragments: &'a [Fragment],
     candidate_crates: &HashSet<String>,
@@ -422,25 +429,11 @@ pub fn analyze<'a>(
     findings
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-struct FieldGroupIdentity<'a> {
-    crate_name: &'a str,
-    parent: &'a str,
-    file: &'a str,
-    line: usize,
-    column: usize,
-}
-
-fn field_group_identity<'a>(definition: &'a Definition) -> Option<FieldGroupIdentity<'a>> {
-    let group = definition.field_group.as_ref()?;
-    let source = group.source.as_ref()?;
-    Some(FieldGroupIdentity {
-        crate_name: &definition.crate_name,
-        parent: &group.parent,
-        file: &source.file,
-        line: source.line,
-        column: source.column,
-    })
+fn field_group_identity(definition: &Definition) -> Option<(&str, &Span)> {
+    Some((
+        definition.crate_name.as_str(),
+        definition.uniform_field_group.as_ref()?,
+    ))
 }
 
 fn suppress_uniform_field_visibility_findings<'a>(
@@ -450,34 +443,10 @@ fn suppress_uniform_field_visibility_findings<'a>(
     required_scopes: &HashMap<&str, RequiredScope>,
     equivalents: &HashMap<&str, Vec<&str>>,
 ) {
-    let mut observed_visibilities: HashMap<FieldGroupIdentity<'_>, HashSet<Option<&str>>> =
-        HashMap::new();
-    for definition in definitions {
-        let Some(group) = &definition.field_group else {
-            continue;
-        };
-        let Some(identity) = field_group_identity(definition) else {
-            continue;
-        };
-        observed_visibilities
-            .entry(identity)
-            .or_default()
-            .insert(group.uniform_visibility.as_deref());
-    }
-    let uniform_groups: HashSet<FieldGroupIdentity<'_>> = observed_visibilities
-        .into_iter()
-        .filter_map(|(group, visibilities)| {
-            (visibilities.len() == 1 && !visibilities.contains(&None)).then_some(group)
-        })
-        .collect();
-
-    let protected_groups: HashSet<FieldGroupIdentity<'_>> = definitions
+    let protected_groups: HashSet<_> = definitions
         .iter()
         .filter_map(|definition| {
             let identity = field_group_identity(definition)?;
-            if !uniform_groups.contains(&identity) {
-                return None;
-            }
             let required = if definition.public_api {
                 required_public_visibility.contains(definition.id.as_str())
             } else if definition.restricted_visible_api {
@@ -847,8 +816,8 @@ fn reachable<'a>(
 #[cfg(test)]
 mod tests {
     use super::{
-        Definition, DefinitionKind, Edge, EdgeKind, FieldGroup, Finding, FindingKind, Fragment,
-        Span, VisibilityReduction, analyze as analyze_with_tests,
+        Definition, DefinitionKind, Edge, EdgeKind, Finding, FindingKind, Fragment, Span,
+        VisibilityReduction, analyze as analyze_with_tests, analyze_with_options,
     };
     use std::collections::HashSet;
 
@@ -856,11 +825,11 @@ mod tests {
         fragments: &'a [Fragment],
         excluded_crates: &HashSet<String>,
     ) -> Vec<Finding<'a>> {
-        analyze_with_tests(fragments, &[], &candidate_crates(), excluded_crates, false)
+        analyze_with_tests(fragments, &[], &candidate_crates(), excluded_crates)
     }
 
     fn analyze_preserving_uniform_fields<'a>(fragments: &'a [Fragment]) -> Vec<Finding<'a>> {
-        analyze_with_tests(fragments, &[], &candidate_crates(), &HashSet::new(), true)
+        analyze_with_options(fragments, &[], &candidate_crates(), &HashSet::new(), true)
     }
 
     fn candidate_crates() -> HashSet<String> {
@@ -882,7 +851,7 @@ mod tests {
             crate_visible_api: false,
             visible_reexport_api: false,
             module_scope: vec![],
-            field_group: None,
+            uniform_field_group: None,
         }
     }
 
@@ -916,25 +885,21 @@ mod tests {
         definition
     }
 
-    fn uniform_field(definition: Definition, parent: &str, visibility: Option<&str>) -> Definition {
-        uniform_field_at(definition, parent, visibility, 1)
+    fn field(mut definition: Definition) -> Definition {
+        definition.kind = DefinitionKind::Field;
+        definition
     }
 
-    fn uniform_field_at(
-        mut definition: Definition,
-        parent: &str,
-        visibility: Option<&str>,
-        line: usize,
-    ) -> Definition {
-        definition.kind = DefinitionKind::Field;
-        definition.field_group = Some(FieldGroup {
-            parent: parent.into(),
-            source: Some(Span {
-                file: "lib.rs".into(),
-                line,
-                column: 1,
-            }),
-            uniform_visibility: visibility.map(str::to_owned),
+    fn uniform_field(definition: Definition) -> Definition {
+        uniform_field_at(definition, 1)
+    }
+
+    fn uniform_field_at(mut definition: Definition, line: usize) -> Definition {
+        definition = field(definition);
+        definition.uniform_field_group = Some(Span {
+            file: "lib.rs".into(),
+            line,
+            column: 1,
         });
         definition
     }
@@ -1067,8 +1032,8 @@ mod tests {
     fn uniform_public_field_visibility_is_preserved_when_enabled() {
         let mut input = fragments(
             vec![
-                uniform_field(node("required", "lib", true), "Fields", Some("pub")),
-                uniform_field(node("internal", "lib", true), "Fields", Some("pub")),
+                uniform_field(node("required", "lib", true)),
+                uniform_field(node("internal", "lib", true)),
                 node("entry", "lib", false),
             ],
             vec![Edge {
@@ -1101,8 +1066,8 @@ mod tests {
     fn uniform_field_visibility_does_not_suppress_dead_public() {
         let mut input = fragments(
             vec![
-                uniform_field(node("required", "lib", true), "Fields", Some("pub")),
-                uniform_field(node("dead", "lib", true), "Fields", Some("pub")),
+                uniform_field(node("required", "lib", true)),
+                uniform_field(node("dead", "lib", true)),
             ],
             vec![],
         );
@@ -1120,11 +1085,11 @@ mod tests {
     }
 
     #[test]
-    fn incomplete_or_mixed_field_groups_do_not_preserve_visibility() {
+    fn fields_without_a_uniform_group_do_not_preserve_visibility() {
         let mut input = fragments(
             vec![
-                uniform_field(node("required", "lib", true), "Fields", None),
-                uniform_field(node("internal", "lib", true), "Fields", None),
+                field(node("required", "lib", true)),
+                field(node("internal", "lib", true)),
                 node("entry", "lib", false),
             ],
             vec![Edge {
@@ -1156,12 +1121,8 @@ mod tests {
     fn test_requirement_preserves_uniform_production_field_visibility() {
         let mut production_input = fragments(
             vec![
-                uniform_field(
-                    node("production_required", "lib", true),
-                    "Fields",
-                    Some("pub"),
-                ),
-                uniform_field(node("internal", "lib", true), "Fields", Some("pub")),
+                uniform_field(node("production_required", "lib", true)),
+                uniform_field(node("internal", "lib", true)),
                 node("entry", "lib", false),
             ],
             vec![Edge {
@@ -1175,13 +1136,12 @@ mod tests {
             to: "entry".into(),
             kind: EdgeKind::Body,
         });
-        let mut test_required =
-            uniform_field(node("test_required", "lib", true), "Fields", Some("pub"));
+        let mut test_required = uniform_field(node("test_required", "lib", true));
         test_required.name = "production_required".into();
         let mut test_input = test_fragments(vec![test_required], vec![]);
         test_input[0].edges[0].to = "test_required".into();
 
-        let findings = analyze_with_tests(
+        let findings = analyze_with_options(
             &production_input,
             &test_input,
             &candidate_crates(),
@@ -1197,8 +1157,6 @@ mod tests {
         let mut production_input = fragments(
             vec![uniform_field_at(
                 node("production_required", "lib", true),
-                "Fields",
-                Some("pub"),
                 1,
             )],
             vec![],
@@ -1211,12 +1169,7 @@ mod tests {
         let test_input = test_fragments(
             vec![
                 node("test_entry", "lib", true),
-                uniform_field_at(
-                    node("test_internal", "lib", true),
-                    "Fields",
-                    Some("pub"),
-                    10,
-                ),
+                uniform_field_at(node("test_internal", "lib", true), 10),
             ],
             vec![Edge {
                 from: "test_entry".into(),
@@ -1225,7 +1178,7 @@ mod tests {
             }],
         );
 
-        let findings = analyze_with_tests(
+        let findings = analyze_with_options(
             &production_input,
             &test_input,
             &candidate_crates(),
@@ -1264,16 +1217,14 @@ mod tests {
 
     #[test]
     fn uniform_crate_visible_field_visibility_is_preserved_when_required() {
-        let required = uniform_field(
-            crate_visible_node("scoped::nested::required", &["scoped", "nested"]),
-            "scoped::nested::Fields",
-            Some("pub(crate)"),
-        );
-        let internal = uniform_field(
-            crate_visible_node("scoped::nested::internal", &["scoped", "nested"]),
-            "scoped::nested::Fields",
-            Some("pub(crate)"),
-        );
+        let required = uniform_field(crate_visible_node(
+            "scoped::nested::required",
+            &["scoped", "nested"],
+        ));
+        let internal = uniform_field(crate_visible_node(
+            "scoped::nested::internal",
+            &["scoped", "nested"],
+        ));
         let input = fragments(
             vec![
                 required,
@@ -1304,16 +1255,14 @@ mod tests {
 
     #[test]
     fn uniform_restricted_field_visibility_is_preserved_when_required() {
-        let required = uniform_field(
-            restricted_visible_node("scoped::nested::required", &["scoped", "nested"]),
-            "scoped::nested::Fields",
-            Some("pub(super)"),
-        );
-        let internal = uniform_field(
-            restricted_visible_node("scoped::nested::internal", &["scoped", "nested"]),
-            "scoped::nested::Fields",
-            Some("pub(super)"),
-        );
+        let required = uniform_field(restricted_visible_node(
+            "scoped::nested::required",
+            &["scoped", "nested"],
+        ));
+        let internal = uniform_field(restricted_visible_node(
+            "scoped::nested::internal",
+            &["scoped", "nested"],
+        ));
         let input = fragments(
             vec![
                 required,
@@ -1340,16 +1289,14 @@ mod tests {
 
     #[test]
     fn reducible_sibling_does_not_preserve_uniform_field_visibility() {
-        let parent_visible = uniform_field(
-            crate_visible_node("scoped::nested::parent_visible", &["scoped", "nested"]),
-            "scoped::nested::Fields",
-            Some("pub(crate)"),
-        );
-        let private = uniform_field(
-            crate_visible_node("scoped::nested::private", &["scoped", "nested"]),
-            "scoped::nested::Fields",
-            Some("pub(crate)"),
-        );
+        let parent_visible = uniform_field(crate_visible_node(
+            "scoped::nested::parent_visible",
+            &["scoped", "nested"],
+        ));
+        let private = uniform_field(crate_visible_node(
+            "scoped::nested::private",
+            &["scoped", "nested"],
+        ));
         let input = fragments(
             vec![
                 parent_visible,
@@ -1631,13 +1578,8 @@ mod tests {
             }],
         );
 
-        let findings = analyze_with_tests(
-            &input,
-            &test_input,
-            &candidate_crates(),
-            &HashSet::new(),
-            false,
-        );
+        let findings =
+            analyze_with_tests(&input, &test_input, &candidate_crates(), &HashSet::new());
 
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].kind, FindingKind::UnnecessaryPublic);
@@ -1667,7 +1609,6 @@ mod tests {
             &test_input,
             &candidate_crates(),
             &HashSet::new(),
-            false,
         );
 
         assert_eq!(findings.len(), 1);
@@ -1688,7 +1629,6 @@ mod tests {
             &test_input,
             &candidate_crates(),
             &HashSet::new(),
-            false,
         );
 
         assert_eq!(findings.len(), 1);
@@ -1712,7 +1652,6 @@ mod tests {
                 &test_input,
                 &candidate_crates(),
                 &HashSet::new(),
-                false,
             )
             .is_empty()
         );
@@ -1740,7 +1679,6 @@ mod tests {
                 &test_input,
                 &candidate_crates(),
                 &HashSet::new(),
-                false,
             )
             .is_empty()
         );
@@ -1759,7 +1697,6 @@ mod tests {
                 &test_input,
                 &candidate_crates(),
                 &HashSet::new(),
-                false,
             )
             .is_empty()
         );

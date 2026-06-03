@@ -554,10 +554,7 @@ mod tests {
     use cargo_platform::Cfg;
 
     use super::{AnalysisTarget, Config, ConfigDiagnosticKind};
-    use crate::graph::{
-        Definition, DefinitionKind, Finding, FindingKind, Fragment, Span,
-        analyze as analyze_with_options,
-    };
+    use crate::graph::{Definition, DefinitionKind, FindingKind, Fragment, Span, analyze};
 
     fn fragment() -> Fragment {
         Fragment {
@@ -576,7 +573,7 @@ mod tests {
                 crate_visible_api: false,
                 visible_reexport_api: false,
                 module_scope: vec![],
-                field_group: None,
+                uniform_field_group: None,
             }],
             edges: vec![],
             roots: vec![],
@@ -599,21 +596,6 @@ mod tests {
         HashSet::from(["library".to_owned()])
     }
 
-    fn analyze<'a>(
-        production_fragments: &'a [Fragment],
-        test_fragments: &'a [Fragment],
-        candidate_crates: &HashSet<String>,
-        excluded_crates: &HashSet<String>,
-    ) -> Vec<Finding<'a>> {
-        analyze_with_options(
-            production_fragments,
-            test_fragments,
-            candidate_crates,
-            excluded_crates,
-            false,
-        )
-    }
-
     fn same_named_fragment() -> Fragment {
         let mut fragment = fragment();
         fragment.definitions = vec![
@@ -628,7 +610,7 @@ mod tests {
                 crate_visible_api: false,
                 visible_reexport_api: false,
                 module_scope: vec![],
-                field_group: None,
+                uniform_field_group: None,
             },
             Definition {
                 id: "constant".into(),
@@ -641,7 +623,7 @@ mod tests {
                 crate_visible_api: false,
                 visible_reexport_api: false,
                 module_scope: vec![],
-                field_group: None,
+                uniform_field_group: None,
             },
         ];
         fragment
@@ -665,7 +647,7 @@ mod tests {
                 crate_visible_api: false,
                 visible_reexport_api: false,
                 module_scope: vec![],
-                field_group: None,
+                uniform_field_group: None,
             },
             Definition {
                 id: "generated-unused".into(),
@@ -682,7 +664,7 @@ mod tests {
                 crate_visible_api: false,
                 visible_reexport_api: false,
                 module_scope: vec![],
-                field_group: None,
+                uniform_field_group: None,
             },
             Definition {
                 id: "outside".into(),
@@ -699,7 +681,7 @@ mod tests {
                 crate_visible_api: false,
                 visible_reexport_api: false,
                 module_scope: vec![],
-                field_group: None,
+                uniform_field_group: None,
             },
             Definition {
                 id: "generatedish".into(),
@@ -716,7 +698,7 @@ mod tests {
                 crate_visible_api: false,
                 visible_reexport_api: false,
                 module_scope: vec![],
-                field_group: None,
+                uniform_field_group: None,
             },
         ];
         fragment

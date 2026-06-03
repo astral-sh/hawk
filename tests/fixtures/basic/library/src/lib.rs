@@ -297,14 +297,12 @@ pub struct UniformProductFields {
 }
 
 pub fn uniform_product_fields() -> UniformProductFields {
-    UniformProductFields {
+    let fields = UniformProductFields {
         used_across_crates: 1,
         used_inside_crate: 2,
-    }
-}
-
-pub fn exercise_uniform_product_fields() {
-    let _ = uniform_product_fields().used_inside_crate;
+    };
+    let _ = fields.used_inside_crate;
+    fields
 }
 
 pub struct CfgMixedProductFields {
@@ -315,14 +313,12 @@ pub struct CfgMixedProductFields {
 }
 
 pub fn cfg_mixed_product_fields() -> CfgMixedProductFields {
-    CfgMixedProductFields {
+    let fields = CfgMixedProductFields {
         used_across_crates: 1,
         used_inside_crate: 2,
-    }
-}
-
-pub fn exercise_cfg_mixed_product_fields() {
-    let _ = cfg_mixed_product_fields().used_inside_crate;
+    };
+    let _ = fields.used_inside_crate;
+    fields
 }
 
 #[cfg(not(test))]
@@ -343,12 +339,10 @@ pub fn cfg_alternative_fields() -> CfgAlternativeFields {
 }
 
 #[cfg(test)]
-mod cfg_alternative_tests {
-    #[test]
-    fn exercises_internal_field() {
-        let fields = super::CfgAlternativeFields {
-            used_inside_crate: 1,
-        };
-        let _ = fields.used_inside_crate;
-    }
+#[test]
+fn exercises_cfg_alternative_field() {
+    let fields = CfgAlternativeFields {
+        used_inside_crate: 1,
+    };
+    let _ = fields.used_inside_crate;
 }

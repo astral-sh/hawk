@@ -136,8 +136,6 @@ fn diagnoses_public_surface_of_a_binary_product() {
     let diagnostics = stdout
         .strip_suffix(&summary)
         .expect("target-specific findings summary");
-    assert!(diagnostics.contains("`CfgMixedProductFields::used_inside_crate`"));
-    assert!(diagnostics.contains("`CfgAlternativeFields::used_inside_crate`"));
     insta::assert_snapshot!(diagnostics, @r###"
     warning[hawk::unnecessary_public]: `internal_helper` is public but all reachable uses are within `library`; it can be `pub(crate)`
       --> library/src/lib.rs:5:1
@@ -371,23 +369,23 @@ fn diagnoses_public_surface_of_a_binary_product() {
         = help: change this declaration to `pub(crate)`
 
     warning[hawk::unnecessary_public]: `CfgMixedProductFields::used_inside_crate` is public but all reachable uses are within `library`; it can be `pub(crate)`
-      --> library/src/lib.rs:312:5
+      --> library/src/lib.rs:310:5
         |
-    312 |     pub used_inside_crate: u8,
+    310 |     pub used_inside_crate: u8,
         |     ^^^ public declaration
         = help: change this declaration to `pub(crate)`
 
     warning[hawk::unnecessary_public]: `CfgAlternativeFields` is public but is needed only by tests; it can be `pub(crate)`
-      --> library/src/lib.rs:334:1
+      --> library/src/lib.rs:330:1
         |
-    334 | pub struct CfgAlternativeFields {
+    330 | pub struct CfgAlternativeFields {
         | ^^^ public declaration
         = help: change this declaration to `pub(crate)`
 
     warning[hawk::unnecessary_public]: `CfgAlternativeFields::used_inside_crate` is public but is needed only by tests; it can be `pub(crate)`
-      --> library/src/lib.rs:335:5
+      --> library/src/lib.rs:331:5
         |
-    335 |     pub used_inside_crate: u8,
+    331 |     pub used_inside_crate: u8,
         |     ^^^ public declaration
         = help: change this declaration to `pub(crate)`
 

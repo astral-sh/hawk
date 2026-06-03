@@ -14,7 +14,8 @@ use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser, ValueEnum};
 
 use crate::config::{AnalysisTarget, Config, ConfigDiagnostic, ConfigDiagnosticKind};
 use crate::graph::{
-    Definition, DefinitionKind, Finding, FindingKind, FixPlan, FixTarget, Fragment, Span, analyze,
+    Definition, DefinitionKind, Finding, FindingKind, FixPlan, FixTarget, Fragment, Span,
+    analyze_with_options,
 };
 
 #[derive(Debug, Parser)]
@@ -553,7 +554,7 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
                 &analysis_target,
                 &production_fragments,
                 &test_fragments,
-                analyze(
+                analyze_with_options(
                     &production_fragments,
                     &test_fragments,
                     &candidate_crates,
@@ -667,7 +668,7 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
         &analysis_target,
         &production_fragments,
         &test_fragments,
-        analyze(
+        analyze_with_options(
             &production_fragments,
             &test_fragments,
             &candidate_crates,
@@ -1502,7 +1503,7 @@ mod tests {
             crate_visible_api: false,
             visible_reexport_api: false,
             module_scope: vec![],
-            field_group: None,
+            uniform_field_group: None,
         };
         let finding = Finding {
             kind: FindingKind::UnnecessaryPublic,
@@ -1552,7 +1553,7 @@ mod tests {
             crate_visible_api: true,
             visible_reexport_api: false,
             module_scope: vec!["scoped".into()],
-            field_group: None,
+            uniform_field_group: None,
         };
         let finding = Finding {
             kind: FindingKind::UnnecessaryCrateVisibility,
@@ -1601,7 +1602,7 @@ mod tests {
             crate_visible_api: false,
             visible_reexport_api: false,
             module_scope: vec!["scoped".into()],
-            field_group: None,
+            uniform_field_group: None,
         };
         let finding = Finding {
             kind: FindingKind::UnnecessaryRestrictedVisibility,
@@ -1646,7 +1647,7 @@ mod tests {
             crate_visible_api: false,
             visible_reexport_api: false,
             module_scope: vec![],
-            field_group: None,
+            uniform_field_group: None,
         };
         let finding = Finding {
             kind: FindingKind::DeadPublic,
