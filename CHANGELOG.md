@@ -2,6 +2,14 @@
 
 <!-- prettier-ignore-start -->
 
+## 0.1.3
+
+Released on 2026-06-02.
+
+- Add restricted visibility lints ([#69](https://github.com/astral-sh/hawk/pull/69))
+- Support prebuilt release binaries ([#71](https://github.com/astral-sh/hawk/pull/71))
+- Use a portable default target directory ([#70](https://github.com/astral-sh/hawk/pull/70))
+
 ## 0.1.2
 
 Released on 2026-05-28.
