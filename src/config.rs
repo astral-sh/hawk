@@ -14,6 +14,7 @@ use crate::graph::{Definition, DefinitionKind, Finding, FindingKind, Fragment};
 pub struct Config {
     path: Option<PathBuf>,
     source: String,
+    preserve_uniform_field_visibility: bool,
     overrides: Vec<LintOverride>,
     exclusions: Vec<DiagnosticExclusion>,
     production: Vec<ProductionConsumer>,
@@ -93,6 +94,8 @@ pub struct AppliedFindings<'findings, 'config> {
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawConfig {
+    #[serde(default, rename = "preserve-uniform-field-visibility")]
+    preserve_uniform_field_visibility: bool,
     #[serde(default, rename = "override")]
     overrides: Vec<toml::Spanned<RawLintOverride>>,
     #[serde(default, rename = "exclude")]
@@ -296,6 +299,7 @@ impl Config {
         Ok(Self {
             path: Some(path),
             source,
+            preserve_uniform_field_visibility: raw.preserve_uniform_field_visibility,
             overrides,
             exclusions,
             production,
@@ -309,6 +313,10 @@ impl Config {
         self.production
             .iter()
             .filter(move |consumer| consumer.applies_to(target))
+    }
+
+    pub fn preserve_uniform_field_visibility(&self) -> bool {
+        self.preserve_uniform_field_visibility
     }
 
     pub fn apply<'findings, 'config>(
@@ -546,7 +554,10 @@ mod tests {
     use cargo_platform::Cfg;
 
     use super::{AnalysisTarget, Config, ConfigDiagnosticKind};
-    use crate::graph::{Definition, DefinitionKind, FindingKind, Fragment, Span, analyze};
+    use crate::graph::{
+        Definition, DefinitionKind, Finding, FindingKind, Fragment, Span,
+        analyze as analyze_with_options,
+    };
 
     fn fragment() -> Fragment {
         Fragment {
@@ -565,6 +576,7 @@ mod tests {
                 crate_visible_api: false,
                 visible_reexport_api: false,
                 module_scope: vec![],
+                field_group: None,
             }],
             edges: vec![],
             roots: vec![],
@@ -587,6 +599,21 @@ mod tests {
         HashSet::from(["library".to_owned()])
     }
 
+    fn analyze<'a>(
+        production_fragments: &'a [Fragment],
+        test_fragments: &'a [Fragment],
+        candidate_crates: &HashSet<String>,
+        excluded_crates: &HashSet<String>,
+    ) -> Vec<Finding<'a>> {
+        analyze_with_options(
+            production_fragments,
+            test_fragments,
+            candidate_crates,
+            excluded_crates,
+            false,
+        )
+    }
+
     fn same_named_fragment() -> Fragment {
         let mut fragment = fragment();
         fragment.definitions = vec![
@@ -601,6 +628,7 @@ mod tests {
                 crate_visible_api: false,
                 visible_reexport_api: false,
                 module_scope: vec![],
+                field_group: None,
             },
             Definition {
                 id: "constant".into(),
@@ -613,6 +641,7 @@ mod tests {
                 crate_visible_api: false,
                 visible_reexport_api: false,
                 module_scope: vec![],
+                field_group: None,
             },
         ];
         fragment
@@ -636,6 +665,7 @@ mod tests {
                 crate_visible_api: false,
                 visible_reexport_api: false,
                 module_scope: vec![],
+                field_group: None,
             },
             Definition {
                 id: "generated-unused".into(),
@@ -652,6 +682,7 @@ mod tests {
                 crate_visible_api: false,
                 visible_reexport_api: false,
                 module_scope: vec![],
+                field_group: None,
             },
             Definition {
                 id: "outside".into(),
@@ -668,6 +699,7 @@ mod tests {
                 crate_visible_api: false,
                 visible_reexport_api: false,
                 module_scope: vec![],
+                field_group: None,
             },
             Definition {
                 id: "generatedish".into(),
@@ -684,6 +716,7 @@ mod tests {
                 crate_visible_api: false,
                 visible_reexport_api: false,
                 module_scope: vec![],
+                field_group: None,
             },
         ];
         fragment
@@ -1085,5 +1118,19 @@ reason = "shipped on Windows"
                 .count(),
             0
         );
+    }
+
+    #[test]
+    fn uniform_field_visibility_preservation_is_opt_in() {
+        let directory = tempfile::tempdir().expect("temporary configuration directory");
+        let path = directory.path().join("hawk.toml");
+
+        let default = Config::load(directory.path(), None).expect("load default configuration");
+        assert!(!default.preserve_uniform_field_visibility());
+
+        std::fs::write(&path, "preserve-uniform-field-visibility = true\n")
+            .expect("write configuration");
+        let configured = Config::load(directory.path(), Some(&path)).expect("load configuration");
+        assert!(configured.preserve_uniform_field_visibility());
     }
 }

@@ -249,6 +249,13 @@ additionally suggest `pub(super)` when every compiled use fits within the
 defining module's parent. This preference is reported as
 `hawk::unnecessary_crate_visibility` and is allow-by-default.
 
+With `preserve-uniform-field-visibility = true`, Hawk also treats a complete,
+source-written struct or union field list as a visibility group when every
+field has the same written visibility. If one member semantically requires the
+group's current visibility, reducible visibility findings for its siblings are
+omitted. Dead-public findings remain independent, and overrides, exclusions,
+and lint levels do not establish a visibility requirement.
+
 Enum variants are a special case. Hawk can report an unreachable public
 variant as dead surface requiring removal together with any remaining
 unreachable uses, but it does not report a reachable variant as unnecessarily

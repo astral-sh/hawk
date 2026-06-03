@@ -290,3 +290,19 @@ pub fn test_only_helper() {}
 
 // Keep an unrelated machine-applicable rustc suggestion in the fix fixture.
 use std::fmt::Debug;
+
+pub struct UniformProductFields {
+    pub used_across_crates: u8,
+    pub used_inside_crate: u8,
+}
+
+pub fn uniform_product_fields() -> UniformProductFields {
+    UniformProductFields {
+        used_across_crates: 1,
+        used_inside_crate: 2,
+    }
+}
+
+pub fn exercise_uniform_product_fields() {
+    let _ = uniform_product_fields().used_inside_crate;
+}

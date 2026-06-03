@@ -120,10 +120,13 @@ because rustc privacy-checks dead items as well as production-reachable ones
 and `pub` is the narrowest Rust visibility available for those uses.
 
 An optional workspace-root `hawk.toml` configures production targets,
-diagnostic overrides, and broad diagnostic exclusions. A `[[production]]`
-entry names a package and binary target in the selected workspace, optionally
-scoped to a Cargo-style target name or `cfg(...)` platform expression, and its
-compiled references participate in production reachability and required-public
+diagnostic policy, overrides, and broad diagnostic exclusions. The opt-in
+`preserve-uniform-field-visibility` policy omits reducible field-visibility
+findings when a complete, uniformly visible field group has a sibling that
+semantically requires the current visibility. A `[[production]]` entry names a
+package and binary target in the selected workspace, optionally scoped to a
+Cargo-style target name or `cfg(...)` platform expression, and its compiled
+references participate in production reachability and required-public
 analysis. An `[[override]]` entry identifies an exact lint, crate, and item
 path under the same optional target scoping, with an optional item kind to
 disambiguate declarations in separate Rust namespaces. `allow` suppresses a

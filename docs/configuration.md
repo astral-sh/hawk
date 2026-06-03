@@ -34,6 +34,24 @@ All configured binaries are analyzed with the same `--all-features` and
 compilation target. Hawk intentionally does not infer production targets from
 the workspace: configure each intended target explicitly.
 
+## Uniform field visibility
+
+Set `preserve-uniform-field-visibility = true` to retain a struct or union's
+intentional uniform field visibility:
+
+```toml
+preserve-uniform-field-visibility = true
+```
+
+When every source-written field has the same visibility and at least one field
+semantically requires that visibility, Hawk does not suggest reducing the
+visibility of its siblings. The policy applies to public and restricted
+visibility reductions, but does not suppress `hawk::dead_public`.
+
+This setting is disabled by default. It does not apply to mixed-visibility
+declarations or declarations whose complete source field list is unavailable,
+such as macro-generated structs.
+
 ## Overrides
 
 An override records an intentional finding without changing the analysis:

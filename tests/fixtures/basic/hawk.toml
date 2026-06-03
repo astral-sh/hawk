@@ -1,3 +1,5 @@
+preserve-uniform-field-visibility = true
+
 [[production]]
 package = "app"
 bin = "app"

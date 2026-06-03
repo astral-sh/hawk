@@ -22,7 +22,7 @@ use rustc_span::hygiene::{ExpnKind, MacroKind};
 use rustc_span::{BytePos, Pos};
 
 use crate::graph::{
-    Definition, DefinitionKind, Edge, EdgeKind, FindingKind, FixPlan, Fragment, Span,
+    Definition, DefinitionKind, Edge, EdgeKind, FieldGroup, FindingKind, FixPlan, Fragment, Span,
     VisibilityReduction,
 };
 
@@ -293,6 +293,26 @@ fn collect_fragment(
         });
         match item.kind {
             hir::ItemKind::Struct(_, _, data) | hir::ItemKind::Union(_, _, data) => {
+                let uniform_visibility = if !item.span.from_expansion()
+                    && data
+                        .fields()
+                        .iter()
+                        .all(|field| !tcx.def_span(field.def_id).from_expansion())
+                {
+                    let mut visibilities = data
+                        .fields()
+                        .iter()
+                        .map(|field| visibility_modifier(tcx, field.def_id).unwrap_or_default());
+                    visibilities
+                        .next()
+                        .filter(|first| visibilities.all(|visibility| visibility == *first))
+                } else {
+                    None
+                };
+                let field_group = FieldGroup {
+                    parent: tcx.def_path_str(item.owner_id.def_id.to_def_id()),
+                    uniform_visibility,
+                };
                 for field in data.fields() {
                     let field_span = tcx.def_span(field.def_id);
                     if let Some(index) = source_item_index
@@ -305,13 +325,15 @@ fn collect_fragment(
                     if field_span.from_expansion() {
                         generated_fields.push(field.def_id);
                     }
-                    definitions.push(definition(
+                    let mut field_definition = definition(
                         tcx,
                         field.def_id,
                         &crate_name,
                         DefinitionKind::Field,
                         is_public_candidate(tcx, field.def_id, test_surface),
-                    ));
+                    );
+                    field_definition.field_group = Some(field_group.clone());
+                    definitions.push(field_definition);
                     defined.insert(field.def_id);
                     adt_members.push((field.def_id, item.owner_id.def_id));
                 }
@@ -705,6 +727,7 @@ fn definition(
             && restricted_visibility == Some(ty::Visibility::Restricted(CRATE_DEF_ID)),
         visible_reexport_api: kind == DefinitionKind::Reexport && has_explicit_visibility,
         module_scope: module_scope(tcx, def_id),
+        field_group: None,
     }
 }
 

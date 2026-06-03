@@ -558,6 +558,7 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
                     &test_fragments,
                     &candidate_crates,
                     &excluded,
+                    config.preserve_uniform_field_visibility(),
                 ),
             );
             let fixable_findings: Vec<_> = initial_findings
@@ -671,6 +672,7 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
             &test_fragments,
             &candidate_crates,
             &excluded,
+            config.preserve_uniform_field_visibility(),
         ),
     );
     let mut diagnostics = String::new();
@@ -1500,6 +1502,7 @@ mod tests {
             crate_visible_api: false,
             visible_reexport_api: false,
             module_scope: vec![],
+            field_group: None,
         };
         let finding = Finding {
             kind: FindingKind::UnnecessaryPublic,
@@ -1549,6 +1552,7 @@ mod tests {
             crate_visible_api: true,
             visible_reexport_api: false,
             module_scope: vec!["scoped".into()],
+            field_group: None,
         };
         let finding = Finding {
             kind: FindingKind::UnnecessaryCrateVisibility,
@@ -1597,6 +1601,7 @@ mod tests {
             crate_visible_api: false,
             visible_reexport_api: false,
             module_scope: vec!["scoped".into()],
+            field_group: None,
         };
         let finding = Finding {
             kind: FindingKind::UnnecessaryRestrictedVisibility,
@@ -1641,6 +1646,7 @@ mod tests {
             crate_visible_api: false,
             visible_reexport_api: false,
             module_scope: vec![],
+            field_group: None,
         };
         let finding = Finding {
             kind: FindingKind::DeadPublic,

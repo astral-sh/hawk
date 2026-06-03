@@ -397,17 +397,17 @@ fn diagnoses_public_surface_of_a_binary_product() {
        = help: change this declaration to `pub(crate)`
 
     warning[hawk::unknown_item]: override for `hawk::dead_public` references unknown item `library::removed_api`
-      --> hawk.toml:20:1
+      --> hawk.toml:22:1
        |
-    20 | [[override]]
+    22 | [[override]]
        | ^^^ no matching item was found
       = note: reason: covered by stale selector diagnostic
       = help: remove this override or update its `crate` and `item` selectors
 
     warning[hawk::unfulfilled_expectation]: expected `hawk::dead_public` for `library::PrivateContextOptions`, but no finding was produced
-      --> hawk.toml:27:1
+      --> hawk.toml:29:1
        |
-    27 | [[override]]
+    29 | [[override]]
        | ^^^ unfulfilled expectation
       = note: reason: covered by unfulfilled expectation diagnostic
       = help: remove this expectation or update its `lint` selector
