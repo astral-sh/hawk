@@ -57,6 +57,8 @@ pub struct Definition {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct FieldGroup {
     pub parent: String,
+    #[serde(default)]
+    pub source: Option<Span>,
     pub uniform_visibility: Option<String>,
 }
 
@@ -424,6 +426,21 @@ pub fn analyze<'a>(
 struct FieldGroupIdentity<'a> {
     crate_name: &'a str,
     parent: &'a str,
+    file: &'a str,
+    line: usize,
+    column: usize,
+}
+
+fn field_group_identity<'a>(definition: &'a Definition) -> Option<FieldGroupIdentity<'a>> {
+    let group = definition.field_group.as_ref()?;
+    let source = group.source.as_ref()?;
+    Some(FieldGroupIdentity {
+        crate_name: &definition.crate_name,
+        parent: &group.parent,
+        file: &source.file,
+        line: source.line,
+        column: source.column,
+    })
 }
 
 fn suppress_uniform_field_visibility_findings<'a>(
@@ -439,11 +456,11 @@ fn suppress_uniform_field_visibility_findings<'a>(
         let Some(group) = &definition.field_group else {
             continue;
         };
+        let Some(identity) = field_group_identity(definition) else {
+            continue;
+        };
         observed_visibilities
-            .entry(FieldGroupIdentity {
-                crate_name: &definition.crate_name,
-                parent: &group.parent,
-            })
+            .entry(identity)
             .or_default()
             .insert(group.uniform_visibility.as_deref());
     }
@@ -457,11 +474,7 @@ fn suppress_uniform_field_visibility_findings<'a>(
     let protected_groups: HashSet<FieldGroupIdentity<'_>> = definitions
         .iter()
         .filter_map(|definition| {
-            let group = definition.field_group.as_ref()?;
-            let identity = FieldGroupIdentity {
-                crate_name: &definition.crate_name,
-                parent: &group.parent,
-            };
+            let identity = field_group_identity(definition)?;
             if !uniform_groups.contains(&identity) {
                 return None;
             }
@@ -484,12 +497,8 @@ fn suppress_uniform_field_visibility_findings<'a>(
         if finding.kind == FindingKind::DeadPublic {
             return true;
         }
-        finding.definition.field_group.as_ref().is_none_or(|group| {
-            !protected_groups.contains(&FieldGroupIdentity {
-                crate_name: &finding.definition.crate_name,
-                parent: &group.parent,
-            })
-        })
+        field_group_identity(finding.definition)
+            .is_none_or(|identity| !protected_groups.contains(&identity))
     });
 }
 
@@ -839,7 +848,7 @@ fn reachable<'a>(
 mod tests {
     use super::{
         Definition, DefinitionKind, Edge, EdgeKind, FieldGroup, Finding, FindingKind, Fragment,
-        VisibilityReduction, analyze as analyze_with_tests,
+        Span, VisibilityReduction, analyze as analyze_with_tests,
     };
     use std::collections::HashSet;
 
@@ -907,14 +916,24 @@ mod tests {
         definition
     }
 
-    fn uniform_field(
+    fn uniform_field(definition: Definition, parent: &str, visibility: Option<&str>) -> Definition {
+        uniform_field_at(definition, parent, visibility, 1)
+    }
+
+    fn uniform_field_at(
         mut definition: Definition,
         parent: &str,
         visibility: Option<&str>,
+        line: usize,
     ) -> Definition {
         definition.kind = DefinitionKind::Field;
         definition.field_group = Some(FieldGroup {
             parent: parent.into(),
+            source: Some(Span {
+                file: "lib.rs".into(),
+                line,
+                column: 1,
+            }),
             uniform_visibility: visibility.map(str::to_owned),
         });
         definition
@@ -1171,6 +1190,51 @@ mod tests {
         );
 
         assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn cfg_alternative_declarations_do_not_share_field_visibility_requirements() {
+        let mut production_input = fragments(
+            vec![uniform_field_at(
+                node("production_required", "lib", true),
+                "Fields",
+                Some("pub"),
+                1,
+            )],
+            vec![],
+        );
+        production_input[0].edges.push(Edge {
+            from: "main".into(),
+            to: "production_required".into(),
+            kind: EdgeKind::Body,
+        });
+        let test_input = test_fragments(
+            vec![
+                node("test_entry", "lib", true),
+                uniform_field_at(
+                    node("test_internal", "lib", true),
+                    "Fields",
+                    Some("pub"),
+                    10,
+                ),
+            ],
+            vec![Edge {
+                from: "test_entry".into(),
+                to: "test_internal".into(),
+                kind: EdgeKind::Body,
+            }],
+        );
+
+        let findings = analyze_with_tests(
+            &production_input,
+            &test_input,
+            &candidate_crates(),
+            &HashSet::new(),
+            true,
+        );
+
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].definition.id, "test_internal");
     }
 
     #[test]

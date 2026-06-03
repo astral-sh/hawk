@@ -299,6 +299,7 @@ fn collect_fragment(
                 let uniform_visibility = source_field_uniform_visibility(tcx, item.span);
                 let field_group = FieldGroup {
                     parent: tcx.def_path_str(item.owner_id.def_id.to_def_id()),
+                    source: span(tcx, item.owner_id.def_id),
                     uniform_visibility,
                 };
                 for field in data.fields() {

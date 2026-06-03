@@ -324,3 +324,31 @@ pub fn cfg_mixed_product_fields() -> CfgMixedProductFields {
 pub fn exercise_cfg_mixed_product_fields() {
     let _ = cfg_mixed_product_fields().used_inside_crate;
 }
+
+#[cfg(not(test))]
+pub struct CfgAlternativeFields {
+    pub used_across_crates: u8,
+}
+
+#[cfg(test)]
+pub struct CfgAlternativeFields {
+    pub used_inside_crate: u8,
+}
+
+#[cfg(not(test))]
+pub fn cfg_alternative_fields() -> CfgAlternativeFields {
+    CfgAlternativeFields {
+        used_across_crates: 1,
+    }
+}
+
+#[cfg(test)]
+mod cfg_alternative_tests {
+    #[test]
+    fn exercises_internal_field() {
+        let fields = super::CfgAlternativeFields {
+            used_inside_crate: 1,
+        };
+        let _ = fields.used_inside_crate;
+    }
+}
