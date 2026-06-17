@@ -218,12 +218,23 @@ pub fn analyze_with_options<'a>(
                 .map(|definition| (definition.id.as_str(), fragment.crate_id.as_str()))
         })
         .collect();
+    let definition_compilation_ids: HashMap<&str, usize> = production_fragments
+        .iter()
+        .chain(test_fragments)
+        .enumerate()
+        .flat_map(|(compilation_id, fragment)| {
+            fragment
+                .definitions
+                .iter()
+                .map(move |definition| (definition.id.as_str(), compilation_id))
+        })
+        .collect();
     let edges: Vec<&Edge> = production_fragments
         .iter()
         .chain(test_fragments)
         .flat_map(|fragment| &fragment.edges)
         .collect();
-    let equivalents = equivalent_definitions(&definitions);
+    let equivalents = equivalent_definitions(&definitions, &definition_compilation_ids);
     let required_scopes = required_scopes(&definitions, &edges, &equivalents);
     let adjacency = adjacency(&edges, &equivalents);
 
@@ -774,22 +785,36 @@ fn adjacency<'a>(
 
 fn equivalent_definitions<'a>(
     definitions: &HashMap<&'a str, &'a Definition>,
+    definition_compilation_ids: &HashMap<&'a str, usize>,
 ) -> HashMap<&'a str, Vec<&'a str>> {
-    let mut groups: HashMap<SourceDefinitionIdentity<'a>, Vec<&'a str>> = HashMap::new();
+    let mut groups: HashMap<SourceDefinitionIdentity<'a>, Vec<(&'a str, usize)>> = HashMap::new();
     for definition in definitions.values() {
         groups
             .entry(source_definition_identity(definition))
             .or_default()
-            .push(definition.id.as_str());
+            .push((
+                definition.id.as_str(),
+                definition_compilation_ids[definition.id.as_str()],
+            ));
     }
 
     let mut equivalents: HashMap<&str, Vec<&str>> = HashMap::new();
-    for group in groups.values().filter(|group| group.len() > 1) {
+    for group in groups.values().filter(|group| {
+        group.len() > 1
+            && group
+                .iter()
+                .map(|(_, compilation_id)| compilation_id)
+                .collect::<HashSet<_>>()
+                .len()
+                == group.len()
+    }) {
         for source in group {
-            equivalents
-                .entry(source)
-                .or_default()
-                .extend(group.iter().copied().filter(|target| target != source));
+            equivalents.entry(source.0).or_default().extend(
+                group
+                    .iter()
+                    .map(|target| target.0)
+                    .filter(|target| target != &source.0),
+            );
         }
     }
     equivalents
@@ -1897,6 +1922,18 @@ mod tests {
         );
         input[1].definitions[0].name = "duplicate".into();
         input[1].definitions[1].name = "duplicate".into();
+        let duplicate = input[1].definitions.pop().unwrap();
+        input.push(Fragment {
+            crate_name: "lib".into(),
+            crate_id: "lib-test".into(),
+            is_product_root: false,
+            test_surface: false,
+            definitions: vec![duplicate],
+            edges: vec![],
+            roots: vec![],
+            conservative_roots: vec![],
+            required_public_roots: vec![],
+        });
         input[0].edges.push(Edge {
             from: "main".into(),
             to: "duplicate_b".into(),
@@ -1904,6 +1941,32 @@ mod tests {
         });
 
         assert!(analyze(&input, &HashSet::new()).is_empty());
+    }
+
+    #[test]
+    fn same_span_declarations_in_one_compilation_unit_do_not_share_liveness() {
+        let mut input = fragments(
+            vec![node("first", "lib", true), node("second", "lib", true)],
+            vec![],
+        );
+        for definition in &mut input[1].definitions {
+            definition.span = Some(Span {
+                file: "shared.rs".into(),
+                line: 1,
+                column: 1,
+            });
+        }
+        input[0].edges.push(Edge {
+            from: "main".into(),
+            to: "first".into(),
+            kind: EdgeKind::Body,
+        });
+
+        let findings = analyze(&input, &HashSet::new());
+
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].definition.id, "second");
+        assert_eq!(findings[0].kind, FindingKind::DeadPublic);
     }
 
     #[test]
