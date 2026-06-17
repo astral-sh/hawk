@@ -31,10 +31,8 @@ use crate::graph::{
 
 pub fn is_wrapper_invocation(args: &[String]) -> bool {
     env::var_os("HAWK_OUTPUT_DIR").is_some()
-        && args
-            .get(1)
-            .and_then(|arg| Path::new(arg).file_stem())
-            .is_some_and(|stem| stem == "rustc")
+        && env::var_os("HAWK_ROOT_CRATE").is_some()
+        && args.get(1).is_some()
 }
 
 pub fn run_wrapper(mut args: Vec<String>) -> ExitCode {
