@@ -18,7 +18,13 @@ mod driver;
 mod graph;
 
 fn main() -> std::process::ExitCode {
-    let args: Vec<String> = std::env::args().collect();
+    let Ok(args): Result<Vec<String>, _> = std::env::args_os()
+        .map(std::ffi::OsString::into_string)
+        .collect()
+    else {
+        eprintln!("hawk: command-line arguments must be valid UTF-8");
+        return std::process::ExitCode::FAILURE;
+    };
     if driver::is_wrapper_invocation(&args) {
         driver::run_wrapper(args)
     } else {

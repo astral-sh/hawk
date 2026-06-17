@@ -5,6 +5,9 @@ use std::process::Command;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
+#[cfg(unix)]
+use std::os::unix::ffi::OsStringExt;
+
 fn copy_directory(source: &Path, destination: &Path) {
     fs::create_dir_all(destination).expect("create fixture copy directory");
     for entry in fs::read_dir(source).expect("read fixture directory") {
@@ -15,6 +18,25 @@ fn copy_directory(source: &Path, destination: &Path) {
         } else {
             fs::copy(entry.path(), destination).expect("copy fixture file");
         }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn rejects_non_utf8_arguments_without_panicking() {
+    for executable in [
+        env!("CARGO_BIN_EXE_cargo-hawk"),
+        env!("CARGO_BIN_EXE_cargo-hawk-driver"),
+    ] {
+        let output = Command::new(executable)
+            .arg(std::ffi::OsString::from_vec(vec![0xff]))
+            .output()
+            .expect("run Hawk with a non-UTF-8 argument");
+
+        assert!(!output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("hawk: command-line arguments must be valid UTF-8"));
+        assert!(!stderr.contains("panicked"));
     }
 }
 
