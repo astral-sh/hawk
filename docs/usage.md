@@ -84,8 +84,9 @@ targets:
   --exclude-crate supported_library
 ```
 
-Instrumented Cargo artifacts are reused under `/private/tmp/codex-hawk-target`
-by default. Use `--target-dir` to override that location and `--graph-dir` to
+Instrumented Cargo artifacts are reused under
+`cargo-hawk-target/<workspace-name>` in the platform temporary directory by
+default. Use `--target-dir` to override that location and `--graph-dir` to
 retain serialized compiler fragments for investigation. Diagnostics are
 colored automatically in a terminal; use `--color=always` or `--color=never`
 to override terminal detection.
