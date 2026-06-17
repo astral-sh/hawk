@@ -15,6 +15,7 @@ use rustc_hir::def::{CtorOf, DefKind, Res};
 use rustc_hir::def_id::{CRATE_DEF_ID, DefId, LocalDefId};
 use rustc_hir::intravisit::{self, Visitor};
 use rustc_interface::interface;
+use rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrFlags;
 use rustc_middle::ty::{self, TyCtxt};
 use rustc_parse::lexer::StripTokens;
 use rustc_parse::parser::{AllowConstBlockItems, ForceCollect};
@@ -586,7 +587,7 @@ fn collect_fragment(
         .filter(|_| is_product_root)
         .map(|(def_id, _)| vec![id(tcx, def_id)])
         .unwrap_or_default();
-    let conservative_roots = tcx
+    let mut conservative_roots: Vec<String> = tcx
         .hir_body_owners()
         .filter(|def_id| {
             matches!(
@@ -599,6 +600,24 @@ fn collect_fragment(
         })
         .map(|def_id| id(tcx, def_id.to_def_id()))
         .collect();
+    conservative_roots.extend(
+        crate_items
+            .owners()
+            .map(|owner| owner.def_id)
+            .filter(|def_id| {
+                matches!(
+                    tcx.def_kind(*def_id),
+                    DefKind::Fn | DefKind::AssocFn | DefKind::Static { .. }
+                )
+            })
+            .filter(|def_id| {
+                let attrs = tcx.codegen_fn_attrs(def_id.to_def_id());
+                attrs.flags.contains(CodegenFnAttrFlags::NO_MANGLE) || attrs.symbol_name.is_some()
+            })
+            .map(|def_id| id(tcx, def_id.to_def_id())),
+    );
+    conservative_roots.sort();
+    conservative_roots.dedup();
 
     Fragment {
         crate_name,

@@ -638,6 +638,32 @@ fn benchmark_consumers_preserve_required_public_visibility() {
 }
 
 #[test]
+fn exported_symbols_are_treated_as_external_roots() {
+    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/exported_symbols/Cargo.toml");
+    let target_dir = tempfile::tempdir().expect("temporary target directory");
+    let output = Command::new(env!("CARGO_BIN_EXE_cargo-hawk"))
+        .arg("--manifest-path")
+        .arg(manifest)
+        .arg("--target-dir")
+        .arg(target_dir.path())
+        .arg("--color=never")
+        .output()
+        .expect("run cargo-hawk");
+
+    assert!(
+        output.status.success(),
+        "cargo-hawk failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!stdout.contains("warning[hawk::dead_public]: `exported_callback` is public"));
+    assert!(!stdout.contains("warning[hawk::dead_public]: `renamed_callback` is public"));
+    assert!(stdout.contains("warning[hawk::unnecessary_public]: `exported_callback` is public"));
+    assert!(stdout.contains("warning[hawk::unnecessary_public]: `renamed_callback` is public"));
+}
+
+#[test]
 fn doctest_consumers_preserve_required_public_visibility_during_fixes() {
     let source_workspace =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/doctest_consumers");
