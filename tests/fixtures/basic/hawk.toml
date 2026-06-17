@@ -8,13 +8,6 @@ reason = "binary product under analysis"
 [[override]]
 lint = "hawk::dead_public"
 crate = "library"
-item = "dead_code_allowed_entry"
-level = "allow"
-reason = "allow suppresses only this finding, not referenced helpers"
-
-[[override]]
-lint = "hawk::dead_public"
-crate = "library"
 item = "ProductContext"
 level = "expect"
 reason = "covered by fixture expectation"

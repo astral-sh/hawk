@@ -52,6 +52,8 @@ pub struct Definition {
     pub module_scope: Vec<String>,
     #[serde(default)]
     pub uniform_field_group: Option<Span>,
+    #[serde(default)]
+    pub dead_code_allowed: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -335,6 +337,7 @@ pub fn analyze_with_options<'a>(
     {
         let identity = definition_identity(definition);
         if !definition.public_api
+            || definition.dead_code_allowed
             || (production_definitions.contains(&identity)
                 && !production_candidates.contains(&identity))
             || !candidate_crates.contains(&definition.crate_name)
@@ -390,6 +393,7 @@ pub fn analyze_with_options<'a>(
     {
         let identity = definition_identity(definition);
         if !definition.restricted_visible_api
+            || definition.dead_code_allowed
             || (production_definitions.contains(&identity)
                 && !production_restricted_visible_candidates.contains(&identity))
             || !candidate_crates.contains(&definition.crate_name)
@@ -903,6 +907,7 @@ mod tests {
             visible_reexport_api: false,
             module_scope: vec![],
             uniform_field_group: None,
+            dead_code_allowed: false,
         }
     }
 
@@ -2012,6 +2017,27 @@ mod tests {
                 .iter()
                 .all(|finding| finding.kind == FindingKind::DeadPublic)
         );
+    }
+
+    #[test]
+    fn dead_code_allow_suppresses_an_entry_but_preserves_its_body() {
+        let mut allowed_entry = node("allowed_entry", "lib", true);
+        allowed_entry.dead_code_allowed = true;
+        let mut input = fragments(
+            vec![allowed_entry, node("helper", "lib", true)],
+            vec![Edge {
+                from: "allowed_entry".into(),
+                to: "helper".into(),
+                kind: EdgeKind::Body,
+            }],
+        );
+        input[1].conservative_roots.push("allowed_entry".into());
+
+        let findings = analyze(&input, &HashSet::new());
+
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].definition.id, "helper");
+        assert_eq!(findings[0].kind, FindingKind::UnnecessaryPublic);
     }
 
     #[test]

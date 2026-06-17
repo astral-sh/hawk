@@ -353,12 +353,12 @@ fn diagnoses_public_surface_of_a_binary_product() {
         | ^^^ public declaration
         = help: consider restricting this declaration's visibility or removing it
 
-    warning[hawk::dead_public]: `dead_code_allowed_helper` is public but is not reachable from binary `app`
+    warning[hawk::unnecessary_public]: `dead_code_allowed_helper` is public but all reachable uses are within `library`; it can be `pub(crate)`
       --> library/src/lib.rs:201:1
         |
     201 | pub fn dead_code_allowed_helper() {}
         | ^^^ public declaration
-        = help: consider restricting this declaration's visibility or removing it
+        = help: change this declaration to `pub(crate)`
 
     warning[hawk::dead_public]: public re-export `dead_export_path` has no target reachable from binary `app`
       --> library/src/lib.rs:236:9
@@ -452,17 +452,17 @@ fn diagnoses_public_surface_of_a_binary_product() {
        = help: change this declaration to `pub(crate)`
 
     warning[hawk::unknown_item]: override for `hawk::dead_public` references unknown item `library::removed_api`
-      --> hawk.toml:22:1
+      --> hawk.toml:15:1
        |
-    22 | [[override]]
+    15 | [[override]]
        | ^^^ no matching item was found
       = note: reason: covered by stale selector diagnostic
       = help: remove this override or update its `crate` and `item` selectors
 
     warning[hawk::unfulfilled_expectation]: expected `hawk::dead_public` for `library::PrivateContextOptions`, but no finding was produced
-      --> hawk.toml:29:1
+      --> hawk.toml:22:1
        |
-    29 | [[override]]
+    22 | [[override]]
        | ^^^ unfulfilled expectation
       = note: reason: covered by unfulfilled expectation diagnostic
       = help: remove this expectation or update its `lint` selector
@@ -592,7 +592,7 @@ fn applies_visibility_fixes_through_cargo_fix() {
     assert!(library.contains("constructed: u8,"));
     assert!(library.contains("pub mod dead_outer {"));
     assert!(library.contains("pub fn dead_code_allowed_entry() {"));
-    assert!(library.contains("pub fn dead_code_allowed_helper() {}"));
+    assert!(library.contains("fn dead_code_allowed_helper() {}"));
     assert!(library.contains("pub enum ProductEnum {"));
     assert!(library.contains("pub fn integration_test_support() {"));
     assert!(library.contains("fn test_only_helper() {}"));

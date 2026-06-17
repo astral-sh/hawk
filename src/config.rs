@@ -574,6 +574,7 @@ mod tests {
                 visible_reexport_api: false,
                 module_scope: vec![],
                 uniform_field_group: None,
+                dead_code_allowed: false,
             }],
             edges: vec![],
             roots: vec![],
@@ -611,6 +612,7 @@ mod tests {
                 visible_reexport_api: false,
                 module_scope: vec![],
                 uniform_field_group: None,
+                dead_code_allowed: false,
             },
             Definition {
                 id: "constant".into(),
@@ -624,6 +626,7 @@ mod tests {
                 visible_reexport_api: false,
                 module_scope: vec![],
                 uniform_field_group: None,
+                dead_code_allowed: false,
             },
         ];
         fragment
@@ -648,6 +651,7 @@ mod tests {
                 visible_reexport_api: false,
                 module_scope: vec![],
                 uniform_field_group: None,
+                dead_code_allowed: false,
             },
             Definition {
                 id: "generated-unused".into(),
@@ -665,6 +669,7 @@ mod tests {
                 visible_reexport_api: false,
                 module_scope: vec![],
                 uniform_field_group: None,
+                dead_code_allowed: false,
             },
             Definition {
                 id: "outside".into(),
@@ -682,6 +687,7 @@ mod tests {
                 visible_reexport_api: false,
                 module_scope: vec![],
                 uniform_field_group: None,
+                dead_code_allowed: false,
             },
             Definition {
                 id: "generatedish".into(),
@@ -699,6 +705,7 @@ mod tests {
                 visible_reexport_api: false,
                 module_scope: vec![],
                 uniform_field_group: None,
+                dead_code_allowed: false,
             },
         ];
         fragment

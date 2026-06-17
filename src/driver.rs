@@ -15,11 +15,13 @@ use rustc_hir::def::{CtorOf, DefKind, Res};
 use rustc_hir::def_id::{CRATE_DEF_ID, DefId, LocalDefId};
 use rustc_hir::intravisit::{self, Visitor};
 use rustc_interface::interface;
+use rustc_lint_defs::builtin::DEAD_CODE;
 use rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrFlags;
 use rustc_middle::ty::{self, TyCtxt};
 use rustc_parse::lexer::StripTokens;
 use rustc_parse::parser::{AllowConstBlockItems, ForceCollect};
 use rustc_session::config::CrateType;
+use rustc_session::lint::Level;
 use rustc_span::Symbol;
 use rustc_span::def_id::LOCAL_CRATE;
 use rustc_span::hygiene::{ExpnKind, MacroKind};
@@ -599,6 +601,12 @@ fn collect_fragment(
             )
         })
         .map(|def_id| id(tcx, def_id.to_def_id()))
+        .chain(
+            definitions
+                .iter()
+                .filter(|definition| definition.dead_code_allowed)
+                .map(|definition| definition.id.clone()),
+        )
         .collect();
     conservative_roots.extend(
         crate_items
@@ -805,6 +813,10 @@ fn definition(
         visible_reexport_api: kind == DefinitionKind::Reexport && has_explicit_visibility,
         module_scope: module_scope(tcx, def_id),
         uniform_field_group: None,
+        dead_code_allowed: tcx
+            .lint_level_at_node(DEAD_CODE, tcx.local_def_id_to_hir_id(def_id))
+            .level
+            == Level::Allow,
     }
 }
 

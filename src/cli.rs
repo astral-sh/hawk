@@ -1512,6 +1512,7 @@ mod tests {
             visible_reexport_api: false,
             module_scope: vec![],
             uniform_field_group: None,
+            dead_code_allowed: false,
         };
         let finding = Finding {
             kind: FindingKind::UnnecessaryPublic,
@@ -1562,6 +1563,7 @@ mod tests {
             visible_reexport_api: false,
             module_scope: vec!["scoped".into()],
             uniform_field_group: None,
+            dead_code_allowed: false,
         };
         let finding = Finding {
             kind: FindingKind::UnnecessaryCrateVisibility,
@@ -1611,6 +1613,7 @@ mod tests {
             visible_reexport_api: false,
             module_scope: vec!["scoped".into()],
             uniform_field_group: None,
+            dead_code_allowed: false,
         };
         let finding = Finding {
             kind: FindingKind::UnnecessaryRestrictedVisibility,
@@ -1656,6 +1659,7 @@ mod tests {
             visible_reexport_api: false,
             module_scope: vec![],
             uniform_field_group: None,
+            dead_code_allowed: false,
         };
         let finding = Finding {
             kind: FindingKind::DeadPublic,
