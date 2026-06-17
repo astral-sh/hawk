@@ -18,6 +18,40 @@ fn copy_directory(source: &Path, destination: &Path) {
     }
 }
 
+fn initialize_git_repository(path: &Path) {
+    let status = Command::new("git")
+        .arg("init")
+        .arg("--quiet")
+        .current_dir(path)
+        .status()
+        .expect("initialize Git repository");
+    assert!(status.success());
+
+    let status = Command::new("git")
+        .arg("add")
+        .arg(".")
+        .current_dir(path)
+        .status()
+        .expect("stage fixture workspace");
+    assert!(status.success());
+
+    let status = Command::new("git")
+        .args([
+            "-c",
+            "user.name=Hawk Tests",
+            "-c",
+            "user.email=hawk-tests@example.com",
+            "commit",
+            "--quiet",
+            "-m",
+            "Initial fixture",
+        ])
+        .current_dir(path)
+        .status()
+        .expect("commit fixture workspace");
+    assert!(status.success());
+}
+
 #[cfg(unix)]
 #[test]
 fn honors_cargo_configured_compiler() {
@@ -576,6 +610,30 @@ fn applies_visibility_fixes_through_cargo_fix() {
     assert!(unit_support.contains("pub fn not_exported() {}"));
     assert!(unit_support.contains("fn test_entry() {"));
     assert!(unit_support.contains("fn test_only_helper() {}"));
+}
+
+#[test]
+fn applies_multiple_fix_passes_in_a_clean_git_repository() {
+    let source_workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/basic");
+    let workspace = tempfile::tempdir().expect("temporary fixture workspace");
+    copy_directory(&source_workspace, workspace.path());
+    initialize_git_repository(workspace.path());
+    let target_dir = tempfile::tempdir().expect("temporary target directory");
+    let output = Command::new(env!("CARGO_BIN_EXE_cargo-hawk"))
+        .arg("--manifest-path")
+        .arg(workspace.path().join("Cargo.toml"))
+        .arg("--fix")
+        .arg("--target-dir")
+        .arg(target_dir.path())
+        .arg("--color=never")
+        .output()
+        .expect("run cargo-hawk with fixes");
+
+    assert!(
+        output.status.success(),
+        "cargo-hawk fix failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]

@@ -612,6 +612,7 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
                     CargoSelection::FixNonProduction(FixRequest {
                         plan: &fix_plan_path,
                         packages: &fix_packages,
+                        allow_dirty: fix_iteration > 0,
                     }),
                 )?;
                 applied_fixes = true;
@@ -627,6 +628,7 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
                     CargoSelection::FixProduction(FixRequest {
                         plan: &fix_plan_path,
                         packages: &fix_packages,
+                        allow_dirty: fix_iteration > 0 || applied_fixes,
                     }),
                 )?;
                 applied_fixes = true;
@@ -786,6 +788,7 @@ struct ProductionSelection<'a> {
 struct FixRequest<'a> {
     plan: &'a Path,
     packages: &'a [String],
+    allow_dirty: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -850,7 +853,12 @@ impl InstrumentedCargo<'_> {
             selection,
             CargoSelection::FixProduction(_) | CargoSelection::FixNonProduction(_)
         ) {
-            if self.args.allow_dirty {
+            let allow_dirty = match selection {
+                CargoSelection::FixProduction(request)
+                | CargoSelection::FixNonProduction(request) => request.allow_dirty,
+                _ => false,
+            };
+            if self.args.allow_dirty || allow_dirty {
                 command.arg("--allow-dirty");
             }
             if self.args.allow_staged {
