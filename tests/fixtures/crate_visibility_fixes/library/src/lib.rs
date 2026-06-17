@@ -39,5 +39,21 @@ mod wrapper {
 mod sibling {
     pub(crate) fn call() {
         crate::wrapper::api::f();
+        let _ = crate::trait_impl::Runtime;
+    }
+}
+
+mod trait_api {
+    pub(crate) trait Approvable {
+        type ApprovalKey;
+    }
+}
+
+mod trait_impl {
+    pub(crate) struct ApprovalKey;
+    pub(crate) struct Runtime;
+
+    impl crate::trait_api::Approvable for Runtime {
+        type ApprovalKey = ApprovalKey;
     }
 }

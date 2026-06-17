@@ -370,6 +370,7 @@ fn collect_fragment(
     }
     for owner in crate_items.owners() {
         let def_id = owner.def_id;
+        let edge_start = edges.len();
         let mut visitor = ReferenceVisitor {
             tcx,
             source: id(tcx, def_id.to_def_id()),
@@ -383,6 +384,21 @@ fn collect_fragment(
             edges: &mut edges,
         };
         visitor.visit_node(tcx.hir_node_by_def_id(def_id));
+        if let Some(trait_item) = tcx.trait_item_of(def_id.to_def_id())
+            && let Some(trait_def_id) = tcx.trait_of_assoc(trait_item)
+        {
+            let trait_id = id(tcx, trait_def_id);
+            let exposed_types: Vec<_> = edges[edge_start..]
+                .iter()
+                .filter(|edge| edge.kind == EdgeKind::Interface)
+                .map(|edge| edge.to.clone())
+                .collect();
+            edges.extend(exposed_types.into_iter().map(|target| Edge {
+                from: trait_id.clone(),
+                to: target,
+                kind: EdgeKind::VisibilityRequirement,
+            }));
+        }
         if let Some(parent) = enclosing_module(tcx, def_id) {
             edges.push(Edge {
                 from: id(tcx, def_id.to_def_id()),

@@ -781,6 +781,7 @@ fn removes_unnecessary_restricted_visibility_by_default() {
     assert!(library.contains("    fn parent_helper() {}"));
     assert!(library.contains("        pub(crate) fn call_parent_helper() {"));
     assert!(library.contains("    pub(crate) mod api {"));
+    assert!(library.contains("    pub(crate) struct ApprovalKey;"));
 }
 
 #[test]
