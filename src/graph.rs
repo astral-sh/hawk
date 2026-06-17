@@ -167,6 +167,15 @@ struct DefinitionIdentity<'a> {
     column: Option<usize>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct SourceDefinitionIdentity<'a> {
+    name: Option<&'a str>,
+    kind: DefinitionKind,
+    file: Option<&'a str>,
+    line: Option<usize>,
+    column: Option<usize>,
+}
+
 pub fn analyze<'a>(
     production_fragments: &'a [Fragment],
     test_fragments: &'a [Fragment],
@@ -766,10 +775,10 @@ fn adjacency<'a>(
 fn equivalent_definitions<'a>(
     definitions: &HashMap<&'a str, &'a Definition>,
 ) -> HashMap<&'a str, Vec<&'a str>> {
-    let mut groups: HashMap<DefinitionIdentity<'a>, Vec<&'a str>> = HashMap::new();
+    let mut groups: HashMap<SourceDefinitionIdentity<'a>, Vec<&'a str>> = HashMap::new();
     for definition in definitions.values() {
         groups
-            .entry(definition_identity(definition))
+            .entry(source_definition_identity(definition))
             .or_default()
             .push(definition.id.as_str());
     }
@@ -790,6 +799,19 @@ fn definition_identity<'a>(definition: &'a Definition) -> DefinitionIdentity<'a>
     DefinitionIdentity {
         crate_name: &definition.crate_name,
         name: &definition.name,
+        kind: definition.kind,
+        file: definition.span.as_ref().map(|span| span.file.as_str()),
+        line: definition.span.as_ref().map(|span| span.line),
+        column: definition.span.as_ref().map(|span| span.column),
+    }
+}
+
+fn source_definition_identity<'a>(definition: &'a Definition) -> SourceDefinitionIdentity<'a> {
+    SourceDefinitionIdentity {
+        name: definition
+            .span
+            .is_none()
+            .then_some(definition.name.as_str()),
         kind: definition.kind,
         file: definition.span.as_ref().map(|span| span.file.as_str()),
         line: definition.span.as_ref().map(|span| span.line),

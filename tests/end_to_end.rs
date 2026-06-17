@@ -785,6 +785,36 @@ fn removes_unnecessary_restricted_visibility_by_default() {
 }
 
 #[test]
+fn path_modules_preserve_visibility_required_by_other_targets() {
+    let source_workspace =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/path_module_fixes");
+    let workspace = tempfile::tempdir().expect("temporary fixture workspace");
+    copy_directory(&source_workspace, workspace.path());
+    let target_dir = tempfile::tempdir().expect("temporary target directory");
+    let output = Command::new(env!("CARGO_BIN_EXE_cargo-hawk"))
+        .arg("--manifest-path")
+        .arg(workspace.path().join("Cargo.toml"))
+        .arg("--fix")
+        .arg("--allow-no-vcs")
+        .arg("--target-dir")
+        .arg(target_dir.path())
+        .arg("--color=never")
+        .output()
+        .expect("run cargo-hawk with fixes");
+
+    assert!(
+        output.status.success(),
+        "cargo-hawk fix failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let shared = fs::read_to_string(workspace.path().join("library/src/shared.rs"))
+        .expect("read fixed source");
+    assert!(shared.contains("pub struct Shared"));
+    assert!(shared.contains("    pub(crate) value: u8,"));
+}
+
+#[test]
 fn narrows_crate_visibility_to_the_required_module_scope_when_enabled() {
     let source_workspace =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/crate_visibility_fixes");

@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::env;
 use std::fs::File;
 use std::io::{BufWriter, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::{Context, Result};
@@ -872,14 +872,34 @@ fn span(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Option<Span> {
     }
     let location = tcx.sess.source_map().lookup_char_pos(span.lo());
     Some(Span {
-        file: location
-            .file
-            .name
-            .prefer_local_unconditionally()
-            .to_string(),
+        file: normalize_source_path(
+            location
+                .file
+                .name
+                .prefer_local_unconditionally()
+                .to_string(),
+        ),
         line: location.line,
         column: location.col.to_usize() + 1,
     })
+}
+
+fn normalize_source_path(path: String) -> String {
+    let mut normalized = PathBuf::new();
+    for component in Path::new(&path).components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => match normalized.components().next_back() {
+                Some(Component::Normal(_)) => {
+                    normalized.pop();
+                }
+                Some(Component::RootDir | Component::Prefix(_)) => {}
+                _ => normalized.push(component.as_os_str()),
+            },
+            _ => normalized.push(component.as_os_str()),
+        }
+    }
+    normalized.to_string_lossy().into_owned()
 }
 
 struct ReferenceVisitor<'tcx, 'edges> {
@@ -1054,7 +1074,7 @@ mod tests {
     use std::io::{self, Write};
     use std::path::Path;
 
-    use super::{compact_visibility_modifier, write_fragment};
+    use super::{compact_visibility_modifier, normalize_source_path, write_fragment};
     use crate::graph::Fragment;
 
     struct FailingWriter;
@@ -1100,5 +1120,14 @@ mod tests {
             Some("pub(super)".into())
         );
         assert_eq!(compact_visibility_modifier("pub /*"), None);
+    }
+
+    #[test]
+    fn source_paths_are_lexically_normalized() {
+        assert_eq!(
+            normalize_source_path("library/tests/../src/shared.rs".into()),
+            "library/src/shared.rs"
+        );
+        assert_eq!(normalize_source_path("../shared.rs".into()), "../shared.rs");
     }
 }
