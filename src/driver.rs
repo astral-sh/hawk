@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -17,6 +17,7 @@ use rustc_hir::intravisit::{self, Visitor};
 use rustc_interface::interface;
 use rustc_lint_defs::builtin::DEAD_CODE;
 use rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrFlags;
+use rustc_middle::ty::adjustment::{Adjust, DerefAdjustKind};
 use rustc_middle::ty::{self, TyCtxt};
 use rustc_parse::lexer::StripTokens;
 use rustc_parse::parser::{AllowConstBlockItems, ForceCollect};
@@ -25,11 +26,12 @@ use rustc_session::lint::Level;
 use rustc_span::Symbol;
 use rustc_span::def_id::LOCAL_CRATE;
 use rustc_span::hygiene::{ExpnKind, MacroKind};
+use rustc_span::symbol::sym;
 use rustc_span::{BytePos, FileName, Pos};
 
 use crate::graph::{
-    Definition, DefinitionKind, Edge, EdgeKind, FindingKind, FixPlan, Fragment, Span,
-    VisibilityReduction,
+    Definition, DefinitionKind, Edge, EdgeKind, FindingKind, FixPlan, Fragment, SharedOwnership,
+    SharedPointerKind, Span, VisibilityReduction,
 };
 
 pub fn is_wrapper_invocation(args: &[String]) -> bool {
@@ -267,6 +269,7 @@ fn collect_fragment(
     let mut adt_members = Vec::new();
     let mut source_item_fields = Vec::new();
     let mut generated_fields = Vec::new();
+    let mut shared_ownership_candidates = HashMap::new();
     let crate_items = tcx.hir_crate_items(());
     let is_proc_macro_crate = tcx.crate_types().contains(&CrateType::ProcMacro);
 
@@ -287,6 +290,8 @@ fn collect_fragment(
     }
     for item_id in crate_items.free_items() {
         let item = tcx.hir_item(item_id);
+        let is_source_struct =
+            matches!(item.kind, hir::ItemKind::Struct(..)) && !item.span.from_expansion();
         let source_item_index = (!item.span.from_expansion()).then(|| {
             source_item_fields.push((
                 source_file_start(tcx, item.span),
@@ -322,7 +327,25 @@ fn collect_fragment(
                         is_public_candidate(tcx, field.def_id, test_surface),
                     );
                     field_definition.uniform_field_group = uniform_field_group.clone();
+                    let definition_index = definitions.len();
                     definitions.push(field_definition);
+                    if is_source_struct
+                        && let Some(pointer) = shared_pointer_kind(tcx, item.owner_id.def_id, field)
+                    {
+                        shared_ownership_candidates.insert(
+                            field.def_id,
+                            (
+                                definition_index,
+                                SharedOwnership {
+                                    pointer,
+                                    direct_construction: false,
+                                    inner_deref_use: false,
+                                    other_construction: false,
+                                    other_use: type_implements_clone(tcx, item.owner_id.def_id),
+                                },
+                            ),
+                        );
+                    }
                     defined.insert(field.def_id);
                     adt_members.push((field.def_id, item.owner_id.def_id));
                 }
@@ -368,6 +391,19 @@ fn collect_fragment(
             edges: &mut edges,
         };
         visitor.visit_body(body);
+    }
+    for def_id in tcx.hir_body_owners() {
+        let body = tcx.hir_body_owned_by(def_id);
+        let mut visitor = SharedOwnershipUseVisitor {
+            tcx,
+            typeck_results: tcx.typeck_body(body.id()),
+            candidates: &mut shared_ownership_candidates,
+            handled_field_uses: HashSet::new(),
+        };
+        visitor.visit_body(body);
+    }
+    for (_, (definition_index, shared_ownership)) in shared_ownership_candidates {
+        definitions[definition_index].shared_ownership = Some(shared_ownership);
     }
     for owner in crate_items.owners() {
         let def_id = owner.def_id;
@@ -815,6 +851,7 @@ fn definition(
             .lint_level_at_node(DEAD_CODE, tcx.local_def_id_to_hir_id(def_id))
             .level
             == Level::Allow,
+        shared_ownership: None,
     }
 }
 
@@ -929,6 +966,223 @@ fn normalize_source_path(path: String) -> String {
         }
     }
     normalized.to_string_lossy().into_owned()
+}
+
+fn shared_pointer_kind(
+    tcx: TyCtxt<'_>,
+    owner: LocalDefId,
+    field: &hir::FieldDef<'_>,
+) -> Option<SharedPointerKind> {
+    let repr = tcx.adt_def(owner).repr();
+    if field.span.from_expansion()
+        || field.is_positional()
+        || visibility_modifier(tcx, field.def_id).as_deref() != Some("")
+        || repr.inhibit_struct_field_reordering()
+        || repr.align.is_some()
+        || repr.pack.is_some()
+    {
+        return None;
+    }
+    let ty::Adt(adt, _) = tcx.type_of(field.def_id).instantiate_identity().kind() else {
+        return None;
+    };
+    match tcx.get_diagnostic_name(adt.did()) {
+        Some(sym::Arc) => Some(SharedPointerKind::Arc),
+        Some(sym::Rc) => Some(SharedPointerKind::Rc),
+        _ => None,
+    }
+}
+
+fn type_implements_clone(tcx: TyCtxt<'_>, def_id: LocalDefId) -> bool {
+    let Some(clone_trait) = tcx.lang_items().clone_trait() else {
+        return false;
+    };
+    let ty = tcx.type_of(def_id).instantiate_identity();
+    tcx.non_blanket_impls_for_ty(clone_trait, ty)
+        .next()
+        .is_some()
+}
+
+struct SharedOwnershipUseVisitor<'tcx, 'candidates> {
+    tcx: TyCtxt<'tcx>,
+    typeck_results: &'tcx ty::TypeckResults<'tcx>,
+    candidates: &'candidates mut HashMap<LocalDefId, (usize, SharedOwnership)>,
+    handled_field_uses: HashSet<hir::HirId>,
+}
+
+impl SharedOwnershipUseVisitor<'_, '_> {
+    fn field_def_id(&self, expression: &hir::Expr<'_>) -> Option<LocalDefId> {
+        let hir::ExprKind::Field(base, _) = expression.kind else {
+            return None;
+        };
+        let adt = self.typeck_results.expr_ty_adjusted(base).ty_adt_def()?;
+        if adt.is_enum() {
+            return None;
+        }
+        let index = self.typeck_results.opt_field_index(expression.hir_id)?;
+        adt.non_enum_variant().fields[index].did.as_local()
+    }
+
+    fn direct_shared_pointer_construction(
+        &self,
+        expression: &hir::Expr<'_>,
+        pointer: SharedPointerKind,
+    ) -> bool {
+        let hir::ExprKind::Call(callee, [_]) = expression.kind else {
+            return false;
+        };
+        let hir::ExprKind::Path(qpath) = callee.kind else {
+            return false;
+        };
+        let Res::Def(DefKind::AssocFn, constructor) =
+            self.typeck_results.qpath_res(&qpath, callee.hir_id)
+        else {
+            return false;
+        };
+        if self.tcx.item_name(constructor) != sym::new {
+            return false;
+        }
+        let Some(impl_id) = self.tcx.impl_of_assoc(constructor) else {
+            return false;
+        };
+        let ty::Adt(adt, _) = self.tcx.type_of(impl_id).instantiate_identity().kind() else {
+            return false;
+        };
+        matches!(
+            (pointer, self.tcx.get_diagnostic_name(adt.did())),
+            (SharedPointerKind::Arc, Some(sym::Arc)) | (SharedPointerKind::Rc, Some(sym::Rc))
+        )
+    }
+
+    fn record_struct_construction(
+        &mut self,
+        expression: &hir::Expr<'_>,
+        fields: &[hir::ExprField<'_>],
+        tail: hir::StructTailExpr<'_>,
+    ) {
+        let Some(adt) = self.typeck_results.expr_ty(expression).ty_adt_def() else {
+            return;
+        };
+        if adt.is_enum() {
+            return;
+        }
+        if expression.span.from_expansion() {
+            for field in &adt.non_enum_variant().fields {
+                if let Some(field_def_id) = field.did.as_local()
+                    && let Some((_, candidate)) = self.candidates.get_mut(&field_def_id)
+                {
+                    candidate.other_construction = true;
+                }
+            }
+            return;
+        }
+        let mut initialized = HashSet::new();
+        for field in fields {
+            let Some(index) = self.typeck_results.opt_field_index(field.hir_id) else {
+                continue;
+            };
+            let Some(field_def_id) = adt.non_enum_variant().fields[index].did.as_local() else {
+                continue;
+            };
+            initialized.insert(field_def_id);
+            let Some((_, candidate)) = self.candidates.get(&field_def_id) else {
+                continue;
+            };
+            let direct = self.direct_shared_pointer_construction(field.expr, candidate.pointer);
+            let (_, candidate) = self
+                .candidates
+                .get_mut(&field_def_id)
+                .expect("candidate remains present");
+            if direct {
+                candidate.direct_construction = true;
+            } else {
+                candidate.other_construction = true;
+            }
+        }
+        if !matches!(tail, hir::StructTailExpr::None) {
+            for field in &adt.non_enum_variant().fields {
+                let Some(field_def_id) = field.did.as_local() else {
+                    continue;
+                };
+                if !initialized.contains(&field_def_id)
+                    && let Some((_, candidate)) = self.candidates.get_mut(&field_def_id)
+                {
+                    candidate.other_construction = true;
+                }
+            }
+        }
+    }
+}
+
+impl<'tcx> Visitor<'tcx> for SharedOwnershipUseVisitor<'tcx, '_> {
+    fn visit_nested_body(&mut self, _body_id: hir::BodyId) {
+        // Every body owner is visited with its own type-checking results.
+    }
+
+    fn visit_expr(&mut self, expression: &'tcx hir::Expr<'tcx>) {
+        match expression.kind {
+            hir::ExprKind::Struct(_, fields, tail) => {
+                self.record_struct_construction(expression, fields, tail);
+            }
+            hir::ExprKind::MethodCall(_, receiver, _, _)
+                if !expression.span.from_expansion()
+                    && self
+                        .field_def_id(receiver)
+                        .is_some_and(|field| self.candidates.contains_key(&field)) =>
+            {
+                if self
+                    .typeck_results
+                    .expr_adjustments(receiver)
+                    .iter()
+                    .any(|adjustment| {
+                        matches!(
+                            adjustment.kind,
+                            Adjust::Deref(DerefAdjustKind::Overloaded(_))
+                        )
+                    })
+                    && let Some(field) = self.field_def_id(receiver)
+                {
+                    self.handled_field_uses.insert(receiver.hir_id);
+                    self.candidates
+                        .get_mut(&field)
+                        .expect("candidate field")
+                        .1
+                        .inner_deref_use = true;
+                }
+            }
+            hir::ExprKind::Field(..) if !expression.span.from_expansion() => {
+                if let Some(field) = self.field_def_id(expression)
+                    && let Some((_, candidate)) = self.candidates.get_mut(&field)
+                    && !self.handled_field_uses.contains(&expression.hir_id)
+                {
+                    candidate.other_use = true;
+                }
+            }
+            _ => {}
+        }
+        intravisit::walk_expr(self, expression);
+    }
+
+    fn visit_pat(&mut self, pattern: &'tcx hir::Pat<'tcx>) {
+        if !pattern.span.from_expansion()
+            && let hir::PatKind::Struct(_, fields, _) = pattern.kind
+            && let Some(adt) = self.typeck_results.pat_ty(pattern).ty_adt_def()
+            && !adt.is_enum()
+        {
+            for field in fields {
+                let Some(index) = self.typeck_results.opt_field_index(field.hir_id) else {
+                    continue;
+                };
+                let Some(field_def_id) = adt.non_enum_variant().fields[index].did.as_local() else {
+                    continue;
+                };
+                if let Some((_, candidate)) = self.candidates.get_mut(&field_def_id) {
+                    candidate.other_use = true;
+                }
+            }
+        }
+        intravisit::walk_pat(self, pattern);
+    }
 }
 
 struct ReferenceVisitor<'tcx, 'edges> {

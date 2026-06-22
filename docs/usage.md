@@ -1,10 +1,10 @@
 # Using Hawk
 
-Hawk analyzes public declarations in workspace library crates against
-configured production targets and workspace non-production targets. This guide
-covers invoking the tool; see [Configuration](configuration.md) for the
-`hawk.toml` reference and [Architecture](architecture.md) for the analysis
-model.
+Hawk analyzes public declarations and selected ownership patterns in workspace
+library crates against configured production targets and workspace
+non-production targets. This guide covers invoking the tool; see
+[Configuration](configuration.md) for the `hawk.toml` reference and
+[Architecture](architecture.md) for the analysis model.
 
 ## Install a prebuilt release
 
@@ -115,16 +115,25 @@ Hawk accepts Clippy-style ordered `-A`/`--allow`, `-W`/`--warn`, and
 
 The supported selectors are `warnings`, `hawk::dead_public`,
 `hawk::unnecessary_public`, `hawk::unnecessary_restricted_visibility`,
-`hawk::unnecessary_crate_visibility`, `hawk::unknown_item`,
-`hawk::ambiguous_item`, and `hawk::unfulfilled_expectation`. Denied diagnostics
-are emitted as errors and cause a non-zero exit status. Invalid configuration
-and failed instrumented Cargo builds fail independently of lint levels.
+`hawk::unnecessary_crate_visibility`, `hawk::unnecessary_shared_ownership`,
+`hawk::unknown_item`, `hawk::ambiguous_item`, and
+`hawk::unfulfilled_expectation`. Denied diagnostics are emitted as errors and
+cause a non-zero exit status. Invalid configuration and failed instrumented
+Cargo builds fail independently of lint levels.
 
-`hawk::unnecessary_crate_visibility` is allow-by-default because preferring
-`pub(super)` over `pub(crate)` is a style choice. Enable it explicitly with
-`-W hawk::unnecessary_crate_visibility` or
-`-D hawk::unnecessary_crate_visibility`. The `warnings` group does not enable
+`hawk::unnecessary_crate_visibility` and
+`hawk::unnecessary_shared_ownership` are allow-by-default. Enable them
+explicitly with `-W` or `-D`; the `warnings` group does not enable
 allow-by-default lints.
+
+The shared-ownership lint is deliberately limited to private, source-written,
+named struct fields. It reports an `Arc<T>` or `Rc<T>` only when every compiled
+construction stores a direct `Arc::new` or `Rc::new` value and every compiled
+source use reaches `T` through automatic dereferencing. Wrapper-typed escapes,
+clones of the field or containing type, struct-update construction, test-only
+wrapper uses, fixed-layout representations, and explicit field visibility
+suppress the finding. The diagnostic recommends storing `T` directly or using
+`Box<T>` when heap allocation remains intentional.
 
 ## Apply fixes
 
@@ -143,10 +152,13 @@ visibility modifier when the item can be private.
 `hawk::unnecessary_crate_visibility` optionally reduces `pub(crate)` to
 `pub(super)`. `hawk::dead_public` remains report-only because a
 visibility-only edit can activate rustc's `dead_code` lint; removing dead
-surface may require editing its remaining internal uses. Hawk delegates edit
-application and validation to `cargo fix`, including Cargo's source-control
-safety checks; pass `--allow-dirty`, `--allow-staged`, or `--allow-no-vcs`
-with `--fix` when the corresponding Cargo override is appropriate.
+surface may require editing its remaining internal uses.
+`hawk::unnecessary_shared_ownership` is also report-only because replacing a
+shared pointer requires coordinated type and construction edits and may still
+need a `Box`. Hawk delegates visibility edit application and validation to
+`cargo fix`, including Cargo's source-control safety checks; pass
+`--allow-dirty`, `--allow-staged`, or `--allow-no-vcs` with `--fix` when the
+corresponding Cargo override is appropriate.
 
 Fixes are limited to workspace library packages in the configured production
 or non-production surface. Hawk rechecks configured production targets and

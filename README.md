@@ -4,7 +4,7 @@
 [![crates.io](https://img.shields.io/crates/v/cargo-hawk.svg)](https://crates.io/crates/cargo-hawk)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
-A workspace-aware Cargo lint for unnecessary Rust visibility.
+A workspace-aware Cargo lint for unnecessary Rust visibility and shared ownership.
 
 **Experimental:** This project was authored by GPT-5.5 and is not intended
 for public consumption. Use at your own risk.
@@ -13,7 +13,8 @@ Hawk finds `pub` declarations that are unused or can be restricted to
 `pub(crate)` when a Cargo workspace builds one or more shipped binaries. It
 also finds explicit restricted visibility modifiers that can be removed.
 Optionally, it can suggest restricting `pub(crate)` declarations to
-`pub(super)`.
+`pub(super)`. It can also identify private `Arc<T>` and `Rc<T>` fields whose
+compiled construction and use sites never require shared ownership.
 
 ## Motivation
 
@@ -40,6 +41,8 @@ unnecessarily public symbols across crates within a single workspace.
   become private.
 - Optionally reports `hawk::unnecessary_crate_visibility` for `pub(crate)`
   items that can become `pub(super)`.
+- Optionally reports `hawk::unnecessary_shared_ownership` for private `Arc<T>`
+  and `Rc<T>` fields that are constructed directly and only dereferenced.
 - Models production separately from tests, benches, examples, and doctests.
 - Applies machine-applicable visibility fixes through `cargo fix`.
 - Uses Clippy-style `-A`/`-W`/`-D` lint levels for incremental CI adoption.

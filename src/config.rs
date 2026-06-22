@@ -575,6 +575,7 @@ mod tests {
                 module_scope: vec![],
                 uniform_field_group: None,
                 dead_code_allowed: false,
+                shared_ownership: None,
             }],
             edges: vec![],
             roots: vec![],
@@ -613,6 +614,7 @@ mod tests {
                 module_scope: vec![],
                 uniform_field_group: None,
                 dead_code_allowed: false,
+                shared_ownership: None,
             },
             Definition {
                 id: "constant".into(),
@@ -627,6 +629,7 @@ mod tests {
                 module_scope: vec![],
                 uniform_field_group: None,
                 dead_code_allowed: false,
+                shared_ownership: None,
             },
         ];
         fragment
@@ -652,6 +655,7 @@ mod tests {
                 module_scope: vec![],
                 uniform_field_group: None,
                 dead_code_allowed: false,
+                shared_ownership: None,
             },
             Definition {
                 id: "generated-unused".into(),
@@ -670,6 +674,7 @@ mod tests {
                 module_scope: vec![],
                 uniform_field_group: None,
                 dead_code_allowed: false,
+                shared_ownership: None,
             },
             Definition {
                 id: "outside".into(),
@@ -688,6 +693,7 @@ mod tests {
                 module_scope: vec![],
                 uniform_field_group: None,
                 dead_code_allowed: false,
+                shared_ownership: None,
             },
             Definition {
                 id: "generatedish".into(),
@@ -706,6 +712,7 @@ mod tests {
                 module_scope: vec![],
                 uniform_field_group: None,
                 dead_code_allowed: false,
+                shared_ownership: None,
             },
         ];
         fragment

@@ -182,7 +182,9 @@ executables that are not test harnesses still contribute liveness roots, but
 do not expand this test-only candidate surface. Explicit restricted visibility
 modifiers are tracked separately so their compiled uses can be compared with
 their lexical module scope. Exact `pub(crate)` declarations are also tracked
-for the optional `pub(super)` reduction.
+for the optional `pub(super)` reduction. Private, source-written `Arc<T>` and
+`Rc<T>` fields additionally carry construction and use summaries for the
+optional shared-ownership analysis.
 
 ### Edge kinds
 
@@ -262,6 +264,15 @@ unreachable uses, but it does not report a reachable variant as unnecessarily
 public because Rust does not provide an independent `pub(crate)` modifier for
 a variant.
 
+For each private shared-pointer field, Hawk merges four facts across
+production and non-production compilations: whether it is constructed directly
+with `Arc::new` or `Rc::new`, whether any other construction reaches it,
+whether source uses automatically dereference to the inner type, and whether
+any other source use observes the wrapper. A field is reported as
+`hawk::unnecessary_shared_ownership` only when it has both direct construction
+and inner dereference uses and neither kind of disqualifying use. The lint is
+allow-by-default and report-only.
+
 ## Conservative boundaries
 
 Like Clippy, Hawk should avoid fixes that change valid code into code that no
@@ -285,6 +296,9 @@ boundaries:
   are constrained by rustc.
 - Derive-expanded field interfaces preserve matching source-field visibility
   where generated exposure cannot otherwise be proven from HIR.
+- Shared-ownership candidates exclude explicitly visible and fixed-layout
+  fields. Cloning the containing type, non-direct construction, and any
+  wrapper-typed source use suppress the diagnostic.
 
 These choices are not additional public API promises. They represent cases
 where Hawk does not yet have enough provenance to recommend a compiling
@@ -300,10 +314,10 @@ cargo-hawk --manifest-path Cargo.toml -D warnings -W hawk::unnecessary_public
 
 The visibility diagnostics are `hawk::dead_public`, `hawk::unnecessary_public`,
 `hawk::unnecessary_restricted_visibility`, and
-`hawk::unnecessary_crate_visibility`. The final lint is allow-by-default;
-enable it explicitly to prefer `pub(super)` over `pub(crate)`. Configuration
-validation adds `hawk::unknown_item`, `hawk::ambiguous_item`, and
-`hawk::unfulfilled_expectation`.
+`hawk::unnecessary_crate_visibility`. The ownership diagnostic is
+`hawk::unnecessary_shared_ownership`. The final two lints are allow-by-default;
+enable them explicitly. Configuration validation adds `hawk::unknown_item`,
+`hawk::ambiguous_item`, and `hawk::unfulfilled_expectation`.
 
 Hawk's workspace-level decisions do not naturally map to source attributes in
 a single crate compilation. Instead, `hawk.toml` carries documented
@@ -358,11 +372,12 @@ Only enabled, unsuppressed `hawk::unnecessary_public`,
 `hawk::unnecessary_restricted_visibility`, and
 `hawk::unnecessary_crate_visibility` findings enter a fix plan. Restricting
 dead surface without removing it can activate rustc's ordinary `dead_code`
-lint, so `hawk::dead_public` remains report-only. During fix compilations Hawk
-caps ordinary compiler lints so Cargo consumes Hawk's planned suggestions
-rather than unrelated compiler edits. It matches declarations across
-recompilations by compiler ID or equivalent source identity and emits the
-planned replacement.
+lint, so `hawk::dead_public` remains report-only. Shared-ownership findings are
+also report-only because remediation can require either `T` or `Box<T>` and
+coordinated construction edits. During fix compilations Hawk caps ordinary
+compiler lints so Cargo consumes Hawk's planned suggestions rather than
+unrelated compiler edits. It matches declarations across recompilations by
+compiler ID or equivalent source identity and emits the planned replacement.
 
 The re-analysis matters: a `pub` to `pub(crate)` change can expose a further
 module-local reduction, and any visibility change can alter downstream

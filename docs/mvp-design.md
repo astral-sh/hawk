@@ -43,12 +43,15 @@ produce:
 - unnecessary crate visibility: an explicit `pub(crate)` declaration has
   compiled uses only within its parent module and can optionally be
   `pub(super)`.
+- unnecessary shared ownership: a private `Arc<T>` or `Rc<T>` field is
+  constructed directly and every compiled source use only dereferences it.
 
 Hawk emits warnings and exits successfully by default. Clippy-style ordered
 `-A`/`-W`/`-D` options control lint levels; `-D warnings` enforces the
 warn-by-default Hawk diagnostics in CI, while a later per-diagnostic option can
 incrementally lower or allow one lint. `hawk::unnecessary_crate_visibility`
-remains allow-by-default until explicitly enabled. The options apply after
+and `hawk::unnecessary_shared_ownership` remain allow-by-default until
+explicitly enabled. The options apply after
 `hawk.toml` suppressions and cover both visibility findings and configuration
 diagnostics for stale selectors or unfulfilled expectations. Invalid
 configuration and instrumented build failures fail independently of lint
