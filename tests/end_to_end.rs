@@ -525,6 +525,52 @@ fn production_binary_named_like_a_library_does_not_suppress_its_findings() {
 }
 
 #[test]
+fn diagnoses_shared_ownership_that_is_only_dereferenced() {
+    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/shared_ownership/Cargo.toml");
+    let target_dir = tempfile::tempdir().expect("temporary target directory");
+    let output = Command::new(env!("CARGO_BIN_EXE_cargo-hawk"))
+        .arg("--manifest-path")
+        .arg(manifest)
+        .arg("--target-dir")
+        .arg(target_dir.path())
+        .arg("--color=never")
+        .arg("-A")
+        .arg("warnings")
+        .arg("-W")
+        .arg("hawk::unnecessary_shared_ownership")
+        .output()
+        .expect("run cargo-hawk");
+
+    assert!(
+        output.status.success(),
+        "cargo-hawk failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let (diagnostics, summary) = stdout
+        .rsplit_once("hawk: ")
+        .expect("findings include a summary");
+    assert!(summary.starts_with("2 finding(s)"));
+    insta::assert_snapshot!(diagnostics, @r###"
+    warning[hawk::unnecessary_shared_ownership]: `SemanticIndex::imported_modules` is stored in an `Arc`, but every observed source use only dereferences it
+      --> library/src/lib.rs:15:5
+       |
+    15 |     imported_modules: Arc<FrozenSet>,
+       |     ^^^ unnecessarily shared field
+       = help: store the value directly, or use `Box` if heap allocation is intentional
+
+    warning[hawk::unnecessary_shared_ownership]: `LocalIndex::imported_modules` is stored in an `Rc`, but every observed source use only dereferences it
+      --> library/src/lib.rs:25:5
+       |
+    25 |     imported_modules: Rc<FrozenSet>,
+       |     ^^^ unnecessarily shared field
+       = help: store the value directly, or use `Box` if heap allocation is intentional
+
+    "###);
+}
+
+#[test]
 fn requires_a_configured_production_binary() {
     let manifest =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/basic/Cargo.toml");

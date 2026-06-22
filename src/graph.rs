@@ -54,6 +54,37 @@ pub struct Definition {
     pub uniform_field_group: Option<Span>,
     #[serde(default)]
     pub dead_code_allowed: bool,
+    #[serde(default)]
+    pub shared_ownership: Option<SharedOwnership>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct SharedOwnership {
+    pub pointer: SharedPointerKind,
+    #[serde(default)]
+    pub direct_construction: bool,
+    #[serde(default)]
+    pub inner_deref_use: bool,
+    #[serde(default)]
+    pub other_construction: bool,
+    #[serde(default)]
+    pub other_use: bool,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SharedPointerKind {
+    Arc,
+    Rc,
+}
+
+impl SharedPointerKind {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Arc => "Arc",
+            Self::Rc => "Rc",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -107,6 +138,7 @@ pub enum FindingKind {
     UnnecessaryPublic,
     UnnecessaryRestrictedVisibility,
     UnnecessaryCrateVisibility,
+    UnnecessarySharedOwnership,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -134,6 +166,7 @@ impl FindingKind {
             Self::UnnecessaryPublic => "hawk::unnecessary_public",
             Self::UnnecessaryRestrictedVisibility => "hawk::unnecessary_restricted_visibility",
             Self::UnnecessaryCrateVisibility => "hawk::unnecessary_crate_visibility",
+            Self::UnnecessarySharedOwnership => "hawk::unnecessary_shared_ownership",
         }
     }
 
@@ -145,6 +178,7 @@ impl FindingKind {
                 Some(Self::UnnecessaryRestrictedVisibility)
             }
             "hawk::unnecessary_crate_visibility" => Some(Self::UnnecessaryCrateVisibility),
+            "hawk::unnecessary_shared_ownership" => Some(Self::UnnecessarySharedOwnership),
             _ => None,
         }
     }
@@ -176,6 +210,15 @@ struct SourceDefinitionIdentity<'a> {
     file: Option<&'a str>,
     line: Option<usize>,
     column: Option<usize>,
+}
+
+struct SharedOwnershipAggregate<'a> {
+    definition: &'a Definition,
+    pointer: SharedPointerKind,
+    direct_construction: bool,
+    inner_deref_use: bool,
+    other_construction: bool,
+    other_use: bool,
 }
 
 pub fn analyze<'a>(
@@ -429,6 +472,51 @@ pub fn analyze_with_options<'a>(
             replacement: Some(replacement),
             test_only: !is_production_live && is_test_live,
             test_compiled_only,
+        });
+    }
+
+    let mut shared_ownership_candidates = HashMap::new();
+    for definition in &observed_definitions {
+        let Some(shared_ownership) = &definition.shared_ownership else {
+            continue;
+        };
+        let identity = definition_identity(definition);
+        let aggregate =
+            shared_ownership_candidates
+                .entry(identity)
+                .or_insert(SharedOwnershipAggregate {
+                    definition,
+                    pointer: shared_ownership.pointer,
+                    direct_construction: false,
+                    inner_deref_use: false,
+                    other_construction: false,
+                    other_use: false,
+                });
+        debug_assert_eq!(aggregate.pointer, shared_ownership.pointer);
+        aggregate.direct_construction |= shared_ownership.direct_construction;
+        aggregate.inner_deref_use |= shared_ownership.inner_deref_use;
+        aggregate.other_construction |= shared_ownership.other_construction;
+        aggregate.other_use |= shared_ownership.other_use;
+    }
+    for (identity, aggregate) in shared_ownership_candidates {
+        if !aggregate.direct_construction
+            || !aggregate.inner_deref_use
+            || aggregate.other_construction
+            || aggregate.other_use
+            || !candidate_crates.contains(&aggregate.definition.crate_name)
+            || excluded_crates.contains(&aggregate.definition.crate_name)
+            || production_root_definitions.contains(&identity)
+            || (!production_definitions.contains(&identity)
+                && non_production_root_definitions.contains(&identity))
+        {
+            continue;
+        }
+        findings.push(Finding {
+            kind: FindingKind::UnnecessarySharedOwnership,
+            definition: aggregate.definition,
+            replacement: None,
+            test_only: false,
+            test_compiled_only: !production_definitions.contains(&identity),
         });
     }
 
@@ -871,8 +959,9 @@ fn reachable<'a>(
 #[cfg(test)]
 mod tests {
     use super::{
-        Definition, DefinitionKind, Edge, EdgeKind, Finding, FindingKind, Fragment, Span,
-        VisibilityReduction, analyze as analyze_with_tests, analyze_with_options,
+        Definition, DefinitionKind, Edge, EdgeKind, Finding, FindingKind, Fragment,
+        SharedOwnership, SharedPointerKind, Span, VisibilityReduction,
+        analyze as analyze_with_tests, analyze_with_options,
     };
     use std::collections::HashSet;
 
@@ -908,6 +997,7 @@ mod tests {
             module_scope: vec![],
             uniform_field_group: None,
             dead_code_allowed: false,
+            shared_ownership: None,
         }
     }
 
@@ -943,6 +1033,25 @@ mod tests {
 
     fn field(mut definition: Definition) -> Definition {
         definition.kind = DefinitionKind::Field;
+        definition
+    }
+
+    fn shared_field(
+        id: &str,
+        pointer: SharedPointerKind,
+        direct_construction: bool,
+        inner_deref_use: bool,
+        other_construction: bool,
+        other_use: bool,
+    ) -> Definition {
+        let mut definition = field(node(id, "lib", false));
+        definition.shared_ownership = Some(SharedOwnership {
+            pointer,
+            direct_construction,
+            inner_deref_use,
+            other_construction,
+            other_use,
+        });
         definition
     }
 
@@ -1036,6 +1145,57 @@ mod tests {
                 .iter()
                 .all(|finding| finding.kind == FindingKind::DeadPublic)
         );
+    }
+
+    #[test]
+    fn reports_shared_ownership_used_only_through_deref() {
+        let input = fragments(
+            vec![shared_field(
+                "State::values",
+                SharedPointerKind::Arc,
+                true,
+                true,
+                false,
+                false,
+            )],
+            vec![],
+        );
+
+        let findings = analyze(&input, &HashSet::new());
+
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, FindingKind::UnnecessarySharedOwnership);
+    }
+
+    #[test]
+    fn shared_ownership_use_in_tests_suppresses_the_finding() {
+        let production = fragments(
+            vec![shared_field(
+                "State::values",
+                SharedPointerKind::Arc,
+                true,
+                true,
+                false,
+                false,
+            )],
+            vec![],
+        );
+        let tests = test_fragments(
+            vec![shared_field(
+                "State::values",
+                SharedPointerKind::Arc,
+                true,
+                true,
+                false,
+                true,
+            )],
+            vec![],
+        );
+
+        let findings =
+            analyze_with_tests(&production, &tests, &candidate_crates(), &HashSet::new());
+
+        assert!(findings.is_empty());
     }
 
     #[test]

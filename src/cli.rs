@@ -157,6 +157,7 @@ impl LintLevels {
                 | "hawk::unnecessary_public"
                 | "hawk::unnecessary_restricted_visibility"
                 | "hawk::unnecessary_crate_visibility"
+                | "hawk::unnecessary_shared_ownership"
                 | "hawk::unknown_item"
                 | "hawk::ambiguous_item"
                 | "hawk::unfulfilled_expectation"
@@ -183,7 +184,10 @@ impl LintLevels {
 }
 
 fn default_lint_level(code: &str) -> LintLevel {
-    if code == "hawk::unnecessary_crate_visibility" {
+    if matches!(
+        code,
+        "hawk::unnecessary_crate_visibility" | "hawk::unnecessary_shared_ownership"
+    ) {
         LintLevel::Allow
     } else {
         LintLevel::default()
@@ -1137,6 +1141,26 @@ fn write_diagnostic(
             "change this declaration to `pub(crate)`",
             "public declaration",
         ),
+        (FindingKind::UnnecessarySharedOwnership, DefinitionKind::Field, _) => {
+            let pointer = finding
+                .definition
+                .shared_ownership
+                .as_ref()
+                .expect("shared ownership finding has usage details")
+                .pointer
+                .name();
+            (
+                format!(
+                    "`{}` is stored in an `{pointer}`, but every observed source use only dereferences it",
+                    finding.definition.name
+                ),
+                "store the value directly, or use `Box` if heap allocation is intentional",
+                "unnecessarily shared field",
+            )
+        }
+        (FindingKind::UnnecessarySharedOwnership, _, _) => {
+            unreachable!("shared ownership findings apply only to fields")
+        }
         (
             FindingKind::UnnecessaryRestrictedVisibility | FindingKind::UnnecessaryCrateVisibility,
             DefinitionKind::EnumVariant | DefinitionKind::Reexport,
@@ -1513,6 +1537,7 @@ mod tests {
             module_scope: vec![],
             uniform_field_group: None,
             dead_code_allowed: false,
+            shared_ownership: None,
         };
         let finding = Finding {
             kind: FindingKind::UnnecessaryPublic,
@@ -1564,6 +1589,7 @@ mod tests {
             module_scope: vec!["scoped".into()],
             uniform_field_group: None,
             dead_code_allowed: false,
+            shared_ownership: None,
         };
         let finding = Finding {
             kind: FindingKind::UnnecessaryCrateVisibility,
@@ -1614,6 +1640,7 @@ mod tests {
             module_scope: vec!["scoped".into()],
             uniform_field_group: None,
             dead_code_allowed: false,
+            shared_ownership: None,
         };
         let finding = Finding {
             kind: FindingKind::UnnecessaryRestrictedVisibility,
@@ -1660,6 +1687,7 @@ mod tests {
             module_scope: vec![],
             uniform_field_group: None,
             dead_code_allowed: false,
+            shared_ownership: None,
         };
         let finding = Finding {
             kind: FindingKind::DeadPublic,
@@ -1711,6 +1739,10 @@ mod tests {
         );
         assert_eq!(
             levels.level("hawk::unnecessary_crate_visibility"),
+            LintLevel::Allow
+        );
+        assert_eq!(
+            levels.level("hawk::unnecessary_shared_ownership"),
             LintLevel::Allow
         );
         assert_eq!(levels.level("hawk::unknown_item"), LintLevel::Allow);
