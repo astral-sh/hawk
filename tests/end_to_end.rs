@@ -746,6 +746,146 @@ fn exported_symbols_are_treated_as_external_roots() {
 }
 
 #[test]
+fn diagnoses_unnecessary_builtin_derives_when_enabled() {
+    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/unnecessary_derives/Cargo.toml");
+    let target_dir = tempfile::tempdir().expect("temporary target directory");
+    let output = Command::new(env!("CARGO_BIN_EXE_cargo-hawk"))
+        .arg("--manifest-path")
+        .arg(manifest)
+        .arg("--target-dir")
+        .arg(target_dir.path())
+        .args(["-A", "warnings", "-W", "hawk::unnecessary_derive"])
+        .arg("--color=never")
+        .output()
+        .expect("run cargo-hawk");
+
+    assert!(
+        output.status.success(),
+        "cargo-hawk failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for (type_name, trait_name) in [
+        ("UnusedDebug", "Debug"),
+        ("UnusedDefault", "Default"),
+        ("UnusedDefaultEnum", "Default"),
+        ("UnusedClone", "Clone"),
+        ("GroupedUnused", "Debug"),
+        ("GroupedUnused", "Clone"),
+        ("PartiallyUsedDerives", "Debug"),
+        ("CrossCrateOuter", "Clone"),
+        ("Inner", "Clone"),
+        ("SameCrateInner", "Clone"),
+        ("SameCrateOuter", "Clone"),
+        ("UnusedHash", "Hash"),
+        ("UnusedPartialEq", "PartialEq"),
+        ("UnusedEq", "Eq"),
+        ("UnusedPartialOrd", "PartialOrd"),
+        ("UnusedOrd", "Ord"),
+    ] {
+        assert!(
+            stdout.contains(&format!("`{type_name}` derives `{trait_name}`")),
+            "missing {trait_name} finding for {type_name}:\n{stdout}"
+        );
+    }
+    for type_name in [
+        "UsedDebug",
+        "UsedDefault",
+        "UsedClone",
+        "DeadSourceClone",
+        "UsedHash",
+        "UsedEq",
+        "UsedPartialOrd",
+        "UsedOrd",
+        "CrossCrateDebug",
+        "InnerDebug",
+        "OuterDebug",
+        "TraitObjectDebug",
+        "CopyRequiresClone",
+        "OpaqueDebug",
+        "AssociatedDebug",
+        "GenericBoundDebug",
+        "FunctionPointerDebug",
+        "SupertraitEq",
+        "CollectedOrd",
+        "TestOnlyDebug",
+    ] {
+        assert!(
+            !stdout.contains(&format!("`{type_name}` derives")),
+            "required derive on {type_name} was diagnosed:\n{stdout}"
+        );
+    }
+    assert!(!stdout.contains("`PartiallyUsedDerives` derives `Clone`"));
+    assert!(
+        stdout.contains("hawk: 16 finding(s)"),
+        "unexpected findings:\n{stdout}"
+    );
+}
+
+#[test]
+fn fixes_unnecessary_builtin_derives_when_enabled() {
+    let source_workspace =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/unnecessary_derives");
+    let workspace = tempfile::tempdir().expect("temporary fixture workspace");
+    copy_directory(&source_workspace, workspace.path());
+    let target_dir = tempfile::tempdir().expect("temporary target directory");
+    let output = Command::new(env!("CARGO_BIN_EXE_cargo-hawk"))
+        .arg("--manifest-path")
+        .arg(workspace.path().join("Cargo.toml"))
+        .arg("--target-dir")
+        .arg(target_dir.path())
+        .args(["-A", "warnings", "-W", "hawk::unnecessary_derive"])
+        .arg("--fix")
+        .arg("--allow-no-vcs")
+        .arg("--color=never")
+        .output()
+        .expect("run cargo-hawk with derive fixes");
+
+    assert!(
+        output.status.success(),
+        "cargo-hawk fix failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let library =
+        fs::read_to_string(workspace.path().join("library/src/lib.rs")).expect("read fixed source");
+    for type_name in [
+        "UnusedDebug",
+        "UnusedDefault",
+        "UnusedClone",
+        "GroupedUnused",
+        "CrossCrateOuter",
+        "SameCrateOuter",
+        "UnusedHash",
+        "UnusedPartialEq",
+        "UnusedEq",
+        "UnusedPartialOrd",
+        "UnusedOrd",
+    ] {
+        let declaration = format!("pub struct {type_name}");
+        let offset = library.find(&declaration).expect("fixed declaration");
+        let prefix = &library[..offset];
+        assert!(
+            !prefix
+                .lines()
+                .next_back()
+                .is_some_and(|line| line.contains("derive")),
+            "derive attribute remains on {type_name}:\n{library}"
+        );
+    }
+    assert!(library.contains("pub enum UnusedDefaultEnum"));
+    assert!(!library.contains("#[derive()]"));
+    assert!(!library.contains("#[default]"));
+    assert!(library.contains("#[derive(Debug)]\npub struct CrossCrateDebug;"));
+    assert!(library.contains("#[derive(Clone)]\nstruct PartiallyUsedDerives;"));
+    assert!(!library.contains("#[derive(Clone)]\nstruct SameCrateInner;"));
+    assert!(library.contains("#[derive(Clone, Copy)]\nstruct CopyRequiresClone;"));
+    let dependency = fs::read_to_string(workspace.path().join("dependency/src/lib.rs"))
+        .expect("read fixed dependency source");
+    assert!(!dependency.contains("derive"));
+}
+
+#[test]
 fn doctest_consumers_preserve_required_public_visibility_during_fixes() {
     let source_workspace =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/doctest_consumers");

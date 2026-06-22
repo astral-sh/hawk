@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fmt::{Display, Formatter, Write as _};
@@ -14,14 +14,14 @@ use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser, ValueEnum};
 
 use crate::config::{AnalysisTarget, Config, ConfigDiagnostic, ConfigDiagnosticKind};
 use crate::graph::{
-    Definition, DefinitionKind, Finding, FindingKind, FixPlan, FixTarget, Fragment, Span,
-    analyze_with_options,
+    DefinitionKind, Finding, FindingKind, FixPlan, FixTarget, Fragment, Span, analyze_with_options,
+    definition_identity,
 };
 
 #[derive(Debug, Parser)]
 #[command(
     name = "cargo hawk",
-    about = "Find unnecessary public surface in a Cargo binary product"
+    about = "Find unnecessary Rust APIs in a Cargo binary product"
 )]
 struct Args {
     /// Path to the workspace manifest.
@@ -60,7 +60,7 @@ struct Args {
     #[arg(short = 'D', long = "deny", value_name = "LINT")]
     deny: Vec<String>,
 
-    /// Automatically apply machine-applicable visibility fixes.
+    /// Automatically apply machine-applicable Hawk fixes.
     #[arg(long)]
     fix: bool,
 
@@ -157,6 +157,7 @@ impl LintLevels {
                 | "hawk::unnecessary_public"
                 | "hawk::unnecessary_restricted_visibility"
                 | "hawk::unnecessary_crate_visibility"
+                | "hawk::unnecessary_derive"
                 | "hawk::unknown_item"
                 | "hawk::ambiguous_item"
                 | "hawk::unfulfilled_expectation"
@@ -183,7 +184,10 @@ impl LintLevels {
 }
 
 fn default_lint_level(code: &str) -> LintLevel {
-    if code == "hawk::unnecessary_crate_visibility" {
+    if matches!(
+        code,
+        "hawk::unnecessary_crate_visibility" | "hawk::unnecessary_derive"
+    ) {
         LintLevel::Allow
     } else {
         LintLevel::default()
@@ -303,6 +307,9 @@ impl RustToolchain {
 }
 
 fn cargo_rustc(workspace_root: &Path, manifest_path: &Path) -> Result<OsString> {
+    if let Some(rustc) = env::var_os("RUSTC") {
+        return Ok(rustc);
+    }
     let probe_dir = tempfile::tempdir().context("create Cargo rustc probe directory")?;
     let output_path = probe_dir.path().join("rustc");
     let executable = env::current_exe().context("locate Hawk executable for Cargo rustc probe")?;
@@ -426,6 +433,10 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
         .with_context(|| format!("resolve manifest path for {}", args.manifest_path.display()))?;
     let toolchain = RustToolchain::discover(&workspace_root, &manifest_path)?;
     let config = Config::load(&workspace_root, args.config.as_deref())?;
+    let collect_unnecessary_derives = lint_levels
+        .level(FindingKind::UnnecessaryDerive.code())
+        .is_emitted()
+        || config.mentions_lint(FindingKind::UnnecessaryDerive);
     let analysis_target =
         AnalysisTarget::from_rustc(args.target.as_deref(), toolchain.rustc(), &workspace_root)?;
     let mut production_products: Vec<ProductionSelection<'_>> = Vec::new();
@@ -514,6 +525,7 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
         target_dir: &target_dir,
         driver: &driver,
         toolchain: &toolchain,
+        collect_unnecessary_derives,
     };
     for (index, product) in production_products.iter().copied().enumerate() {
         cargo.run(
@@ -549,6 +561,7 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
     let excluded: HashSet<String> = args.excluded_crates.iter().cloned().collect();
     if args.fix {
         let mut fix_iteration = 0;
+        let max_fix_iterations = candidate_crates.len().saturating_add(4);
         loop {
             let initial_findings = config.apply(
                 &analysis_target,
@@ -575,70 +588,77 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
                         finding.kind,
                         FindingKind::UnnecessaryRestrictedVisibility
                             | FindingKind::UnnecessaryCrateVisibility
+                            | FindingKind::UnnecessaryDerive
                     ) || (fix_iteration == 0 && finding.kind == FindingKind::UnnecessaryPublic)
                 })
                 .collect();
-            let production_fix_plan = fix_plan_for(
-                fixable_findings
-                    .iter()
-                    .copied()
-                    .filter(|finding| !finding.test_only && !finding.test_compiled_only),
-                &production_fragments,
-            );
-            let test_fix_plan = fix_plan_for(
-                fixable_findings
-                    .iter()
-                    .copied()
-                    .filter(|finding| finding.test_only || finding.test_compiled_only),
-                &test_fragments,
-            );
-            // A grouped `pub use` has one visibility span even when its aliases
-            // are approved by different consumer modes. Project every approved
-            // finding through each graph so fixes never name declarations
-            // absent from that compilation mode.
-            let production_emission_plan =
-                fix_plan_for(fixable_findings.iter().copied(), &production_fragments);
-            let test_emission_plan =
-                fix_plan_for(fixable_findings.iter().copied(), &test_fragments);
+            let fixable_layers =
+                fixable_finding_layers(fixable_findings, &production_fragments, &test_fragments)?;
             let mut applied_fixes = false;
-            if !test_fix_plan.targets.is_empty() {
-                let fix_packages = fix_packages(&metadata, &test_fix_plan)?;
-                let fix_plan_path = graph_dir.join(format!("test-fix-plan-{fix_iteration}"));
-                write_fix_plan(&fix_plan_path, &test_emission_plan)?;
-                cargo.run(
-                    "fix",
-                    &format!("{run_id}-test-fix-{fix_iteration}"),
-                    &non_production_graph_dir,
-                    CargoSelection::FixNonProduction(FixRequest {
-                        plan: &fix_plan_path,
-                        packages: &fix_packages,
-                        allow_dirty: fix_iteration > 0,
-                    }),
-                )?;
-                applied_fixes = true;
-            }
-            if !production_fix_plan.targets.is_empty() {
-                let fix_packages = fix_packages(&metadata, &production_fix_plan)?;
-                let fix_plan_path = graph_dir.join(format!("production-fix-plan-{fix_iteration}"));
-                write_fix_plan(&fix_plan_path, &production_emission_plan)?;
-                cargo.run(
-                    "fix",
-                    &format!("{run_id}-production-fix-{fix_iteration}"),
-                    &production_graph_dir,
-                    CargoSelection::FixProduction(FixRequest {
-                        plan: &fix_plan_path,
-                        packages: &fix_packages,
-                        allow_dirty: fix_iteration > 0 || applied_fixes,
-                    }),
-                )?;
-                applied_fixes = true;
+            for (fix_layer, fixable_findings) in fixable_layers.into_iter().enumerate() {
+                let production_fix_plan = fix_plan_for(
+                    fixable_findings
+                        .iter()
+                        .copied()
+                        .filter(|finding| !finding.test_only && !finding.test_compiled_only),
+                    &production_fragments,
+                );
+                let test_fix_plan = fix_plan_for(
+                    fixable_findings
+                        .iter()
+                        .copied()
+                        .filter(|finding| finding.test_only || finding.test_compiled_only),
+                    &test_fragments,
+                );
+                // A grouped `pub use` has one visibility span even when its aliases
+                // are approved by different consumer modes. Project every approved
+                // finding through each graph so fixes never name declarations
+                // absent from that compilation mode.
+                let production_emission_plan =
+                    fix_plan_for(fixable_findings.iter().copied(), &production_fragments);
+                let test_emission_plan =
+                    fix_plan_for(fixable_findings.iter().copied(), &test_fragments);
+                if !test_fix_plan.targets.is_empty() {
+                    let fix_packages = fix_packages(&metadata, &test_fix_plan)?;
+                    let fix_plan_path =
+                        graph_dir.join(format!("test-fix-plan-{fix_iteration}-{fix_layer}"));
+                    write_fix_plan(&fix_plan_path, &test_emission_plan)?;
+                    cargo.run(
+                        "fix",
+                        &format!("{run_id}-test-fix-{fix_iteration}-{fix_layer}"),
+                        &non_production_graph_dir,
+                        CargoSelection::FixNonProduction(FixRequest {
+                            plan: &fix_plan_path,
+                            packages: &fix_packages,
+                            allow_dirty: fix_iteration > 0 || applied_fixes,
+                        }),
+                    )?;
+                    applied_fixes = true;
+                }
+                if !production_fix_plan.targets.is_empty() {
+                    let fix_packages = fix_packages(&metadata, &production_fix_plan)?;
+                    let fix_plan_path =
+                        graph_dir.join(format!("production-fix-plan-{fix_iteration}-{fix_layer}"));
+                    write_fix_plan(&fix_plan_path, &production_emission_plan)?;
+                    cargo.run(
+                        "fix",
+                        &format!("{run_id}-production-fix-{fix_iteration}-{fix_layer}"),
+                        &production_graph_dir,
+                        CargoSelection::FixProduction(FixRequest {
+                            plan: &fix_plan_path,
+                            packages: &fix_packages,
+                            allow_dirty: fix_iteration > 0 || applied_fixes,
+                        }),
+                    )?;
+                    applied_fixes = true;
+                }
             }
             if !applied_fixes {
                 break;
             }
             fix_iteration += 1;
-            if fix_iteration > 3 {
-                bail!("visibility fixes did not converge after {fix_iteration} iterations");
+            if fix_iteration > max_fix_iterations {
+                bail!("fixes did not converge after {fix_iteration} iterations");
             }
             clear_fragments(&production_graph_dir)?;
             clear_fragments(&non_production_graph_dir)?;
@@ -776,6 +796,7 @@ struct InstrumentedCargo<'a> {
     target_dir: &'a Path,
     driver: &'a Path,
     toolchain: &'a RustToolchain,
+    collect_unnecessary_derives: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -887,6 +908,9 @@ impl InstrumentedCargo<'_> {
             .env("HAWK_ROOT_CRATE", root_crate)
             .env("HAWK_CONSUMER_MODE", consumer_mode)
             .env("HAWK_RUN_ID", run_id);
+        if self.collect_unnecessary_derives {
+            command.env("HAWK_UNNECESSARY_DERIVE", "1");
+        }
         if matches!(selection, CargoSelection::Doctests) {
             command
                 .env("RUSTC_BOOTSTRAP", "1")
@@ -963,40 +987,121 @@ fn fix_plan_for<'a>(
     findings: impl Iterator<Item = &'a Finding<'a>>,
     fragments: &[Fragment],
 ) -> FixPlan {
+    let findings: HashMap<_, _> = findings
+        .map(|finding| (definition_identity(finding.definition), finding))
+        .collect();
     FixPlan {
-        targets: findings
-            .flat_map(|finding| {
-                fragments
-                    .iter()
-                    .flat_map(|fragment| &fragment.definitions)
-                    .filter(move |definition| same_declaration(finding.definition, definition))
-                    .map(move |definition| FixTarget {
-                        id: definition.id.clone(),
-                        crate_name: definition.crate_name.clone(),
-                        name: definition.name.clone(),
-                        definition_kind: definition.kind,
-                        span: definition.span.clone(),
-                        kind: finding.kind,
-                        replacement: finding
-                            .replacement
-                            .expect("fixable visibility finding has a replacement"),
-                    })
+        targets: fragments
+            .iter()
+            .flat_map(|fragment| &fragment.definitions)
+            .filter_map(|definition| {
+                let finding = findings.get(&definition_identity(definition))?;
+                Some(FixTarget {
+                    id: definition.id.clone(),
+                    crate_name: definition.crate_name.clone(),
+                    name: definition.name.clone(),
+                    definition_kind: definition.kind,
+                    span: definition.span.clone(),
+                    kind: finding.kind,
+                    replacement: finding.replacement,
+                })
             })
             .collect(),
     }
 }
 
-fn same_declaration(left: &Definition, right: &Definition) -> bool {
-    left.crate_name == right.crate_name
-        && left.name == right.name
-        && left.kind == right.kind
-        && match (&left.span, &right.span) {
-            (Some(left), Some(right)) => {
-                left.file == right.file && left.line == right.line && left.column == right.column
-            }
-            (None, None) => true,
-            _ => false,
+fn fixable_finding_layers<'a>(
+    findings: Vec<&'a Finding<'a>>,
+    production_fragments: &'a [Fragment],
+    test_fragments: &'a [Fragment],
+) -> Result<Vec<Vec<&'a Finding<'a>>>> {
+    let unnecessary_derives: HashMap<_, _> = findings
+        .iter()
+        .copied()
+        .filter(|finding| finding.kind == FindingKind::UnnecessaryDerive)
+        .map(|finding| (definition_identity(finding.definition), finding))
+        .collect();
+    if unnecessary_derives.is_empty() {
+        return Ok((!findings.is_empty())
+            .then_some(findings)
+            .into_iter()
+            .collect());
+    }
+
+    let fragments = production_fragments.iter().chain(test_fragments);
+    let derive_declarations: HashMap<_, _> = fragments
+        .clone()
+        .flat_map(|fragment| &fragment.definitions)
+        .filter(|definition| definition.kind == DefinitionKind::DerivedTrait)
+        .map(|definition| (definition.id.as_str(), definition_identity(definition)))
+        .collect();
+    let unnecessary_ids: HashSet<_> = fragments
+        .clone()
+        .flat_map(|fragment| &fragment.definitions)
+        .filter(|definition| unnecessary_derives.contains_key(&definition_identity(definition)))
+        .map(|definition| definition.id.as_str())
+        .collect();
+    let mut incoming: HashMap<_, usize> = unnecessary_derives
+        .keys()
+        .copied()
+        .map(|identity| (identity, 0))
+        .collect();
+    let mut outgoing: HashMap<_, HashSet<_>> = HashMap::new();
+    for edge in fragments
+        .clone()
+        .flat_map(|fragment| &fragment.edges)
+        .filter(|edge| {
+            edge.kind == crate::graph::EdgeKind::TraitRequirement
+                && unnecessary_ids.contains(edge.from.as_str())
+                && unnecessary_ids.contains(edge.to.as_str())
+        })
+    {
+        let Some(&from) = derive_declarations.get(edge.from.as_str()) else {
+            continue;
+        };
+        let Some(&to) = derive_declarations.get(edge.to.as_str()) else {
+            continue;
+        };
+        if from != to && outgoing.entry(from).or_default().insert(to) {
+            *incoming.entry(to).or_default() += 1;
         }
+    }
+
+    let mut non_derive_findings: Vec<_> = findings
+        .into_iter()
+        .filter(|finding| finding.kind != FindingKind::UnnecessaryDerive)
+        .collect();
+    let mut layers = Vec::new();
+    while !incoming.is_empty() {
+        let ready: Vec<_> = incoming
+            .iter()
+            .filter_map(|(identity, count)| (*count == 0).then_some(*identity))
+            .collect();
+        if ready.is_empty() {
+            bail!("cross-crate derive fix dependencies contain a cycle");
+        }
+
+        let mut layer = Vec::new();
+        if layers.is_empty() {
+            layer.append(&mut non_derive_findings);
+        }
+        layer.extend(
+            ready
+                .iter()
+                .filter_map(|identity| unnecessary_derives.get(identity).copied()),
+        );
+        layers.push(layer);
+
+        for identity in ready {
+            incoming.remove(&identity);
+            for dependency in outgoing.remove(&identity).into_iter().flatten() {
+                if let Some(count) = incoming.get_mut(&dependency) {
+                    *count -= 1;
+                }
+            }
+        }
+    }
+    Ok(layers)
 }
 
 fn fix_packages(metadata: &cargo_metadata::Metadata, fix_plan: &FixPlan) -> Result<Vec<String>> {
@@ -1054,6 +1159,23 @@ fn write_diagnostic(
         production_description
     };
     let (message, help, marker) = match (finding.kind, finding.definition.kind, finding.test_only) {
+        (FindingKind::UnnecessaryDerive, DefinitionKind::DerivedTrait, _) => {
+            let (type_name, trait_name) = finding
+                .definition
+                .name
+                .rsplit_once(" as ")
+                .expect("derived trait definitions encode their type and trait names");
+            (
+                format!(
+                    "`{type_name}` derives `{trait_name}`, but no compiled source use requires that implementation"
+                ),
+                "remove this trait from the derive attribute",
+                "unnecessary derive",
+            )
+        }
+        (FindingKind::UnnecessaryDerive, _, _) => {
+            unreachable!("unnecessary derive findings identify derived trait definitions")
+        }
         (FindingKind::DeadPublic, DefinitionKind::EnumVariant, _) => (
             format!(
                 "`{}` is a public enum variant but is not reachable from {dead_reachability_source}",
@@ -1713,6 +1835,7 @@ mod tests {
             levels.level("hawk::unnecessary_crate_visibility"),
             LintLevel::Allow
         );
+        assert_eq!(levels.level("hawk::unnecessary_derive"), LintLevel::Allow);
         assert_eq!(levels.level("hawk::unknown_item"), LintLevel::Allow);
         assert_eq!(
             levels.level("hawk::unfulfilled_expectation"),
@@ -1727,6 +1850,8 @@ mod tests {
                 "cargo-hawk",
                 "-W",
                 "hawk::unnecessary_crate_visibility",
+                "-W",
+                "hawk::unnecessary_derive",
                 "-Dwarnings",
             ])
             .expect("parse lint-level arguments");
@@ -1736,5 +1861,6 @@ mod tests {
             levels.level("hawk::unnecessary_crate_visibility"),
             LintLevel::Deny
         );
+        assert_eq!(levels.level("hawk::unnecessary_derive"), LintLevel::Deny);
     }
 }

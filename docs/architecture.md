@@ -160,7 +160,7 @@ contains:
 
 - definitions, including source location, item kind, lexical module scope,
   and whether the item is a public-surface, restricted-visibility, or
-  crate-visible candidate;
+  crate-visible candidate, plus source-written supported built-in derives;
 - typed reference edges extracted from bodies and public interfaces;
 - entry-point roots when the crate is a selected production target or non-production
   executable;
@@ -186,13 +186,14 @@ for the optional `pub(super)` reduction.
 
 ### Edge kinds
 
-`src/driver.rs` produces five kinds of graph edge:
+`src/driver.rs` produces six kinds of graph edge:
 
 | Edge                    | Purpose                                                                                 |
 | ----------------------- | --------------------------------------------------------------------------------------- |
 | `Body`                  | A value, function, field, or variant is used by executable code.                        |
 | `Interface`             | A declaration exposes another declaration in its type or ownership relationship.        |
 | `Reexport`              | A named public `use` targets another declaration.                                       |
+| `TraitRequirement`      | Reachable source or another derive requires a concrete derived trait implementation.    |
 | `VisibilityParent`      | A public item is nested below a module whose visibility may also be required.           |
 | `VisibilityRequirement` | A visibility relationship must be preserved even though it is not runtime reachability. |
 
@@ -217,6 +218,14 @@ The analysis then computes two reachability closures:
 Both closures include conservative roots, currently used for trait-associated
 implementation code whose dispatch is not safely modeled by direct call
 edges.
+
+The opt-in derive analysis uses a separate closure so trait-interface edges do
+not make every implementation of the same trait appear used. Compiled source
+requirements seed the closure, and retained derives propagate requirements to
+the derives needed by their field types. Compile-time-only obligations such as
+supertraits, opaque return bounds, and associated-type bounds are conservative
+roots. A supported derive outside that closure produces
+`hawk::unnecessary_derive`.
 
 Separately, Hawk computes the declarations whose public visibility is
 required. Any compiled cross-crate reference requires the referenced
@@ -348,21 +357,23 @@ With `--fix`, Hawk therefore performs one or more fix phases:
      |
      | HAWK_FIX_PLAN points the wrapper at selected declarations
      v
- rustc_driver emits MachineApplicable visibility suggestions
+ rustc_driver emits MachineApplicable visibility and derive suggestions
      |
      v
  re-run production, non-production, and compile-only doctest analysis
 ```
 
 Only enabled, unsuppressed `hawk::unnecessary_public`,
-`hawk::unnecessary_restricted_visibility`, and
-`hawk::unnecessary_crate_visibility` findings enter a fix plan. Restricting
-dead surface without removing it can activate rustc's ordinary `dead_code`
-lint, so `hawk::dead_public` remains report-only. During fix compilations Hawk
-caps ordinary compiler lints so Cargo consumes Hawk's planned suggestions
-rather than unrelated compiler edits. It matches declarations across
-recompilations by compiler ID or equivalent source identity and emits the
-planned replacement.
+`hawk::unnecessary_restricted_visibility`,
+`hawk::unnecessary_crate_visibility`, and `hawk::unnecessary_derive` findings
+enter a fix plan. Restricting dead surface without removing it can activate
+rustc's ordinary `dead_code` lint, so `hawk::dead_public` remains report-only.
+During fix compilations Hawk caps ordinary compiler lints so Cargo consumes
+Hawk's planned suggestions rather than unrelated compiler edits. It matches
+declarations across recompilations by compiler ID or equivalent source
+identity and emits the planned replacement. Derive fixes group all selected
+entries from one direct `#[derive(...)]` attribute into a single suggestion;
+unsupported attribute forms retain the diagnostic without an automatic edit.
 
 The re-analysis matters: a `pub` to `pub(crate)` change can expose a further
 module-local reduction, and any visibility change can alter downstream

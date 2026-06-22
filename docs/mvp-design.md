@@ -52,11 +52,11 @@ remains allow-by-default until explicitly enabled. The options apply after
 `hawk.toml` suppressions and cover both visibility findings and configuration
 diagnostics for stale selectors or unfulfilled expectations. Invalid
 configuration and instrumented build failures fail independently of lint
-levels. With `--fix`, Hawk converts
-enabled, unsuppressed visibility-reduction findings to machine-applicable
-suggestions and delegates editing and validation to `cargo fix`. Dead-public
-findings remain report-only because narrowing unused surface can activate
-rustc's `dead_code` lint.
+levels. With `--fix`, Hawk converts enabled, unsuppressed visibility-reduction
+and unnecessary-derive findings to machine-applicable suggestions and
+delegates editing and validation to `cargo fix`. Dead-public findings remain
+report-only because narrowing unused surface can activate rustc's `dead_code`
+lint.
 
 ## Initial scope
 
@@ -169,6 +169,15 @@ the target kind and absence of potential external consumers make narrowing
 provably type-checking-safe. Lexical module scopes attached to definitions
 also let the merged graph prove narrower visibility for explicit restricted
 visibility modifiers.
+
+The implementation also records source-written built-in derive implementations
+for the opt-in `hawk::unnecessary_derive` lint. Concrete trait selections,
+instantiated generic bounds, trait-object coercions, and dependencies between
+derives form a separate requirement graph. Compile-time-only requirements such
+as supertraits, opaque return bounds, and associated-type bounds conservatively
+retain derives. The rule excludes procedural derives and `Copy`. Its fix
+removes built-in trait entries from direct `#[derive(...)]` attributes; lint
+findings from other attribute forms remain report-only.
 
 Fixing uses additional compilation phases because findings are determined
 only after Hawk merges graph fragments. Hawk builds fix plans from emitted

@@ -80,6 +80,14 @@ level = "expect"
 reason = "called by generated platform code that Hawk does not model"
 
 [[override]]
+lint = "hawk::unnecessary_derive"
+crate = "library"
+item = "State as Debug"
+kind = "derived_trait"
+level = "expect"
+reason = "required by generated formatting code"
+
+[[override]]
 lint = "hawk::dead_public"
 crate = "platform"
 item = "windows_only_api"
@@ -97,9 +105,10 @@ suppresses none of them.
 
 The `item` value names Hawk's diagnostic path. For exported aliases, use the
 alias name, such as `PublicAlias`; for modules, use the module path, such as
-`api::internal`. Add `kind` when separate Rust namespaces define declarations
-with the same path. It accepts Hawk's item-kind names, such as `function`,
-`type_alias`, and `constant`.
+`api::internal`; for a derive, use the type path and trait, such as
+`model::State as Debug`. Add `kind` when separate Rust namespaces define
+declarations with the same path. It accepts Hawk's item-kind names, such as
+`function`, `type_alias`, `constant`, and `derived_trait`.
 
 Overrides filter diagnostics only. Unlike a `[[production]]` entry, an
 override does not define a production target, establish reachability, or

@@ -115,7 +115,7 @@ Hawk accepts Clippy-style ordered `-A`/`--allow`, `-W`/`--warn`, and
 
 The supported selectors are `warnings`, `hawk::dead_public`,
 `hawk::unnecessary_public`, `hawk::unnecessary_restricted_visibility`,
-`hawk::unnecessary_crate_visibility`, `hawk::unknown_item`,
+`hawk::unnecessary_crate_visibility`, `hawk::unnecessary_derive`, `hawk::unknown_item`,
 `hawk::ambiguous_item`, and `hawk::unfulfilled_expectation`. Denied diagnostics
 are emitted as errors and cause a non-zero exit status. Invalid configuration
 and failed instrumented Cargo builds fail independently of lint levels.
@@ -126,9 +126,25 @@ and failed instrumented Cargo builds fail independently of lint levels.
 `-D hawk::unnecessary_crate_visibility`. The `warnings` group does not enable
 allow-by-default lints.
 
+`hawk::unnecessary_derive` is also allow-by-default. It reports source-written
+built-in derives of `Clone`, `Debug`, `Default`, `Hash`, `PartialEq`, `Eq`,
+`PartialOrd`, and `Ord` when no compiled production, test, benchmark, example,
+or doctest use requires the implementation. Direct trait calls, operators,
+formatting, instantiated generic bounds, trait-object coercions, opaque return
+bounds, associated-type bounds, supertraits, and dependencies between derives
+retain the implementation. Procedural derives and `Copy` are outside the
+initial analysis. Enable the lint with:
+
+```sh
+./target/debug/cargo-hawk \
+  --manifest-path /path/to/workspace/Cargo.toml \
+  -W hawk::unnecessary_derive
+```
+
 ## Apply fixes
 
-Pass `--fix` to apply visibility reductions through Cargo's fix machinery:
+Pass `--fix` to apply visibility reductions and unnecessary derive removals
+through Cargo's fix machinery:
 
 ```sh
 ./target/debug/cargo-hawk \
@@ -141,12 +157,15 @@ visibility findings. `hawk::unnecessary_public` reduces `pub` to `pub(crate)`.
 `hawk::unnecessary_restricted_visibility` removes an explicit restricted
 visibility modifier when the item can be private.
 `hawk::unnecessary_crate_visibility` optionally reduces `pub(crate)` to
-`pub(super)`. `hawk::dead_public` remains report-only because a
-visibility-only edit can activate rustc's `dead_code` lint; removing dead
-surface may require editing its remaining internal uses. Hawk delegates edit
-application and validation to `cargo fix`, including Cargo's source-control
-safety checks; pass `--allow-dirty`, `--allow-staged`, or `--allow-no-vcs`
-with `--fix` when the corresponding Cargo override is appropriate.
+`pub(super)`. `hawk::unnecessary_derive` removes built-in trait entries from
+direct `#[derive(...)]` attributes, grouping removals from the same attribute
+into one edit. Findings from other attribute forms remain report-only.
+`hawk::dead_public` is not fixed automatically because a visibility-only edit
+can activate rustc's `dead_code` lint; removing dead surface may require
+editing its remaining internal uses. Hawk delegates edit application and
+validation to `cargo fix`, including Cargo's source-control safety checks;
+pass `--allow-dirty`, `--allow-staged`, or `--allow-no-vcs` with `--fix` when
+the corresponding Cargo override is appropriate.
 
 Fixes are limited to workspace library packages in the configured production
 or non-production surface. Hawk rechecks configured production targets and

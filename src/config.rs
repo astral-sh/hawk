@@ -319,6 +319,10 @@ impl Config {
         self.preserve_uniform_field_visibility
     }
 
+    pub fn mentions_lint(&self, lint: FindingKind) -> bool {
+        self.overrides.iter().any(|entry| entry.lint == lint)
+    }
+
     pub fn apply<'findings, 'config>(
         &'config self,
         target: &AnalysisTarget,

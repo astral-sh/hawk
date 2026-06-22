@@ -31,7 +31,7 @@ pub struct FixTarget {
     pub definition_kind: DefinitionKind,
     pub span: Option<Span>,
     pub kind: FindingKind,
-    pub replacement: VisibilityReduction,
+    pub replacement: Option<VisibilityReduction>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -69,6 +69,7 @@ pub enum EdgeKind {
     Body,
     Interface,
     Reexport,
+    TraitRequirement,
     VisibilityParent,
     VisibilityRequirement,
 }
@@ -88,6 +89,7 @@ pub enum DefinitionKind {
     Static,
     Field,
     EnumVariant,
+    DerivedTrait,
     Reexport,
     Module,
     Other,
@@ -107,6 +109,7 @@ pub enum FindingKind {
     UnnecessaryPublic,
     UnnecessaryRestrictedVisibility,
     UnnecessaryCrateVisibility,
+    UnnecessaryDerive,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -134,6 +137,7 @@ impl FindingKind {
             Self::UnnecessaryPublic => "hawk::unnecessary_public",
             Self::UnnecessaryRestrictedVisibility => "hawk::unnecessary_restricted_visibility",
             Self::UnnecessaryCrateVisibility => "hawk::unnecessary_crate_visibility",
+            Self::UnnecessaryDerive => "hawk::unnecessary_derive",
         }
     }
 
@@ -145,6 +149,7 @@ impl FindingKind {
                 Some(Self::UnnecessaryRestrictedVisibility)
             }
             "hawk::unnecessary_crate_visibility" => Some(Self::UnnecessaryCrateVisibility),
+            "hawk::unnecessary_derive" => Some(Self::UnnecessaryDerive),
             _ => None,
         }
     }
@@ -160,7 +165,7 @@ pub struct Finding<'a> {
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-struct DefinitionIdentity<'a> {
+pub(crate) struct DefinitionIdentity<'a> {
     crate_name: &'a str,
     name: &'a str,
     kind: DefinitionKind,
@@ -260,6 +265,13 @@ pub fn analyze_with_options<'a>(
                 .flat_map(|fragment| fragment.conservative_roots.iter().map(String::as_str)),
         );
     let tests = reachable(test_roots, &adjacency);
+    let required_derives = required_derives(
+        production_fragments,
+        test_fragments,
+        &observed_definitions,
+        &edges,
+        &equivalents,
+    );
 
     let mut explicitly_required: HashSet<&str> = production_fragments
         .iter()
@@ -391,6 +403,36 @@ pub fn analyze_with_options<'a>(
                 .flat_map(|fragment| &fragment.definitions),
         )
     {
+        if definition.kind != DefinitionKind::DerivedTrait
+            || !candidate_crates.contains(&definition.crate_name)
+            || excluded_crates.contains(&definition.crate_name)
+        {
+            continue;
+        }
+
+        let identity = definition_identity(definition);
+        if !reported.insert(identity) || required_derives.contains(definition.id.as_str()) {
+            continue;
+        }
+
+        findings.push(Finding {
+            kind: FindingKind::UnnecessaryDerive,
+            definition,
+            replacement: None,
+            test_only: false,
+            test_compiled_only: !production_definitions.contains(&identity),
+        });
+    }
+
+    for definition in production_fragments
+        .iter()
+        .flat_map(|fragment| &fragment.definitions)
+        .chain(
+            test_fragments
+                .iter()
+                .flat_map(|fragment| &fragment.definitions),
+        )
+    {
         let identity = definition_identity(definition);
         if !definition.restricted_visible_api
             || definition.dead_code_allowed
@@ -451,6 +493,57 @@ pub fn analyze_with_options<'a>(
         )
     });
     findings
+}
+
+fn required_derives<'a>(
+    production_fragments: &'a [Fragment],
+    test_fragments: &'a [Fragment],
+    definitions: &[&'a Definition],
+    edges: &[&'a Edge],
+    equivalents: &HashMap<&'a str, Vec<&'a str>>,
+) -> HashSet<&'a str> {
+    let candidates: HashSet<_> = definitions
+        .iter()
+        .filter(|definition| definition.kind == DefinitionKind::DerivedTrait)
+        .map(|definition| definition.id.as_str())
+        .collect();
+    let conservative_roots: HashSet<_> = production_fragments
+        .iter()
+        .chain(test_fragments)
+        .flat_map(|fragment| fragment.conservative_roots.iter().map(String::as_str))
+        .collect();
+    let mut pending: Vec<_> = candidates
+        .iter()
+        .copied()
+        .filter(|candidate| conservative_roots.contains(candidate))
+        .collect();
+    let mut required = HashSet::new();
+    let mut dependencies: HashMap<&str, Vec<&str>> = HashMap::new();
+    for edge in edges.iter().filter(|edge| {
+        edge.kind == EdgeKind::TraitRequirement && candidates.contains(edge.to.as_str())
+    }) {
+        if candidates.contains(edge.from.as_str()) {
+            dependencies
+                .entry(edge.from.as_str())
+                .or_default()
+                .push(edge.to.as_str());
+        } else {
+            pending.push(edge.to.as_str());
+        }
+    }
+
+    while let Some(candidate) = pending.pop() {
+        if !candidates.contains(candidate) || !required.insert(candidate) {
+            continue;
+        }
+        if let Some(equivalent_candidates) = equivalents.get(candidate) {
+            pending.extend(equivalent_candidates.iter().copied());
+        }
+        if let Some(dependencies) = dependencies.get(candidate) {
+            pending.extend(dependencies.iter().copied());
+        }
+    }
+    required
 }
 
 fn field_group_identity(definition: &Definition) -> Option<(&str, &Span)> {
@@ -773,7 +866,10 @@ fn adjacency<'a>(
     equivalents: &HashMap<&'a str, Vec<&'a str>>,
 ) -> HashMap<&'a str, Vec<&'a str>> {
     let mut adjacency: HashMap<&str, Vec<&str>> = HashMap::new();
-    for edge in edges {
+    for edge in edges
+        .iter()
+        .filter(|edge| edge.kind != EdgeKind::TraitRequirement)
+    {
         if edge.kind == EdgeKind::VisibilityRequirement {
             continue;
         }
@@ -828,7 +924,7 @@ fn equivalent_definitions<'a>(
     equivalents
 }
 
-fn definition_identity<'a>(definition: &'a Definition) -> DefinitionIdentity<'a> {
+pub(crate) fn definition_identity<'a>(definition: &'a Definition) -> DefinitionIdentity<'a> {
     DefinitionIdentity {
         crate_name: &definition.crate_name,
         name: &definition.name,
@@ -844,7 +940,11 @@ fn source_definition_identity<'a>(definition: &'a Definition) -> SourceDefinitio
         name: definition
             .span
             .is_none()
-            .then_some(definition.name.as_str()),
+            .then_some(definition.name.as_str())
+            .or_else(|| {
+                (definition.kind == DefinitionKind::DerivedTrait)
+                    .then_some(definition.name.as_str())
+            }),
         kind: definition.kind,
         file: definition.span.as_ref().map(|span| span.file.as_str()),
         line: definition.span.as_ref().map(|span| span.line),
@@ -919,6 +1019,12 @@ mod tests {
     ) -> Definition {
         let mut definition = node(id, crate_name, public_api);
         definition.kind = kind;
+        definition
+    }
+
+    fn derived_trait(id: &str, name: &str) -> Definition {
+        let mut definition = typed_node(id, "lib", false, DefinitionKind::DerivedTrait);
+        definition.name = name.into();
         definition
     }
 
@@ -2234,5 +2340,48 @@ mod tests {
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].kind, FindingKind::UnnecessaryPublic);
         assert_eq!(findings[0].definition.id, "extension_trait");
+    }
+
+    #[test]
+    fn unused_derived_trait_is_reported() {
+        let input = fragments(vec![derived_trait("debug_impl", "State as Debug")], vec![]);
+
+        let findings = analyze(&input, &HashSet::new());
+
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, FindingKind::UnnecessaryDerive);
+        assert_eq!(findings[0].definition.id, "debug_impl");
+    }
+
+    #[test]
+    fn source_trait_requirement_preserves_derive_dependencies() {
+        let input = fragments(
+            vec![
+                node("entry", "lib", false),
+                derived_trait("outer_debug", "Outer as Debug"),
+                derived_trait("inner_debug", "Inner as Debug"),
+            ],
+            vec![
+                Edge {
+                    from: "entry".into(),
+                    to: "outer_debug".into(),
+                    kind: EdgeKind::TraitRequirement,
+                },
+                Edge {
+                    from: "outer_debug".into(),
+                    to: "inner_debug".into(),
+                    kind: EdgeKind::TraitRequirement,
+                },
+            ],
+        );
+        assert!(analyze(&input, &HashSet::new()).is_empty());
+    }
+
+    #[test]
+    fn compile_time_trait_requirement_preserves_derive() {
+        let mut input = fragments(vec![derived_trait("clone_impl", "State as Clone")], vec![]);
+        input[1].conservative_roots.push("clone_impl".into());
+
+        assert!(analyze(&input, &HashSet::new()).is_empty());
     }
 }
