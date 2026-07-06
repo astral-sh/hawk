@@ -516,10 +516,14 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
         driver: &driver,
         toolchain: &toolchain,
     };
-    for (index, product) in production_products.iter().copied().enumerate() {
+    // Every production product uses the same compiler mode and feature set. Reuse one
+    // dependency fingerprint across the product builds so Cargo can retain fragments from
+    // shared dependencies instead of compiling them once per configured binary.
+    let production_run_id = format!("{run_id}-production");
+    for product in production_products.iter().copied() {
         cargo.run(
             "check",
-            &format!("{run_id}-production-{index}"),
+            &production_run_id,
             &production_graph_dir,
             CargoSelection::Production(product),
         )?;
@@ -643,10 +647,11 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
             }
             clear_fragments(&production_graph_dir)?;
             clear_fragments(&non_production_graph_dir)?;
-            for (index, product) in production_products.iter().copied().enumerate() {
+            let production_run_id = format!("{run_id}-post-fix-{fix_iteration}-production");
+            for product in production_products.iter().copied() {
                 cargo.run(
                     "check",
-                    &format!("{run_id}-post-fix-{fix_iteration}-production-{index}"),
+                    &production_run_id,
                     &production_graph_dir,
                     CargoSelection::Production(product),
                 )?;

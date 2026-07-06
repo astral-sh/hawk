@@ -540,6 +540,38 @@ fn production_binary_named_like_a_library_does_not_suppress_its_findings() {
 }
 
 #[test]
+fn production_products_reuse_shared_dependency_compilations() {
+    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/production_consumers/Cargo.toml");
+    let target_dir = tempfile::tempdir().expect("temporary target directory");
+    let output = Command::new(env!("CARGO_BIN_EXE_cargo-hawk"))
+        .arg("--manifest-path")
+        .arg(manifest)
+        .arg("--target-dir")
+        .arg(target_dir.path())
+        .arg("-A")
+        .arg("warnings")
+        .env("CARGO_TERM_COLOR", "never")
+        .output()
+        .expect("run cargo-hawk");
+
+    assert!(
+        output.status.success(),
+        "cargo-hawk failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        stderr
+            .lines()
+            .filter(|line| line.trim_start().starts_with("Checking library "))
+            .count(),
+        2,
+        "the shared library should compile once for production and once for non-production:\n{stderr}"
+    );
+}
+
+#[test]
 fn requires_a_configured_production_binary() {
     let manifest =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/basic/Cargo.toml");
