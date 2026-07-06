@@ -48,10 +48,10 @@ unnecessarily public symbols across crates within a single workspace.
 
 Hawk uses `rustc_private` and must run with the exact Rust toolchain it was
 built against. Prebuilt releases are available for macOS and Linux, but they
-are not independent of Rust. Install the normal Rust 1.95.0 toolchain:
+are not independent of Rust. Install the normal Rust 1.96.1 toolchain:
 
 ```sh
-rustup toolchain install 1.95.0
+rustup toolchain install 1.96.1
 ```
 
 Install the latest prebuilt release:
@@ -71,26 +71,26 @@ Hawk validates the selected compiler before analysis. If a workspace selects
 another Rust version, invoke Hawk with its pinned toolchain:
 
 ```sh
-cargo +1.95.0 hawk
+cargo +1.96.1 hawk
 ```
 
 To build Hawk from source, install the compiler development component:
 
 ```sh
-rustup toolchain install 1.95.0 --component rustc-dev
+rustup toolchain install 1.96.1 --component rustc-dev
 ```
 
 To install the current development version from Git:
 
 ```sh
-RUSTC_BOOTSTRAP=1 cargo +1.95.0 install --locked \
+RUSTC_BOOTSTRAP=1 cargo +1.96.1 install --locked \
   --git https://github.com/astral-sh/hawk cargo-hawk
 ```
 
 Install a released version from crates.io with:
 
 ```sh
-RUSTC_BOOTSTRAP=1 cargo +1.95.0 install --locked cargo-hawk
+RUSTC_BOOTSTRAP=1 cargo +1.96.1 install --locked cargo-hawk
 ```
 
 `RUSTC_BOOTSTRAP=1` is required during installation because `cargo install`
@@ -142,7 +142,7 @@ cargo hawk \
 
 Hawk is experimental. It assumes workspace library crates are internal to the
 configured binary product unless they are explicitly excluded from analysis.
-Because it integrates with compiler internals, it is pinned to Rust 1.95.0.
+Because it integrates with compiler internals, it is pinned to Rust 1.96.1.
 Hawk was authored entirely by GPT-5.5 in Codex.
 
 ## License

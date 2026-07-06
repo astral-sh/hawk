@@ -8,12 +8,12 @@ model.
 
 ## Install a prebuilt release
 
-Hawk is pinned to Rust 1.95.0 and uses `rustc_private`. A prebuilt release
+Hawk is pinned to Rust 1.96.1 and uses `rustc_private`. A prebuilt release
 still requires the exact normal Rust toolchain, but it does not require
 `rustc-dev`, `RUSTC_BOOTSTRAP`, or a source build:
 
 ```sh
-rustup toolchain install 1.95.0
+rustup toolchain install 1.96.1
 ```
 
 Install the latest release with the standalone shell installer:
@@ -31,12 +31,12 @@ both executables on your `PATH` manually.
 Run the Cargo subcommand with the pinned toolchain:
 
 ```sh
-cargo +1.95.0 hawk --manifest-path /path/to/workspace/Cargo.toml
+cargo +1.96.1 hawk --manifest-path /path/to/workspace/Cargo.toml
 ```
 
 ## Build Hawk
 
-Hawk is pinned to Rust 1.95.0 and uses `rustc_private`; the repository
+Hawk is pinned to Rust 1.96.1 and uses `rustc_private`; the repository
 toolchain configuration installs `rustc-dev` when necessary. A source build
 produces a `cargo-hawk` frontend and a `cargo-hawk-driver` compiler wrapper.
 

@@ -81,8 +81,8 @@ struct HawkCallbacks {
 impl Callbacks for HawkCallbacks {
     fn config(&mut self, config: &mut interface::Config) {
         let run_id = env::var("HAWK_RUN_ID").ok();
-        config.psess_created = Some(Box::new(move |parse_session| {
-            parse_session.env_depinfo.get_mut().insert((
+        config.track_state = Some(Box::new(move |session, _| {
+            session.env_depinfo.borrow_mut().insert((
                 Symbol::intern("HAWK_RUN_ID"),
                 run_id.as_deref().map(Symbol::intern),
             ));
@@ -423,7 +423,7 @@ fn collect_fragment(
         }
         if matches!(
             tcx.def_kind(def_id),
-            DefKind::AssocFn | DefKind::AssocConst | DefKind::AssocTy
+            DefKind::AssocFn | DefKind::AssocConst { .. } | DefKind::AssocTy
         ) && matches!(tcx.def_kind(tcx.local_parent(def_id)), DefKind::Trait)
         {
             edges.push(Edge {
@@ -504,7 +504,7 @@ fn collect_fragment(
             let impl_def_id = tcx.local_parent(*def_id);
             matches!(
                 tcx.def_kind(*def_id),
-                DefKind::AssocFn | DefKind::AssocConst | DefKind::AssocTy
+                DefKind::AssocFn | DefKind::AssocConst { .. } | DefKind::AssocTy
             ) && matches!(tcx.def_kind(impl_def_id), DefKind::Impl { of_trait: true })
                 && tcx.effective_visibilities(()).is_reachable(impl_def_id)
         })
@@ -592,7 +592,7 @@ fn collect_fragment(
         .filter(|def_id| {
             matches!(
                 tcx.def_kind(*def_id),
-                DefKind::AssocFn | DefKind::AssocConst
+                DefKind::AssocFn | DefKind::AssocConst { .. }
             ) && matches!(
                 tcx.def_kind(tcx.local_parent(*def_id)),
                 DefKind::Trait | DefKind::Impl { of_trait: true }
@@ -827,7 +827,7 @@ fn diagnostic_kind(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Option<DefinitionKind
         DefKind::Enum => Some(DefinitionKind::Enum),
         DefKind::Union => Some(DefinitionKind::Union),
         DefKind::TyAlias => Some(DefinitionKind::TypeAlias),
-        DefKind::Const => Some(DefinitionKind::Constant),
+        DefKind::Const { .. } => Some(DefinitionKind::Constant),
         DefKind::Static { .. } => Some(DefinitionKind::Static),
         DefKind::Use => Some(DefinitionKind::Reexport),
         DefKind::AssocFn
@@ -838,7 +838,7 @@ fn diagnostic_kind(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Option<DefinitionKind
         {
             Some(DefinitionKind::InherentMethod)
         }
-        DefKind::AssocConst
+        DefKind::AssocConst { .. }
             if matches!(
                 tcx.def_kind(tcx.local_parent(def_id)),
                 DefKind::Impl { of_trait: false }
