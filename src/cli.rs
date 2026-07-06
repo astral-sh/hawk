@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fmt::{Display, Formatter, Write as _};
@@ -14,8 +14,8 @@ use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser, ValueEnum};
 
 use crate::config::{AnalysisTarget, Config, ConfigDiagnostic, ConfigDiagnosticKind};
 use crate::graph::{
-    Definition, DefinitionKind, Finding, FindingKind, FixPlan, FixTarget, Fragment, Span,
-    analyze_with_options,
+    Definition, DefinitionIdentity, DefinitionKind, Finding, FindingKind, FixPlan, FixTarget,
+    Fragment, Span, analyze_with_options,
 };
 
 #[derive(Debug, Parser)]
@@ -579,28 +579,30 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
                     ) || (fix_iteration == 0 && finding.kind == FindingKind::UnnecessaryPublic)
                 })
                 .collect();
+            let production_definitions = definition_index(&production_fragments);
+            let test_definitions = definition_index(&test_fragments);
             let production_fix_plan = fix_plan_for(
                 fixable_findings
                     .iter()
                     .copied()
                     .filter(|finding| !finding.test_only && !finding.test_compiled_only),
-                &production_fragments,
+                &production_definitions,
             );
             let test_fix_plan = fix_plan_for(
                 fixable_findings
                     .iter()
                     .copied()
                     .filter(|finding| finding.test_only || finding.test_compiled_only),
-                &test_fragments,
+                &test_definitions,
             );
             // A grouped `pub use` has one visibility span even when its aliases
             // are approved by different consumer modes. Project every approved
             // finding through each graph so fixes never name declarations
             // absent from that compilation mode.
             let production_emission_plan =
-                fix_plan_for(fixable_findings.iter().copied(), &production_fragments);
+                fix_plan_for(fixable_findings.iter().copied(), &production_definitions);
             let test_emission_plan =
-                fix_plan_for(fixable_findings.iter().copied(), &test_fragments);
+                fix_plan_for(fixable_findings.iter().copied(), &test_definitions);
             let mut applied_fixes = false;
             if !test_fix_plan.targets.is_empty() {
                 let fix_packages = fix_packages(&metadata, &test_fix_plan)?;
@@ -960,17 +962,40 @@ fn write_fix_plan(path: &Path, fix_plan: &FixPlan) -> Result<()> {
     serde_json::to_writer(file, fix_plan).with_context(|| format!("serialize {}", path.display()))
 }
 
+type DefinitionIndex<'a> = HashMap<DefinitionIdentity<'a>, Vec<&'a Definition>>;
+
+fn definition_index(fragments: &[Fragment]) -> DefinitionIndex<'_> {
+    let mut definitions: DefinitionIndex<'_> = HashMap::new();
+    for definition in fragments.iter().flat_map(|fragment| &fragment.definitions) {
+        definitions
+            .entry(DefinitionIdentity::new(
+                &definition.crate_name,
+                &definition.name,
+                definition.kind,
+                definition.span.as_ref(),
+            ))
+            .or_default()
+            .push(definition);
+    }
+    definitions
+}
+
 fn fix_plan_for<'a>(
     findings: impl Iterator<Item = &'a Finding<'a>>,
-    fragments: &[Fragment],
+    definitions: &DefinitionIndex<'_>,
 ) -> FixPlan {
     FixPlan {
         targets: findings
             .flat_map(|finding| {
-                fragments
-                    .iter()
-                    .flat_map(|fragment| &fragment.definitions)
-                    .filter(move |definition| same_declaration(finding.definition, definition))
+                definitions
+                    .get(&DefinitionIdentity::new(
+                        &finding.definition.crate_name,
+                        &finding.definition.name,
+                        finding.definition.kind,
+                        finding.definition.span.as_ref(),
+                    ))
+                    .into_iter()
+                    .flatten()
                     .map(move |definition| FixTarget {
                         id: definition.id.clone(),
                         crate_name: definition.crate_name.clone(),
@@ -985,19 +1010,6 @@ fn fix_plan_for<'a>(
             })
             .collect(),
     }
-}
-
-fn same_declaration(left: &Definition, right: &Definition) -> bool {
-    left.crate_name == right.crate_name
-        && left.name == right.name
-        && left.kind == right.kind
-        && match (&left.span, &right.span) {
-            (Some(left), Some(right)) => {
-                left.file == right.file && left.line == right.line && left.column == right.column
-            }
-            (None, None) => true,
-            _ => false,
-        }
 }
 
 fn fix_packages(metadata: &cargo_metadata::Metadata, fix_plan: &FixPlan) -> Result<Vec<String>> {

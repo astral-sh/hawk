@@ -160,13 +160,31 @@ pub struct Finding<'a> {
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-struct DefinitionIdentity<'a> {
+pub(crate) struct DefinitionIdentity<'a> {
     crate_name: &'a str,
     name: &'a str,
     kind: DefinitionKind,
     file: Option<&'a str>,
     line: Option<usize>,
     column: Option<usize>,
+}
+
+impl<'a> DefinitionIdentity<'a> {
+    pub(crate) fn new(
+        crate_name: &'a str,
+        name: &'a str,
+        kind: DefinitionKind,
+        span: Option<&'a Span>,
+    ) -> Self {
+        Self {
+            crate_name,
+            name,
+            kind,
+            file: span.map(|span| span.file.as_str()),
+            line: span.map(|span| span.line),
+            column: span.map(|span| span.column),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -829,14 +847,12 @@ fn equivalent_definitions<'a>(
 }
 
 fn definition_identity<'a>(definition: &'a Definition) -> DefinitionIdentity<'a> {
-    DefinitionIdentity {
-        crate_name: &definition.crate_name,
-        name: &definition.name,
-        kind: definition.kind,
-        file: definition.span.as_ref().map(|span| span.file.as_str()),
-        line: definition.span.as_ref().map(|span| span.line),
-        column: definition.span.as_ref().map(|span| span.column),
-    }
+    DefinitionIdentity::new(
+        &definition.crate_name,
+        &definition.name,
+        definition.kind,
+        definition.span.as_ref(),
+    )
 }
 
 fn source_definition_identity<'a>(definition: &'a Definition) -> SourceDefinitionIdentity<'a> {

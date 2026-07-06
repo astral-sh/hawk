@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -28,8 +28,8 @@ use rustc_span::hygiene::{ExpnKind, MacroKind};
 use rustc_span::{BytePos, FileName, Pos};
 
 use crate::graph::{
-    Definition, DefinitionKind, Edge, EdgeKind, FindingKind, FixPlan, Fragment, Span,
-    VisibilityReduction,
+    Definition, DefinitionIdentity, DefinitionKind, Edge, EdgeKind, FindingKind, FixPlan,
+    FixTarget, Fragment, Span, VisibilityReduction,
 };
 
 pub fn is_wrapper_invocation(args: &[String]) -> bool {
@@ -110,6 +110,7 @@ fn read_fix_plan(path: &Path) -> Result<FixPlan> {
 }
 
 fn emit_fixes(tcx: TyCtxt<'_>, fix_plan: &FixPlan) {
+    let fix_plan = FixPlanIndex::new(fix_plan);
     let crate_items = tcx.hir_crate_items(());
     let mut visibility_fixes = Vec::new();
     for owner in crate_items.owners() {
@@ -124,7 +125,7 @@ fn emit_fixes(tcx: TyCtxt<'_>, fix_plan: &FixPlan) {
         if let Some(visibility_span) = visibility_span {
             visibility_fixes.push((
                 visibility_span,
-                planned_fix(tcx, def_id, definition_kind, &fix_plan.targets),
+                planned_fix(tcx, def_id, definition_kind, &fix_plan),
             ));
         }
     }
@@ -137,7 +138,7 @@ fn emit_fixes(tcx: TyCtxt<'_>, fix_plan: &FixPlan) {
         for field in fields {
             visibility_fixes.push((
                 field.vis_span,
-                planned_fix(tcx, field.def_id, DefinitionKind::Field, &fix_plan.targets),
+                planned_fix(tcx, field.def_id, DefinitionKind::Field, &fix_plan),
             ));
         }
     }
@@ -159,32 +160,65 @@ fn emit_fixes(tcx: TyCtxt<'_>, fix_plan: &FixPlan) {
     }
 }
 
+struct FixPlanIndex<'a> {
+    by_id: HashMap<&'a str, &'a FixTarget>,
+    by_identity: HashMap<DefinitionIdentity<'a>, &'a FixTarget>,
+}
+
+impl<'a> FixPlanIndex<'a> {
+    fn new(fix_plan: &'a FixPlan) -> Self {
+        Self {
+            by_id: fix_plan
+                .targets
+                .iter()
+                .map(|target| (target.id.as_str(), target))
+                .collect(),
+            by_identity: fix_plan
+                .targets
+                .iter()
+                .map(|target| {
+                    (
+                        DefinitionIdentity::new(
+                            &target.crate_name,
+                            &target.name,
+                            target.definition_kind,
+                            target.span.as_ref(),
+                        ),
+                        target,
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    fn get(&self, id: &str, identity: &DefinitionIdentity<'_>) -> Option<&'a FixTarget> {
+        self.by_id
+            .get(id)
+            .or_else(|| self.by_identity.get(identity))
+            .copied()
+    }
+}
+
 fn planned_fix(
     tcx: TyCtxt<'_>,
     def_id: LocalDefId,
     definition_kind: DefinitionKind,
-    targets: &[crate::graph::FixTarget],
+    fix_plan: &FixPlanIndex<'_>,
 ) -> Option<(FindingKind, VisibilityReduction)> {
     let id = id(tcx, def_id.to_def_id());
     let crate_name = tcx.crate_name(LOCAL_CRATE).to_string();
     let name = definition_name(tcx, def_id, definition_kind);
     let definition_span = span(tcx, def_id);
-    targets
-        .iter()
-        .find(|target| {
-            target.id == id
-                || (target.crate_name == crate_name
-                    && target.name == name
-                    && target.definition_kind == definition_kind
-                    && match (&target.span, &definition_span) {
-                        (Some(target), Some(definition)) => {
-                            target.file == definition.file
-                                && target.line == definition.line
-                                && target.column == definition.column
-                        }
-                        _ => false,
-                    })
-        })
+    fix_plan
+        .get(
+            &id,
+            &DefinitionIdentity::new(
+                &crate_name,
+                &name,
+                definition_kind,
+                definition_span.as_ref(),
+            ),
+        )
         .map(|target| (target.kind, target.replacement))
 }
 
