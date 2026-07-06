@@ -21,7 +21,8 @@ use crate::graph::{
 #[derive(Debug, Parser)]
 #[command(
     name = "cargo hawk",
-    about = "Find unnecessary public surface in a Cargo binary product"
+    about = "Find unnecessary public surface in a Cargo binary product",
+    version
 )]
 struct Args {
     /// Path to the workspace manifest.

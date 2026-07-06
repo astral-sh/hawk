@@ -74,6 +74,21 @@ fn rejects_non_utf8_arguments_without_panicking() {
     }
 }
 
+#[test]
+fn prints_version() {
+    let output = Command::new(env!("CARGO_BIN_EXE_cargo-hawk"))
+        .args(["hawk", "--version"])
+        .output()
+        .expect("run cargo-hawk --version");
+
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stdout).expect("version output is UTF-8"),
+        concat!("cargo hawk ", env!("CARGO_PKG_VERSION"), "\n")
+    );
+    assert!(output.stderr.is_empty());
+}
+
 #[cfg(unix)]
 #[test]
 fn honors_cargo_configured_compiler() {
