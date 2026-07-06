@@ -231,14 +231,34 @@ pub fn analyze_with_options<'a>(
                 .map(move |definition| (definition.id.as_str(), compilation_id))
         })
         .collect();
-    let edges: Vec<&Edge> = production_fragments
+    let production_edges: Vec<&Edge> = production_fragments
         .iter()
-        .chain(test_fragments)
         .flat_map(|fragment| &fragment.edges)
+        .collect();
+    let test_edges: Vec<&Edge> = test_fragments
+        .iter()
+        .flat_map(|fragment| &fragment.edges)
+        .collect();
+    let edges: Vec<&Edge> = production_edges
+        .iter()
+        .chain(&test_edges)
+        .copied()
         .collect();
     let equivalents = equivalent_definitions(&definitions, &definition_compilation_ids);
     let required_scopes = required_scopes(&definitions, &edges, &equivalents);
-    let adjacency = adjacency(&edges, &equivalents);
+    let production_definition_ids: HashSet<&str> = production_fragments
+        .iter()
+        .flat_map(|fragment| &fragment.definitions)
+        .map(|definition| definition.id.as_str())
+        .collect();
+    let test_definition_ids: HashSet<&str> = test_fragments
+        .iter()
+        .flat_map(|fragment| &fragment.definitions)
+        .map(|definition| definition.id.as_str())
+        .collect();
+    let production_adjacency =
+        adjacency(&production_edges, &equivalents, &production_definition_ids);
+    let test_adjacency = adjacency(&test_edges, &equivalents, &test_definition_ids);
 
     let production_roots = production_fragments
         .iter()
@@ -249,7 +269,7 @@ pub fn analyze_with_options<'a>(
                 .iter()
                 .flat_map(|fragment| fragment.conservative_roots.iter().map(String::as_str)),
         );
-    let production = reachable(production_roots, &adjacency);
+    let production = reachable(production_roots, &production_adjacency);
     let test_roots = test_fragments
         .iter()
         .filter(|fragment| fragment.is_product_root)
@@ -259,7 +279,7 @@ pub fn analyze_with_options<'a>(
                 .iter()
                 .flat_map(|fragment| fragment.conservative_roots.iter().map(String::as_str)),
         );
-    let tests = reachable(test_roots, &adjacency);
+    let tests = reachable(test_roots, &test_adjacency);
 
     let mut explicitly_required: HashSet<&str> = production_fragments
         .iter()
@@ -356,8 +376,8 @@ pub fn analyze_with_options<'a>(
         }
 
         let test_compiled_only = !production_definitions.contains(&identity);
-        let is_production_live = is_live(definition, &edges, &production);
-        let is_test_live = is_live(definition, &edges, &tests);
+        let is_production_live = is_live(definition, &production_edges, &production, &equivalents);
+        let is_test_live = is_live(definition, &test_edges, &tests, &equivalents);
         if !is_production_live && !is_test_live {
             findings.push(Finding {
                 kind: FindingKind::DeadPublic,
@@ -413,8 +433,8 @@ pub fn analyze_with_options<'a>(
         };
         reported.insert(identity);
         let test_compiled_only = !production_definitions.contains(&identity);
-        let is_production_live = is_live(definition, &edges, &production);
-        let is_test_live = is_live(definition, &edges, &tests);
+        let is_production_live = is_live(definition, &production_edges, &production, &equivalents);
+        let is_test_live = is_live(definition, &test_edges, &tests, &equivalents);
         findings.push(Finding {
             kind: match replacement {
                 VisibilityReduction::Private => FindingKind::UnnecessaryRestrictedVisibility,
@@ -682,13 +702,23 @@ fn propagates_visibility_requirement(kind: EdgeKind) -> bool {
     )
 }
 
-fn is_live(definition: &Definition, edges: &[&Edge], reachable: &HashSet<&str>) -> bool {
+fn is_live(
+    definition: &Definition,
+    edges: &[&Edge],
+    reachable: &HashSet<&str>,
+    equivalents: &HashMap<&str, Vec<&str>>,
+) -> bool {
+    let equivalent_ids = equivalents
+        .get(definition.id.as_str())
+        .into_iter()
+        .flatten()
+        .copied();
+    let ids = std::iter::once(definition.id.as_str()).chain(equivalent_ids);
     if definition.kind == DefinitionKind::Reexport {
-        reexport_targets(definition.id.as_str(), edges)
-            .iter()
+        ids.flat_map(|id| reexport_targets(id, edges))
             .any(|target| reachable.contains(target))
     } else {
-        reachable.contains(definition.id.as_str())
+        ids.into_iter().any(|id| reachable.contains(id))
     }
 }
 
@@ -771,6 +801,7 @@ fn is_analyzable_reexport(targets: &[&str], definitions: &HashMap<&str, &Definit
 fn adjacency<'a>(
     edges: &'a [&Edge],
     equivalents: &HashMap<&'a str, Vec<&'a str>>,
+    definition_ids: &HashSet<&str>,
 ) -> HashMap<&'a str, Vec<&'a str>> {
     let mut adjacency: HashMap<&str, Vec<&str>> = HashMap::new();
     for edge in edges {
@@ -783,10 +814,14 @@ fn adjacency<'a>(
             .push(edge.to.as_str());
     }
     for (source, targets) in equivalents {
-        adjacency
-            .entry(source)
-            .or_default()
-            .extend(targets.iter().copied());
+        if definition_ids.contains(source) {
+            adjacency.entry(source).or_default().extend(
+                targets
+                    .iter()
+                    .copied()
+                    .filter(|target| definition_ids.contains(target)),
+            );
+        }
     }
     adjacency
 }
@@ -1658,6 +1693,48 @@ mod tests {
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].kind, FindingKind::UnnecessaryPublic);
         assert_eq!(findings[0].definition.id, "helper");
+        assert!(findings[0].test_only);
+        assert!(!findings[0].test_compiled_only);
+    }
+
+    #[test]
+    fn production_reachability_does_not_follow_test_only_edges() {
+        let mut production_input = fragments(
+            vec![
+                node("production_entry", "lib", true),
+                node("production_helper", "lib", true),
+            ],
+            vec![],
+        );
+        production_input[0].edges.push(Edge {
+            from: "main".into(),
+            to: "production_entry".into(),
+            kind: EdgeKind::Body,
+        });
+
+        let mut test_entry = node("test_entry", "lib", true);
+        test_entry.name = "production_entry".into();
+        let mut test_helper = node("test_helper", "lib", true);
+        test_helper.name = "production_helper".into();
+        let test_input = test_fragments(
+            vec![test_entry, test_helper],
+            vec![Edge {
+                from: "test_entry".into(),
+                to: "test_helper".into(),
+                kind: EdgeKind::Body,
+            }],
+        );
+
+        let findings = analyze_with_tests(
+            &production_input,
+            &test_input,
+            &candidate_crates(),
+            &HashSet::new(),
+        );
+
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, FindingKind::UnnecessaryPublic);
+        assert_eq!(findings[0].definition.id, "production_helper");
         assert!(findings[0].test_only);
         assert!(!findings[0].test_compiled_only);
     }
