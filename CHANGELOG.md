@@ -2,6 +2,26 @@
 
 <!-- prettier-ignore-start -->
 
+
+## 0.1.4
+
+Released on 2026-07-06.
+
+### Other changes
+
+- Allow Hawk fix passes to dirty the workspace ([#77](https://github.com/astral-sh/hawk/pull/77))
+- Diagnose unused restricted items ([#80](https://github.com/astral-sh/hawk/pull/80))
+- Disambiguate repeated path module declarations ([#78](https://github.com/astral-sh/hawk/pull/78))
+- Document the default target directory ([#84](https://github.com/astral-sh/hawk/pull/84))
+- Honor dead code allow attributes ([#81](https://github.com/astral-sh/hawk/pull/81))
+- Preserve trait-associated interface visibility ([#75](https://github.com/astral-sh/hawk/pull/75))
+- Preserve uniform field visibility ([#73](https://github.com/astral-sh/hawk/pull/73))
+- Reject non-UTF-8 arguments without panicking ([#83](https://github.com/astral-sh/hawk/pull/83))
+- Support configured compiler aliases ([#82](https://github.com/astral-sh/hawk/pull/82))
+- Treat exported symbols as analysis roots ([#79](https://github.com/astral-sh/hawk/pull/79))
+- Unify path-module source definitions ([#76](https://github.com/astral-sh/hawk/pull/76))
+- Upgrade to Rust 1.96.1 ([#87](https://github.com/astral-sh/hawk/pull/87))
+
 ## 0.1.3
 
 Released on 2026-06-02.
