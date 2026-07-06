@@ -102,6 +102,11 @@ All instrumented builds currently use `--all-features` and one selected target
 triple. A `target = "cfg(...)"` selector on a production entry, override, or
 exclusion limits it to applicable target configurations.
 
+Workspace library target names must be unique after Rust crate-name
+normalization. Hawk uses the crate name to associate compiler fragments,
+configuration, and fix targets with Cargo packages, and rejects a workspace
+where that association would be ambiguous.
+
 This is the central semantic difference from Clippy. Running Clippy over a
 workspace changes which crates are checked, but it does not define the
 workspace as the complete external consumer of its internal libraries. Hawk's
@@ -205,8 +210,10 @@ on its visibility.
 
 `src/graph.rs` merges the fragments from all compiled graphs before emitting a
 finding. The same source declaration may have separate compiler identities
-when built for production and for non-production targets; Hawk merges those
-identities using crate name, diagnostic path, item kind, and source span.
+when built for production and for non-production targets. Hawk deliberately
+merges identities by physical source span and item kind, including a path
+module compiled into different crates; declarations without source spans use
+their diagnostic paths instead.
 
 The analysis then computes two reachability closures:
 

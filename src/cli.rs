@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fmt::{Display, Formatter, Write as _};
@@ -590,7 +590,7 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
         .no_deps()
         .exec()
         .with_context(|| format!("read Cargo metadata from {}", args.manifest_path.display()))?;
-    let candidate_crates = workspace_library_crates(&metadata);
+    let candidate_crates = workspace_library_crates(&metadata)?;
 
     let workspace_root = metadata.workspace_root.clone().into_std_path_buf();
     let manifest_path = args
@@ -1206,14 +1206,41 @@ fn fix_packages(metadata: &cargo_metadata::Metadata, fix_plan: &FixPlan) -> Resu
     Ok(packages)
 }
 
-fn workspace_library_crates(metadata: &cargo_metadata::Metadata) -> HashSet<String> {
-    metadata
-        .workspace_packages()
+fn workspace_library_crates(metadata: &cargo_metadata::Metadata) -> Result<HashSet<String>> {
+    let mut packages_by_crate: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for package in metadata.workspace_packages() {
+        for target in &package.targets {
+            if target.kind.contains(&TargetKind::Lib) {
+                packages_by_crate
+                    .entry(target.name.replace('-', "_"))
+                    .or_default()
+                    .insert(package.name.to_string());
+            }
+        }
+    }
+
+    let conflicts = packages_by_crate
         .iter()
-        .flat_map(|package| &package.targets)
-        .filter(|target| target.kind.contains(&TargetKind::Lib))
-        .map(|target| target.name.replace('-', "_"))
-        .collect()
+        .filter(|(_, packages)| packages.len() > 1)
+        .map(|(crate_name, packages)| {
+            format!(
+                "`{crate_name}` ({})",
+                packages
+                    .iter()
+                    .map(|package| format!("`{package}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })
+        .collect::<Vec<_>>();
+    if !conflicts.is_empty() {
+        bail!(
+            "workspace library crate names must be unique; conflicting names: {}. Hawk identifies graph definitions and fix targets by crate name; give each `[lib]` target a unique `name`",
+            conflicts.join("; ")
+        );
+    }
+
+    Ok(packages_by_crate.into_keys().collect())
 }
 
 const WARNING: Style = AnsiColor::Yellow.on_default().bold();

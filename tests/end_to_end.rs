@@ -606,6 +606,25 @@ fn production_products_reuse_shared_dependency_compilations() {
 }
 
 #[test]
+fn rejects_duplicate_workspace_library_crate_names() {
+    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/duplicate_library_names/Cargo.toml");
+    let output = Command::new(env!("CARGO_BIN_EXE_cargo-hawk"))
+        .arg("--manifest-path")
+        .arg(manifest)
+        .arg("--color=never")
+        .output()
+        .expect("run cargo-hawk");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains(
+        "conflicting names: `shared` (`library-a`, `library-b`). Hawk identifies graph definitions and fix targets by crate name"
+    ));
+    assert!(stderr.contains("give each `[lib]` target a unique `name`"));
+}
+
+#[test]
 fn requires_a_configured_production_binary() {
     let manifest =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/basic/Cargo.toml");
