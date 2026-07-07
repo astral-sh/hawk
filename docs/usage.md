@@ -85,11 +85,13 @@ targets:
 ```
 
 Instrumented Cargo artifacts are reused under
-`cargo-hawk-target/<workspace-name>` in the platform temporary directory by
-default. Use `--target-dir` to override that location and `--graph-dir` to
-retain serialized compiler fragments for investigation. Diagnostics are
-colored automatically in a terminal; use `--color=always` or `--color=never`
-to override terminal detection.
+`cargo-hawk-target/<workspace-name>-<path-hash>` in the platform temporary
+directory by default. Including the workspace path prevents same-named
+checkouts and worktrees from sharing Cargo locks and artifacts. Use
+`--target-dir` to override that location and `--graph-dir` to retain serialized
+compiler fragments for investigation. Diagnostics are colored automatically
+in a terminal; use `--color=always` or `--color=never` to override terminal
+detection.
 
 ## Enforce diagnostics
 

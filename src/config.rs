@@ -465,26 +465,13 @@ fn known_item_identity(definition: &Definition) -> KnownItemIdentity<'_> {
 }
 
 impl AnalysisTarget {
-    pub fn from_rustc(target: Option<&str>, rustc: &OsStr, current_dir: &Path) -> Result<Self> {
-        let name = match target {
-            Some(target) => target.to_owned(),
-            None => {
-                let output = Command::new(rustc)
-                    .current_dir(current_dir)
-                    .arg("-vV")
-                    .output()
-                    .context("query rustc host target")?;
-                if !output.status.success() {
-                    bail!("query rustc host target failed with {}", output.status);
-                }
-                let stdout = String::from_utf8(output.stdout).context("decode rustc version")?;
-                stdout
-                    .lines()
-                    .find_map(|line| line.strip_prefix("host: "))
-                    .context("rustc version did not report a host target")?
-                    .to_owned()
-            }
-        };
+    pub fn from_rustc(
+        target: Option<&str>,
+        host: &str,
+        rustc: &OsStr,
+        current_dir: &Path,
+    ) -> Result<Self> {
+        let name = target.unwrap_or(host).to_owned();
         let mut rustc_command = Command::new(rustc);
         rustc_command.current_dir(current_dir).arg("--print=cfg");
         if let Some(target) = target {

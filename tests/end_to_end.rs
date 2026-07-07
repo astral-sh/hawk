@@ -1,6 +1,6 @@
 use std::fs;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 #[cfg(unix)]
 use std::os::unix::fs::{PermissionsExt, symlink};
@@ -72,6 +72,27 @@ fn rejects_non_utf8_arguments_without_panicking() {
         assert!(stderr.contains("hawk: command-line arguments must be valid UTF-8"));
         assert!(!stderr.contains("panicked"));
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn exits_successfully_when_diagnostic_output_is_closed() {
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/basic/Cargo.toml");
+    let target_dir = tempfile::tempdir().expect("temporary target directory");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_cargo-hawk"))
+        .arg("--manifest-path")
+        .arg(manifest)
+        .arg("--target-dir")
+        .arg(target_dir.path())
+        .arg("-A")
+        .arg("warnings")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn cargo-hawk");
+    drop(child.stdout.take());
+
+    assert!(child.wait().expect("wait for cargo-hawk").success());
 }
 
 #[test]

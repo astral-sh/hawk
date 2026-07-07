@@ -317,8 +317,14 @@ fn emit_fragment(tcx: TyCtxt<'_>, root_crate: &str, output_dir: &Path) -> Result
         test_surface,
     );
     let path = output_dir.join(format!("{crate_name}-{suffix}.json"));
-    let file = File::create(&path).with_context(|| format!("create {}", path.display()))?;
-    write_fragment(file, &fragment, &path)
+    let mut file = tempfile::NamedTempFile::new_in(output_dir)
+        .with_context(|| format!("create temporary fragment in {}", output_dir.display()))?;
+    let temporary_path = file.path().to_path_buf();
+    write_fragment(file.as_file_mut(), &fragment, &temporary_path)?;
+    file.persist(&path)
+        .map_err(|error| error.error)
+        .with_context(|| format!("persist fragment {}", path.display()))?;
+    Ok(())
 }
 
 fn write_fragment(writer: impl Write, fragment: &Fragment, path: &Path) -> Result<()> {

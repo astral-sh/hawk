@@ -18,6 +18,13 @@ fn main() -> std::process::ExitCode {
     }
     match cli::run(args.clone()) {
         Ok(exit_code) => exit_code,
+        Err(error)
+            if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|error| error.kind() == std::io::ErrorKind::BrokenPipe) =>
+        {
+            std::process::ExitCode::SUCCESS
+        }
         Err(error) => {
             if let Err(output_error) = cli::write_error(&args, &error) {
                 eprintln!("hawk: {error:#}: {output_error:#}");
