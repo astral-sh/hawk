@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::env;
+use std::ffi::OsStr;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::{Component, Path, PathBuf};
@@ -28,8 +29,8 @@ use rustc_span::hygiene::{ExpnKind, MacroKind};
 use rustc_span::{BytePos, FileName, Pos};
 
 use crate::graph::{
-    Definition, DefinitionIdentity, DefinitionKind, Edge, EdgeKind, FindingKind, FixPlan,
-    FixTarget, Fragment, Span, VisibilityReduction,
+    CollectionOptions, Definition, DefinitionIdentity, DefinitionKind, Edge, EdgeKind, FindingKind,
+    FixPlan, FixTarget, Fragment, Span, VisibilityReduction,
 };
 use crate::protocol;
 
@@ -61,6 +62,14 @@ pub fn run_wrapper(mut args: Vec<String>) -> ExitCode {
     );
     let root_crate =
         env::var(protocol::ROOT_CRATE_ENV).expect("HAWK_ROOT_CRATE checked before dispatch");
+    let collection_options =
+        match parse_collection_options(env::var_os(protocol::COLLECTION_OPTIONS_ENV).as_deref()) {
+            Ok(collection_options) => collection_options,
+            Err(error) => {
+                eprintln!("hawk: invalid collection options: {error:#}");
+                return ExitCode::FAILURE;
+            }
+        };
     let fix_plan = match env::var_os(protocol::FIX_PLAN_ENV)
         .map(PathBuf::from)
         .map(|path| read_fix_plan(&path))
@@ -83,6 +92,7 @@ pub fn run_wrapper(mut args: Vec<String>) -> ExitCode {
     let mut callbacks = HawkCallbacks {
         output_dir,
         root_crate,
+        collection_options,
         fix_plan,
     };
 
@@ -113,16 +123,23 @@ fn validate_frontend_protocol_version(version: &str) -> Result<()> {
 struct HawkCallbacks {
     output_dir: PathBuf,
     root_crate: String,
+    collection_options: CollectionOptions,
     fix_plan: Option<FixPlan>,
 }
 
 impl Callbacks for HawkCallbacks {
     fn config(&mut self, config: &mut interface::Config) {
         let run_id = env::var(protocol::RUN_ID_ENV).ok();
+        let collection_options = self.collection_options.as_env_value();
         config.track_state = Some(Box::new(move |session, _| {
-            session.env_depinfo.borrow_mut().insert((
+            let mut env_depinfo = session.env_depinfo.borrow_mut();
+            env_depinfo.insert((
                 Symbol::intern(protocol::RUN_ID_ENV),
                 run_id.as_deref().map(Symbol::intern),
+            ));
+            env_depinfo.insert((
+                Symbol::intern(protocol::COLLECTION_OPTIONS_ENV),
+                Some(Symbol::intern(collection_options)),
             ));
         }));
     }
@@ -134,12 +151,32 @@ impl Callbacks for HawkCallbacks {
     ) -> Compilation {
         if let Some(fix_plan) = &self.fix_plan {
             emit_fixes(tcx, fix_plan);
-        } else if let Err(error) = emit_fragment(tcx, &self.root_crate, &self.output_dir) {
+        } else if let Err(error) = emit_fragment(
+            tcx,
+            &self.root_crate,
+            &self.output_dir,
+            self.collection_options,
+        ) {
             tcx.dcx()
                 .fatal(format!("hawk could not emit analysis graph: {error:#}"));
         }
         Compilation::Continue
     }
+}
+
+fn parse_collection_options(value: Option<&OsStr>) -> Result<CollectionOptions> {
+    let Some(value) = value else {
+        return Ok(CollectionOptions::default());
+    };
+    let Some(value) = value.to_str() else {
+        bail!("{} must be valid UTF-8", protocol::COLLECTION_OPTIONS_ENV);
+    };
+    CollectionOptions::from_env_value(Some(value)).with_context(|| {
+        format!(
+            "unsupported {} value `{value}`",
+            protocol::COLLECTION_OPTIONS_ENV
+        )
+    })
 }
 
 fn read_fix_plan(path: &Path) -> Result<FixPlan> {
@@ -290,7 +327,12 @@ fn emit_fix(
     diagnostic.emit();
 }
 
-fn emit_fragment(tcx: TyCtxt<'_>, root_crate: &str, output_dir: &Path) -> Result<()> {
+fn emit_fragment(
+    tcx: TyCtxt<'_>,
+    root_crate: &str,
+    output_dir: &Path,
+    collection_options: CollectionOptions,
+) -> Result<()> {
     let package_name = env::var("CARGO_PKG_NAME").context("read Cargo package name")?;
     let crate_name = tcx.crate_name(LOCAL_CRATE).to_string();
     let crate_id = id(tcx, CRATE_DEF_ID.to_def_id());
@@ -315,6 +357,7 @@ fn emit_fragment(tcx: TyCtxt<'_>, root_crate: &str, output_dir: &Path) -> Result
         crate_id,
         is_product_root,
         test_surface,
+        collection_options,
     );
     let path = output_dir.join(format!("{crate_name}-{suffix}.json"));
     let mut file = tempfile::NamedTempFile::new_in(output_dir)
@@ -343,6 +386,7 @@ fn collect_fragment(
     crate_id: String,
     is_product_root: bool,
     test_surface: bool,
+    collection_options: CollectionOptions,
 ) -> Fragment {
     let mut definitions = Vec::new();
     let mut defined = HashSet::new();
@@ -379,11 +423,11 @@ fn collect_fragment(
         });
         match item.kind {
             hir::ItemKind::Struct(_, _, data) | hir::ItemKind::Union(_, _, data) => {
-                let uniform_field_group = if source_fields_have_uniform_visibility(tcx, item.span) {
-                    span(tcx, item.owner_id.def_id)
-                } else {
-                    None
-                };
+                let uniform_field_group = uniform_field_group(
+                    collection_options,
+                    || source_fields_have_uniform_visibility(tcx, item.span),
+                    || span(tcx, item.owner_id.def_id),
+                );
                 for field in data.fields() {
                     let field_span = tcx.def_span(field.def_id);
                     if let Some(index) = source_item_index
@@ -441,32 +485,32 @@ fn collect_fragment(
     let mut edges = Vec::new();
     for def_id in tcx.hir_body_owners() {
         let body = tcx.hir_body_owned_by(def_id);
-        let mut visitor = ReferenceVisitor {
+        let mut visitor = ReferenceVisitor::new(
             tcx,
-            source: id(tcx, def_id.to_def_id()),
-            edge_kind: EdgeKind::Body,
-            typeck_results: Some(tcx.typeck_body(body.id())),
-            traverse_bodies: true,
-            edges: &mut edges,
-        };
+            def_id.to_def_id(),
+            EdgeKind::Body,
+            Some(tcx.typeck_body(body.id())),
+            true,
+        );
         visitor.visit_body(body);
+        visitor.finish(&mut edges);
     }
     for owner in crate_items.owners() {
         let def_id = owner.def_id;
         let edge_start = edges.len();
-        let mut visitor = ReferenceVisitor {
+        let mut visitor = ReferenceVisitor::new(
             tcx,
-            source: id(tcx, def_id.to_def_id()),
-            edge_kind: if tcx.def_kind(def_id) == DefKind::Use {
+            def_id.to_def_id(),
+            if tcx.def_kind(def_id) == DefKind::Use {
                 EdgeKind::Reexport
             } else {
                 EdgeKind::Interface
             },
-            typeck_results: None,
-            traverse_bodies: false,
-            edges: &mut edges,
-        };
+            None,
+            false,
+        );
         visitor.visit_node(tcx.hir_node_by_def_id(def_id));
+        visitor.finish(&mut edges);
         if let Some(trait_item) = tcx.trait_item_of(def_id.to_def_id())
             && let Some(trait_def_id) = tcx.trait_of_assoc(trait_item)
         {
@@ -522,15 +566,15 @@ fn collect_fragment(
             _ => continue,
         };
         for field in data.fields() {
-            let mut visitor = ReferenceVisitor {
+            let mut visitor = ReferenceVisitor::new(
                 tcx,
-                source: id(tcx, field.def_id.to_def_id()),
-                edge_kind: EdgeKind::Interface,
-                typeck_results: None,
-                traverse_bodies: false,
-                edges: &mut edges,
-            };
+                field.def_id.to_def_id(),
+                EdgeKind::Interface,
+                None,
+                false,
+            );
             visitor.visit_field_def(field);
+            visitor.finish(&mut edges);
         }
     }
     edges.extend(adt_members.into_iter().map(|(member, adt)| Edge {
@@ -737,6 +781,18 @@ fn visibility_modifier(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Option<String> {
     visibility_span(tcx, def_id)
         .and_then(|span| tcx.sess.source_map().span_to_snippet(span).ok())
         .and_then(|visibility| compact_visibility_modifier(&visibility))
+}
+
+fn uniform_field_group<T>(
+    collection_options: CollectionOptions,
+    fields_have_uniform_visibility: impl FnOnce() -> bool,
+    group: impl FnOnce() -> Option<T>,
+) -> Option<T> {
+    if collection_options.preserve_uniform_field_visibility() && fields_have_uniform_visibility() {
+        group()
+    } else {
+        None
+    }
 }
 
 // HIR omits cfg-stripped fields, so uniformity must come from the complete source declaration.
@@ -1015,16 +1071,46 @@ fn normalize_source_path(path: String) -> String {
     normalized.to_string_lossy().into_owned()
 }
 
-struct ReferenceVisitor<'tcx, 'edges> {
+struct ReferenceVisitor<'tcx> {
     tcx: TyCtxt<'tcx>,
-    source: String,
+    source: DefId,
     edge_kind: EdgeKind,
     typeck_results: Option<&'tcx ty::TypeckResults<'tcx>>,
     traverse_bodies: bool,
-    edges: &'edges mut Vec<Edge>,
+    targets: HashSet<DefId>,
 }
 
-impl<'tcx> ReferenceVisitor<'tcx, '_> {
+impl<'tcx> ReferenceVisitor<'tcx> {
+    fn new(
+        tcx: TyCtxt<'tcx>,
+        source: DefId,
+        edge_kind: EdgeKind,
+        typeck_results: Option<&'tcx ty::TypeckResults<'tcx>>,
+        traverse_bodies: bool,
+    ) -> Self {
+        Self {
+            tcx,
+            source,
+            edge_kind,
+            typeck_results,
+            traverse_bodies,
+            targets: HashSet::new(),
+        }
+    }
+
+    fn finish(self, edges: &mut Vec<Edge>) {
+        if self.targets.is_empty() {
+            return;
+        }
+        let source = id(self.tcx, self.source);
+        edges.reserve(self.targets.len());
+        edges.extend(self.targets.into_iter().map(|target| Edge {
+            from: source.clone(),
+            to: id(self.tcx, target),
+            kind: self.edge_kind,
+        }));
+    }
+
     fn record(&mut self, resolution: Res) {
         match resolution {
             Res::Def(DefKind::Ctor(CtorOf::Struct, ..), constructor) => {
@@ -1050,11 +1136,7 @@ impl<'tcx> ReferenceVisitor<'tcx, '_> {
     }
 
     fn record_def(&mut self, def_id: DefId) {
-        self.edges.push(Edge {
-            from: self.source.clone(),
-            to: id(self.tcx, def_id),
-            kind: self.edge_kind,
-        });
+        self.targets.insert(def_id);
     }
 
     fn record_non_enum_field(&mut self, adt: ty::AdtDef<'tcx>, hir_id: hir::HirId) {
@@ -1076,7 +1158,7 @@ impl<'tcx> ReferenceVisitor<'tcx, '_> {
     }
 }
 
-impl<'tcx> Visitor<'tcx> for ReferenceVisitor<'tcx, '_> {
+impl<'tcx> Visitor<'tcx> for ReferenceVisitor<'tcx> {
     fn visit_nested_body(&mut self, body_id: hir::BodyId) {
         if !self.traverse_bodies {
             return;
@@ -1184,14 +1266,16 @@ impl<'tcx> Visitor<'tcx> for ReferenceVisitor<'tcx, '_> {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+    use std::ffi::OsStr;
     use std::io::{self, Write};
     use std::path::Path;
 
     use super::{
-        compact_visibility_modifier, normalize_source_path, validate_frontend_protocol_version,
-        write_fragment,
+        compact_visibility_modifier, normalize_source_path, parse_collection_options,
+        uniform_field_group, validate_frontend_protocol_version, write_fragment,
     };
-    use crate::graph::Fragment;
+    use crate::graph::{CollectionOptions, Fragment};
 
     struct FailingWriter;
 
@@ -1207,12 +1291,12 @@ mod tests {
 
     #[test]
     fn rejects_mismatched_frontend_protocol() {
-        let error = validate_frontend_protocol_version("2")
+        let error = validate_frontend_protocol_version("1")
             .expect_err("mismatched frontend protocol should fail");
 
         assert_eq!(
             error.to_string(),
-            "Hawk frontend uses compiler driver protocol 2, but this driver uses protocol 1; install `cargo-hawk` and `cargo-hawk-driver` from the same release"
+            "Hawk frontend uses compiler driver protocol 1, but this driver uses protocol 2; install `cargo-hawk` and `cargo-hawk-driver` from the same release"
         );
     }
 
@@ -1236,6 +1320,54 @@ mod tests {
             .expect_err("buffer flush should report the underlying write failure");
 
         insta::assert_snapshot!(error.to_string(), @"flush fragment.json");
+    }
+
+    #[test]
+    fn collection_options_are_validated() {
+        assert_eq!(
+            parse_collection_options(None).expect("default collection options"),
+            CollectionOptions::default()
+        );
+        assert!(
+            parse_collection_options(Some(OsStr::new(
+                CollectionOptions::new(true).as_env_value()
+            )))
+            .expect("uniform field collection option")
+            .preserve_uniform_field_visibility()
+        );
+        insta::assert_snapshot!(
+            parse_collection_options(Some(OsStr::new("unknown")))
+                .expect_err("unknown collection option")
+                .to_string(),
+            @"unsupported HAWK_COLLECTION_OPTIONS value `unknown`"
+        );
+    }
+
+    #[test]
+    fn uniform_field_collection_is_lazy() {
+        let parse_count = Cell::new(0);
+        let group_count = Cell::new(0);
+        let collect = |options| {
+            uniform_field_group(
+                options,
+                || {
+                    parse_count.set(parse_count.get() + 1);
+                    true
+                },
+                || {
+                    group_count.set(group_count.get() + 1);
+                    Some("group")
+                },
+            )
+        };
+
+        assert_eq!(collect(CollectionOptions::default()), None);
+        assert_eq!(parse_count.get(), 0);
+        assert_eq!(group_count.get(), 0);
+
+        assert_eq!(collect(CollectionOptions::new(true)), Some("group"));
+        assert_eq!(parse_count.get(), 1);
+        assert_eq!(group_count.get(), 1);
     }
 
     #[test]

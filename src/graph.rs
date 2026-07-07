@@ -4,6 +4,42 @@ use serde::{Deserialize, Serialize};
 
 use crate::protocol::ProtocolVersion;
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct CollectionOptions {
+    preserve_uniform_field_visibility: bool,
+}
+
+impl CollectionOptions {
+    const DEFAULT: &'static str = "default";
+    const PRESERVE_UNIFORM_FIELD_VISIBILITY: &'static str = "preserve-uniform-field-visibility";
+
+    pub const fn new(preserve_uniform_field_visibility: bool) -> Self {
+        Self {
+            preserve_uniform_field_visibility,
+        }
+    }
+
+    pub const fn preserve_uniform_field_visibility(self) -> bool {
+        self.preserve_uniform_field_visibility
+    }
+
+    pub const fn as_env_value(self) -> &'static str {
+        if self.preserve_uniform_field_visibility {
+            Self::PRESERVE_UNIFORM_FIELD_VISIBILITY
+        } else {
+            Self::DEFAULT
+        }
+    }
+
+    pub fn from_env_value(value: Option<&str>) -> Option<Self> {
+        match value {
+            None | Some(Self::DEFAULT) => Some(Self::default()),
+            Some(Self::PRESERVE_UNIFORM_FIELD_VISIBILITY) => Some(Self::new(true)),
+            Some(_) => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Fragment {

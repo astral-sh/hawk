@@ -15,8 +15,8 @@ use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser, ValueEnum};
 
 use crate::config::{AnalysisTarget, Config, ConfigDiagnostic, ConfigDiagnosticKind};
 use crate::graph::{
-    Definition, DefinitionIdentity, DefinitionKind, Finding, FindingKind, FixPlan, FixTarget,
-    Fragment, Span, analyze_with_options,
+    CollectionOptions, Definition, DefinitionIdentity, DefinitionKind, Finding, FindingKind,
+    FixPlan, FixTarget, Fragment, Span, analyze_with_options,
 };
 use crate::protocol;
 
@@ -712,6 +712,7 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
         target_dir: &target_dir,
         driver: &driver,
         toolchain: &toolchain,
+        collection_options: CollectionOptions::new(config.preserve_uniform_field_visibility()),
     };
     let CollectedFragments {
         production: mut production_fragments,
@@ -942,6 +943,7 @@ struct InstrumentedCargo<'a> {
     target_dir: &'a Path,
     driver: &'a Path,
     toolchain: &'a RustToolchain,
+    collection_options: CollectionOptions,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1129,7 +1131,11 @@ impl InstrumentedCargo<'_> {
             .env(protocol::OUTPUT_DIR_ENV, graph_dir)
             .env(protocol::ROOT_CRATE_ENV, root_crate)
             .env(protocol::CONSUMER_MODE_ENV, consumer_mode.as_str())
-            .env(protocol::RUN_ID_ENV, run_id);
+            .env(protocol::RUN_ID_ENV, run_id)
+            .env(
+                protocol::COLLECTION_OPTIONS_ENV,
+                self.collection_options.as_env_value(),
+            );
         if doctests {
             command
                 .arg("--quiet")
