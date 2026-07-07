@@ -95,6 +95,13 @@ reports `hawk::unknown_item`. If an override without `kind` identifies
 multiple same-named declarations, Hawk reports `hawk::ambiguous_item` and
 suppresses none of them.
 
+Definitions with the same crate, diagnostic path, and item kind are one
+logical override identity even when cfg alternatives compile them from
+different source locations. An override applies to every such physical
+variant, and an `expect` is fulfilled when at least one variant produces the
+selected finding. Declarations with the same path in different Rust
+namespaces remain ambiguous unless `kind` is supplied.
+
 The `item` value names Hawk's diagnostic path. For exported aliases, use the
 alias name, such as `PublicAlias`; for modules, use the module path, such as
 `api::internal`. Add `kind` when separate Rust namespaces define declarations

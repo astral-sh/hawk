@@ -938,6 +938,52 @@ fn fixes_only_the_matching_cfg_alternative_declaration() {
 }
 
 #[test]
+fn expectation_matches_cfg_alternatives_as_one_logical_item() {
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/cfg_alternative_fixes/Cargo.toml");
+    let configuration = tempfile::NamedTempFile::new().expect("temporary configuration");
+    fs::write(
+        configuration.path(),
+        r#"
+[[production]]
+package = "app"
+bin = "app"
+reason = "binary product under analysis"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "library"
+item = "dual"
+level = "expect"
+reason = "test-only alternative remains intentionally public"
+"#,
+    )
+    .expect("write temporary configuration");
+    let target_dir = tempfile::tempdir().expect("temporary target directory");
+    let output = Command::new(env!("CARGO_BIN_EXE_cargo-hawk"))
+        .arg("--manifest-path")
+        .arg(manifest)
+        .arg("--config")
+        .arg(configuration.path())
+        .arg("--target-dir")
+        .arg(target_dir.path())
+        .arg("--color=never")
+        .output()
+        .expect("run cargo-hawk");
+
+    assert!(
+        output.status.success(),
+        "cargo-hawk failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!stdout.contains("hawk::ambiguous_item"));
+    assert!(!stdout.contains("hawk::unfulfilled_expectation"));
+    assert!(!stdout.contains("hawk::unnecessary_public"));
+    assert!(stdout.contains("hawk: 0 finding(s)"));
+}
+
+#[test]
 fn removes_unnecessary_restricted_visibility_by_default() {
     let source_workspace =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/crate_visibility_fixes");

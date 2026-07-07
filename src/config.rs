@@ -351,6 +351,8 @@ impl Config {
             .flat_map(|fragment| &fragment.definitions)
             .map(known_item_identity)
             .collect();
+        let logical_items: HashSet<LogicalItemIdentity<'_>> =
+            known_items.iter().map(KnownItemIdentity::logical).collect();
         let mut config_diagnostics = Vec::new();
         let mut active_overrides = Vec::new();
         for entry in self
@@ -358,7 +360,7 @@ impl Config {
             .iter()
             .filter(|entry| entry.applies_to(target))
         {
-            let matching_items = known_items
+            let matching_items = logical_items
                 .iter()
                 .filter(|item| entry.identifies(item))
                 .count();
@@ -422,6 +424,23 @@ struct KnownItemIdentity<'a> {
     file: Option<&'a str>,
     line: Option<usize>,
     column: Option<usize>,
+}
+
+impl KnownItemIdentity<'_> {
+    fn logical(&self) -> LogicalItemIdentity<'_> {
+        LogicalItemIdentity {
+            crate_name: self.crate_name,
+            item: self.item,
+            kind: self.kind,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct LogicalItemIdentity<'a> {
+    crate_name: &'a str,
+    item: &'a str,
+    kind: DefinitionKind,
 }
 
 fn known_item_identity(definition: &Definition) -> KnownItemIdentity<'_> {
@@ -490,7 +509,7 @@ impl LintOverride {
             .is_none_or(|platform| platform.matches(&target.name, &target.cfgs))
     }
 
-    fn identifies(&self, item: &KnownItemIdentity<'_>) -> bool {
+    fn identifies(&self, item: &LogicalItemIdentity<'_>) -> bool {
         self.crate_name == item.crate_name
             && self.item == item.item
             && self
@@ -755,6 +774,63 @@ reason = "known retained public surface"
             &target("aarch64-apple-darwin", &["unix"]),
             &fragments,
             &[],
+            findings,
+        );
+
+        assert!(applied.findings.is_empty());
+        assert!(applied.config_diagnostics.is_empty());
+    }
+
+    #[test]
+    fn expect_suppresses_all_physical_variants_of_a_logical_item() {
+        let directory = tempfile::tempdir().expect("temporary configuration directory");
+        let path = directory.path().join("hawk.toml");
+        std::fs::write(
+            &path,
+            r#"
+[[override]]
+lint = "hawk::dead_public"
+crate = "library"
+item = "dual"
+level = "expect"
+reason = "retain every compiled cfg alternative"
+"#,
+        )
+        .expect("write configuration");
+        let config = Config::load(directory.path(), Some(&path)).expect("load configuration");
+
+        let mut production_fragment = fragment();
+        production_fragment.crate_id = "library-production".into();
+        production_fragment.definitions[0].id = "production-dual".into();
+        production_fragment.definitions[0].name = "dual".into();
+        production_fragment.definitions[0].span = Some(Span {
+            file: "library/src/lib.rs".into(),
+            line: 2,
+            column: 1,
+        });
+        let mut test_fragment = fragment();
+        test_fragment.crate_id = "library-test".into();
+        test_fragment.definitions[0].id = "test-dual".into();
+        test_fragment.definitions[0].name = "dual".into();
+        test_fragment.definitions[0].span = Some(Span {
+            file: "library/src/lib.rs".into(),
+            line: 5,
+            column: 1,
+        });
+        let production_fragments = vec![production_fragment];
+        let test_fragments = vec![test_fragment];
+        let findings = analyze(
+            &production_fragments,
+            &test_fragments,
+            &candidate_crates(),
+            &HashSet::new(),
+        );
+        assert_eq!(findings.len(), 2);
+
+        let applied = config.apply(
+            &target("aarch64-apple-darwin", &["unix"]),
+            &production_fragments,
+            &test_fragments,
             findings,
         );
 
