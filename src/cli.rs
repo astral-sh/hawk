@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fmt::{Display, Formatter, Write as _};
@@ -679,7 +679,7 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
             config.preserve_uniform_field_visibility(),
         ),
     );
-    let mut diagnostics = String::new();
+    let mut renderer = DiagnosticRenderer::new(&workspace_root);
     let mut diagnostic_count = 0;
     let mut has_denied_diagnostic = false;
     let production_description = if production_products.len() == 1 {
@@ -692,14 +692,9 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
         if level.is_emitted() {
             diagnostic_count += 1;
             has_denied_diagnostic |= level == LintLevel::Deny;
-            write_diagnostic(
-                &mut diagnostics,
-                finding,
-                &production_description,
-                &workspace_root,
-                level,
-            )
-            .expect("formatting diagnostics into a string cannot fail");
+            renderer
+                .write_diagnostic(finding, &production_description, level)
+                .expect("formatting diagnostics into a string cannot fail");
         }
     }
     for diagnostic in &findings.config_diagnostics {
@@ -707,14 +702,9 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
         if level.is_emitted() {
             diagnostic_count += 1;
             has_denied_diagnostic |= level == LintLevel::Deny;
-            write_config_diagnostic(
-                &mut diagnostics,
-                diagnostic,
-                &config,
-                &workspace_root,
-                level,
-            )
-            .expect("formatting diagnostics into a string cannot fail");
+            renderer
+                .write_config_diagnostic(diagnostic, &config, level)
+                .expect("formatting diagnostics into a string cannot fail");
         }
     }
     let compilation_target = args.target.as_deref().map_or_else(
@@ -732,12 +722,10 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
             production_products.len()
         )
     };
-    writeln!(
-        diagnostics,
-        "hawk: {} finding(s) for {} and workspace non-production targets on {}",
-        diagnostic_count, production_summary, compilation_target
-    )
-    .expect("formatting diagnostics into a string cannot fail");
+    renderer
+        .write_summary(diagnostic_count, &production_summary, &compilation_target)
+        .expect("formatting diagnostics into a string cannot fail");
+    let diagnostics = renderer.into_output();
     anstream::AutoStream::new(std::io::stdout(), args.color.into())
         .write_all(diagnostics.as_bytes())
         .context("write diagnostic output")?;
@@ -1042,11 +1030,145 @@ const SEPARATOR: Style = AnsiColor::Cyan.on_default();
 const HELP: Style = AnsiColor::BrightCyan.on_default().bold();
 const EMPHASIS: Style = Style::new().bold();
 
+type SourceLoader = fn(&Path) -> std::io::Result<String>;
+
+fn load_source(path: &Path) -> std::io::Result<String> {
+    fs::read_to_string(path)
+}
+
+struct CachedSource {
+    source: String,
+    line_starts: Vec<usize>,
+}
+
+impl CachedSource {
+    fn new(source: String) -> Self {
+        let line_starts = std::iter::once(0)
+            .chain(
+                source
+                    .bytes()
+                    .enumerate()
+                    .filter_map(|(index, byte)| (byte == b'\n').then_some(index + 1)),
+            )
+            .collect();
+        Self {
+            source,
+            line_starts,
+        }
+    }
+
+    fn line(&self, line: usize) -> Option<&str> {
+        let index = line.checked_sub(1)?;
+        let start = *self.line_starts.get(index)?;
+        if start == self.source.len() {
+            return None;
+        }
+        let Some(next_start) = self.line_starts.get(index + 1).copied() else {
+            return Some(&self.source[start..]);
+        };
+        let line = &self.source[start..next_start - 1];
+        Some(line.strip_suffix('\r').unwrap_or(line))
+    }
+}
+
+struct DiagnosticRenderer<'a, L = SourceLoader> {
+    workspace_root: &'a Path,
+    sources: HashMap<PathBuf, Option<CachedSource>>,
+    load_source: L,
+    output: String,
+}
+
+impl<'a> DiagnosticRenderer<'a> {
+    fn new(workspace_root: &'a Path) -> Self {
+        Self::with_source_loader(workspace_root, load_source)
+    }
+}
+
+impl<'a, L> DiagnosticRenderer<'a, L>
+where
+    L: FnMut(&Path) -> std::io::Result<String>,
+{
+    fn with_source_loader(workspace_root: &'a Path, load_source: L) -> Self {
+        Self {
+            workspace_root,
+            sources: HashMap::new(),
+            load_source,
+            output: String::new(),
+        }
+    }
+
+    fn write_diagnostic(
+        &mut self,
+        finding: &Finding<'_>,
+        production_description: &str,
+        level: LintLevel,
+    ) -> std::fmt::Result {
+        let source_line = finding
+            .definition
+            .span
+            .as_ref()
+            .and_then(|span| self.source_line(span))
+            .map(str::to_owned);
+        write_diagnostic(
+            &mut self.output,
+            finding,
+            production_description,
+            source_line.as_deref(),
+            level,
+        )
+    }
+
+    fn write_config_diagnostic(
+        &mut self,
+        diagnostic: &ConfigDiagnostic<'_>,
+        config: &Config,
+        level: LintLevel,
+    ) -> std::fmt::Result {
+        write_config_diagnostic(
+            &mut self.output,
+            diagnostic,
+            config,
+            self.workspace_root,
+            level,
+        )
+    }
+
+    fn write_summary(
+        &mut self,
+        diagnostic_count: usize,
+        production_summary: &str,
+        compilation_target: &str,
+    ) -> std::fmt::Result {
+        writeln!(
+            self.output,
+            "hawk: {diagnostic_count} finding(s) for {production_summary} and workspace non-production targets on {compilation_target}"
+        )
+    }
+
+    fn source_line(&mut self, span: &Span) -> Option<&str> {
+        let source_path = Path::new(&span.file);
+        let source_path = if source_path.is_absolute() {
+            source_path.to_path_buf()
+        } else {
+            self.workspace_root.join(source_path)
+        };
+        let source = self
+            .sources
+            .entry(source_path.clone())
+            .or_insert_with(|| (self.load_source)(&source_path).ok().map(CachedSource::new));
+        source.as_ref()?.line(span.line)
+    }
+
+    fn into_output(self) -> String {
+        self.output
+    }
+}
+
 fn write_diagnostic(
     output: &mut String,
     finding: &Finding<'_>,
     production_description: &str,
-    workspace_root: &Path,
+    source_line: Option<&str>,
     level: LintLevel,
 ) -> std::fmt::Result {
     let dead_reachability_source = if finding.test_compiled_only {
@@ -1189,13 +1311,12 @@ fn write_diagnostic(
     write_diagnostic_header(output, finding.kind.code(), message, level)?;
 
     if let Some(span) = &finding.definition.span {
-        let source_line = source_line(workspace_root, span);
         let width = write_annotated_location(
             output,
             &span.file,
             span.line,
             span.column,
-            source_line.as_deref(),
+            source_line,
             marker,
             level.style(),
         )?;
@@ -1384,20 +1505,6 @@ fn styled(content: impl Display, style: Style) -> impl Display {
     Styled { content, style }
 }
 
-fn source_line(workspace_root: &Path, span: &Span) -> Option<String> {
-    let source_path = Path::new(&span.file);
-    let source_path = if source_path.is_absolute() {
-        source_path.to_path_buf()
-    } else {
-        workspace_root.join(source_path)
-    };
-    fs::read_to_string(source_path)
-        .ok()?
-        .lines()
-        .nth(span.line.checked_sub(1)?)
-        .map(str::to_owned)
-}
-
 fn marker_indent(source_line: &str, column: usize) -> String {
     source_line
         .chars()
@@ -1475,13 +1582,22 @@ fn clear_fragments(graph_dir: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
     use std::path::Path;
 
     use clap::CommandFactory;
 
     use crate::graph::{Definition, DefinitionKind, Finding, FindingKind, Span};
 
-    use super::{Args, LintLevel, LintLevels, default_target_dir, write_diagnostic};
+    use super::{Args, DiagnosticRenderer, LintLevel, LintLevels, default_target_dir};
+
+    fn render_diagnostic(finding: &Finding<'_>) -> String {
+        let mut renderer = DiagnosticRenderer::new(Path::new(env!("CARGO_MANIFEST_DIR")));
+        renderer
+            .write_diagnostic(finding, "binary `app`", LintLevel::Warn)
+            .expect("render diagnostic");
+        renderer.into_output()
+    }
 
     #[test]
     fn default_target_dir_uses_platform_temp_directory() {
@@ -1493,6 +1609,29 @@ mod tests {
                 .join("cargo-hawk-target")
                 .join("example-workspace")
         );
+    }
+
+    #[test]
+    fn diagnostic_renderer_loads_each_source_once() {
+        let load_count = Cell::new(0);
+        let mut renderer =
+            DiagnosticRenderer::with_source_loader(Path::new("/workspace"), |path| {
+                assert_eq!(path, Path::new("/workspace/src/lib.rs"));
+                load_count.set(load_count.get() + 1);
+                Ok("first\r\nsecond\n".to_owned())
+            });
+        let mut span = Span {
+            file: "src/lib.rs".into(),
+            line: 1,
+            column: 1,
+        };
+
+        assert_eq!(renderer.source_line(&span), Some("first"));
+        span.line = 2;
+        assert_eq!(renderer.source_line(&span), Some("second"));
+        span.line = 3;
+        assert_eq!(renderer.source_line(&span), None);
+        assert_eq!(load_count.get(), 1);
     }
 
     #[test]
@@ -1522,17 +1661,7 @@ mod tests {
             test_only: false,
             test_compiled_only: false,
         };
-        let mut output = String::new();
-
-        write_diagnostic(
-            &mut output,
-            &finding,
-            "binary `app`",
-            Path::new(env!("CARGO_MANIFEST_DIR")),
-            LintLevel::Warn,
-        )
-        .expect("render diagnostic");
-
+        let output = render_diagnostic(&finding);
         assert!(output.contains('\u{1b}'));
         let output = anstream::adapter::strip_str(&output);
         insta::assert_snapshot!(output, @r###"
@@ -1573,17 +1702,7 @@ mod tests {
             test_only: false,
             test_compiled_only: false,
         };
-        let mut output = String::new();
-
-        write_diagnostic(
-            &mut output,
-            &finding,
-            "binary `app`",
-            Path::new(env!("CARGO_MANIFEST_DIR")),
-            LintLevel::Warn,
-        )
-        .expect("render diagnostic");
-
+        let output = render_diagnostic(&finding);
         let output = anstream::adapter::strip_str(&output);
         insta::assert_snapshot!(output, @r###"
         warning[hawk::unnecessary_crate_visibility]: `scoped::run` is visible throughout the crate but all compiled uses fit within the parent module; it can be `pub(super)`
@@ -1623,17 +1742,7 @@ mod tests {
             test_only: false,
             test_compiled_only: false,
         };
-        let mut output = String::new();
-
-        write_diagnostic(
-            &mut output,
-            &finding,
-            "binary `app`",
-            Path::new(env!("CARGO_MANIFEST_DIR")),
-            LintLevel::Warn,
-        )
-        .expect("render diagnostic");
-
+        let output = render_diagnostic(&finding);
         let output = anstream::adapter::strip_str(&output);
         insta::assert_snapshot!(output, @r###"
         warning[hawk::unnecessary_restricted_visibility]: `scoped::private_parent_visible_helper` has explicit restricted visibility but all compiled uses fit within the defining module; it can be private
@@ -1669,17 +1778,7 @@ mod tests {
             test_only: false,
             test_compiled_only: false,
         };
-        let mut output = String::new();
-
-        write_diagnostic(
-            &mut output,
-            &finding,
-            "binary `app`",
-            Path::new(env!("CARGO_MANIFEST_DIR")),
-            LintLevel::Warn,
-        )
-        .expect("render diagnostic");
-
+        let output = render_diagnostic(&finding);
         let output = anstream::adapter::strip_str(&output).to_string();
         insta::assert_snapshot!(output, @r###"
         warning[hawk::dead_public]: `InternalState::Active` is a public enum variant but is not reachable from binary `app`
