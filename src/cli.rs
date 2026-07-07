@@ -1872,6 +1872,10 @@ fn validate_product(
     Ok(())
 }
 
+// Stay below the 255-byte/code-unit component limits of supported filesystems
+// while leaving the ordinary workspace name readable.
+const DEFAULT_TARGET_DIR_COMPONENT_MAX_BYTES: usize = 240;
+
 fn default_target_dir(workspace_root: &Path) -> PathBuf {
     let workspace = workspace_root
         .file_name()
@@ -1879,7 +1883,13 @@ fn default_target_dir(workspace_root: &Path) -> PathBuf {
         .unwrap_or("workspace");
     let mut hasher = DefaultHasher::new();
     workspace_root.hash(&mut hasher);
-    let workspace = format!("{workspace}-{:016x}", hasher.finish());
+    let suffix = format!("-{:016x}", hasher.finish());
+    let max_workspace_bytes = DEFAULT_TARGET_DIR_COMPONENT_MAX_BYTES - suffix.len();
+    let mut workspace_end = workspace.len().min(max_workspace_bytes);
+    while !workspace.is_char_boundary(workspace_end) {
+        workspace_end -= 1;
+    }
+    let workspace = format!("{}{suffix}", &workspace[..workspace_end]);
     env::temp_dir().join("cargo-hawk-target").join(workspace)
 }
 
@@ -1926,7 +1936,7 @@ fn clear_fragments(graph_dir: &Path) -> Result<()> {
 mod tests {
     use std::cell::Cell;
     use std::ffi::OsString;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     use clap::CommandFactory;
 
@@ -1937,8 +1947,9 @@ mod tests {
     };
 
     use super::{
-        Args, CargoInvocation, ConsumerMode, DiagnosticRenderer, LintLevel, LintLevels,
-        ProductionSelection, default_target_dir, fix_plan_signature,
+        Args, CargoInvocation, ConsumerMode, DEFAULT_TARGET_DIR_COMPONENT_MAX_BYTES,
+        DiagnosticRenderer, LintLevel, LintLevels, ProductionSelection, default_target_dir,
+        fix_plan_signature,
     };
 
     fn render_diagnostic(finding: &Finding<'_>) -> String {
@@ -1995,6 +2006,53 @@ mod tests {
             target_dir,
             default_target_dir(Path::new("/another/path/to/example-workspace"))
         );
+    }
+
+    #[test]
+    fn default_target_dir_truncates_long_workspace_names() {
+        let workspace = "a".repeat(245);
+        let workspace_root = PathBuf::from("/path/to").join(&workspace);
+        let other_workspace_root = PathBuf::from("/another/path/to").join(&workspace);
+        let target_dir = default_target_dir(&workspace_root);
+        let other_target_dir = default_target_dir(&other_workspace_root);
+        let component = target_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("UTF-8 target directory component");
+        let other_component = other_target_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("UTF-8 target directory component");
+
+        assert_eq!(component.len(), DEFAULT_TARGET_DIR_COMPONENT_MAX_BYTES);
+        let (workspace, suffix) = component
+            .rsplit_once('-')
+            .expect("target directory has a hash suffix");
+        assert_eq!(
+            workspace,
+            "a".repeat(DEFAULT_TARGET_DIR_COMPONENT_MAX_BYTES - suffix.len() - 1)
+        );
+        assert_eq!(suffix.len(), 16);
+        assert!(suffix.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert_ne!(component, other_component);
+    }
+
+    #[test]
+    fn default_target_dir_truncates_at_a_utf8_boundary() {
+        let workspace_root = PathBuf::from("/path/to").join("é".repeat(123));
+        let target_dir = default_target_dir(&workspace_root);
+        let component = target_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("UTF-8 target directory component");
+        let (workspace, suffix) = component
+            .rsplit_once('-')
+            .expect("target directory has a hash suffix");
+
+        assert!(component.len() <= DEFAULT_TARGET_DIR_COMPONENT_MAX_BYTES);
+        assert!(!workspace.is_empty());
+        assert!(workspace.chars().all(|character| character == 'é'));
+        assert_eq!(suffix.len(), 16);
     }
 
     #[test]
