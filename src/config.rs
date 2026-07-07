@@ -558,6 +558,7 @@ mod tests {
 
     fn fragment() -> Fragment {
         Fragment {
+            protocol_version: crate::protocol::ProtocolVersion,
             crate_name: "library".into(),
             crate_id: "library".into(),
             is_product_root: false,

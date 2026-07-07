@@ -17,6 +17,7 @@ use crate::graph::{
     Definition, DefinitionKind, Finding, FindingKind, FixPlan, FixTarget, Fragment, Span,
     analyze_with_options,
 };
+use crate::protocol;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -306,8 +307,12 @@ impl RustToolchain {
 fn cargo_rustc(workspace_root: &Path, manifest_path: &Path) -> Result<OsString> {
     let probe_dir = tempfile::tempdir().context("create Cargo rustc probe directory")?;
     let output_path = probe_dir.path().join("rustc");
+    // The compiler driver cannot perform this probe because finding its dynamic
+    // rustc libraries requires the selected compiler's sysroot.
     let executable = env::current_exe().context("locate Hawk executable for Cargo rustc probe")?;
-    let output = Command::new("cargo")
+    let mut command = Command::new("cargo");
+    clear_protocol_environment(&mut command);
+    let output = command
         .current_dir(workspace_root)
         .arg("check")
         .arg("--manifest-path")
@@ -318,7 +323,8 @@ fn cargo_rustc(workspace_root: &Path, manifest_path: &Path) -> Result<OsString> 
         .arg("--locked")
         .arg("--quiet")
         .env("RUSTC_WORKSPACE_WRAPPER", executable)
-        .env("HAWK_RUSTC_PROBE", &output_path)
+        .env(protocol::RUSTC_PROBE_ENV, &output_path)
+        .env(protocol::RUSTC_PROBE_TOKEN_ENV, probe_dir.path())
         .output()
         .context("query Cargo's selected compiler")?;
     let rustc = fs::read_to_string(&output_path).with_context(|| {
@@ -331,7 +337,12 @@ fn cargo_rustc(workspace_root: &Path, manifest_path: &Path) -> Result<OsString> 
 }
 
 pub fn run_rustc_probe(args: &[String]) -> Option<ExitCode> {
-    let output_path = env::var_os("HAWK_RUSTC_PROBE")?;
+    let output_path = PathBuf::from(env::var_os(protocol::RUSTC_PROBE_ENV)?);
+    let probe_dir = PathBuf::from(env::var_os(protocol::RUSTC_PROBE_TOKEN_ENV)?);
+    // Do not treat stale inherited probe state as an internal invocation.
+    if output_path.parent() != Some(probe_dir.as_path()) || !probe_dir.is_dir() {
+        return None;
+    }
     let rustc = args
         .get(1)
         .context("Cargo rustc probe omitted compiler path");
@@ -393,6 +404,47 @@ fn driver_executable() -> Result<PathBuf> {
         );
     }
     Ok(driver)
+}
+
+fn validate_driver_protocol(driver: &Path, toolchain: &RustToolchain) -> Result<()> {
+    let mut command = Command::new(driver);
+    clear_protocol_environment(&mut command);
+    command.arg(protocol::VERSION_ARGUMENT);
+    toolchain.configure_command(&mut command)?;
+    let output = command.output().with_context(|| {
+        format!(
+            "query Hawk compiler driver protocol version from {}",
+            driver.display()
+        )
+    })?;
+    if !output.status.success() {
+        bail!(
+            "query Hawk compiler driver protocol version from {} failed with {}: {}; install `cargo-hawk` and `cargo-hawk-driver` from the same release",
+            driver.display(),
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let version =
+        String::from_utf8(output.stdout).context("decode Hawk compiler driver protocol version")?;
+    let version = version
+        .trim()
+        .parse::<u32>()
+        .context("parse Hawk compiler driver protocol version")?;
+    if version != protocol::VERSION {
+        bail!(
+            "Hawk frontend uses compiler driver protocol {}, but {} uses protocol {version}; install `cargo-hawk` and `cargo-hawk-driver` from the same release",
+            protocol::VERSION,
+            driver.display()
+        );
+    }
+    Ok(())
+}
+
+fn clear_protocol_environment(command: &mut Command) {
+    for variable in protocol::ENVIRONMENT_VARIABLES {
+        command.env_remove(variable);
+    }
 }
 
 pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
@@ -508,6 +560,7 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
     })?;
 
     let driver = driver_executable()?;
+    validate_driver_protocol(&driver, &toolchain)?;
     let cargo = InstrumentedCargo {
         args: &args,
         workspace_root: &workspace_root,
@@ -810,6 +863,7 @@ impl InstrumentedCargo<'_> {
         selection: CargoSelection<'_>,
     ) -> Result<()> {
         let mut command = Command::new("cargo");
+        clear_protocol_environment(&mut command);
         command
             .current_dir(self.workspace_root)
             .arg(subcommand)
@@ -884,10 +938,11 @@ impl InstrumentedCargo<'_> {
         };
         command
             .env("RUSTC_WORKSPACE_WRAPPER", self.driver)
-            .env("HAWK_OUTPUT_DIR", graph_dir)
-            .env("HAWK_ROOT_CRATE", root_crate)
-            .env("HAWK_CONSUMER_MODE", consumer_mode)
-            .env("HAWK_RUN_ID", run_id);
+            .env(protocol::VERSION_ENV, protocol::VERSION.to_string())
+            .env(protocol::OUTPUT_DIR_ENV, graph_dir)
+            .env(protocol::ROOT_CRATE_ENV, root_crate)
+            .env(protocol::CONSUMER_MODE_ENV, consumer_mode)
+            .env(protocol::RUN_ID_ENV, run_id);
         if matches!(selection, CargoSelection::Doctests) {
             command
                 .env("RUSTC_BOOTSTRAP", "1")
@@ -900,7 +955,7 @@ impl InstrumentedCargo<'_> {
         if let CargoSelection::FixProduction(fix_request)
         | CargoSelection::FixNonProduction(fix_request) = selection
         {
-            command.env("HAWK_FIX_PLAN", fix_request.plan);
+            command.env(protocol::FIX_PLAN_ENV, fix_request.plan);
         }
         let status = if matches!(selection, CargoSelection::Doctests) {
             let output = command
@@ -965,6 +1020,7 @@ fn fix_plan_for<'a>(
     fragments: &[Fragment],
 ) -> FixPlan {
     FixPlan {
+        protocol_version: crate::protocol::ProtocolVersion,
         targets: findings
             .flat_map(|finding| {
                 fragments

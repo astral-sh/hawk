@@ -17,6 +17,9 @@ mod driver;
 #[allow(dead_code)]
 #[path = "../graph.rs"]
 mod graph;
+#[expect(dead_code)]
+#[path = "../protocol.rs"]
+mod protocol;
 
 fn main() -> std::process::ExitCode {
     let Ok(args): Result<Vec<String>, _> = std::env::args_os()
@@ -26,7 +29,9 @@ fn main() -> std::process::ExitCode {
         eprintln!("hawk: command-line arguments must be valid UTF-8");
         return std::process::ExitCode::FAILURE;
     };
-    if driver::is_wrapper_invocation(&args) {
+    if driver::is_protocol_version_query(&args) {
+        driver::print_protocol_version()
+    } else if driver::is_wrapper_invocation(&args) {
         driver::run_wrapper(args)
     } else {
         eprintln!("hawk: cargo-hawk-driver is an internal compiler wrapper");

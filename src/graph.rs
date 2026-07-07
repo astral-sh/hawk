@@ -2,28 +2,32 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use serde::{Deserialize, Serialize};
 
+use crate::protocol::ProtocolVersion;
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Fragment {
+    pub protocol_version: ProtocolVersion,
     pub crate_name: String,
     pub crate_id: String,
     pub is_product_root: bool,
-    #[serde(default)]
     pub test_surface: bool,
     pub definitions: Vec<Definition>,
     pub edges: Vec<Edge>,
     pub roots: Vec<String>,
-    #[serde(default)]
     pub conservative_roots: Vec<String>,
-    #[serde(default)]
     pub required_public_roots: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct FixPlan {
+    pub protocol_version: ProtocolVersion,
     pub targets: Vec<FixTarget>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct FixTarget {
     pub id: String,
     pub crate_name: String,
@@ -35,6 +39,7 @@ pub struct FixTarget {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Definition {
     pub id: String,
     pub crate_name: String,
@@ -42,21 +47,16 @@ pub struct Definition {
     pub kind: DefinitionKind,
     pub span: Option<Span>,
     pub public_api: bool,
-    #[serde(default)]
     pub restricted_visible_api: bool,
-    #[serde(default)]
     pub crate_visible_api: bool,
-    #[serde(default)]
     pub visible_reexport_api: bool,
-    #[serde(default)]
     pub module_scope: Vec<String>,
-    #[serde(default)]
     pub uniform_field_group: Option<Span>,
-    #[serde(default)]
     pub dead_code_allowed: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Edge {
     pub from: String,
     pub to: String,
@@ -94,6 +94,7 @@ pub enum DefinitionKind {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Span {
     pub file: String,
     pub line: usize,
@@ -874,6 +875,7 @@ mod tests {
         Definition, DefinitionKind, Edge, EdgeKind, Finding, FindingKind, Fragment, Span,
         VisibilityReduction, analyze as analyze_with_tests, analyze_with_options,
     };
+    use crate::protocol::ProtocolVersion;
     use std::collections::HashSet;
 
     fn analyze<'a>(
@@ -963,6 +965,7 @@ mod tests {
     fn fragments(definitions: Vec<Definition>, edges: Vec<Edge>) -> Vec<Fragment> {
         vec![
             Fragment {
+                protocol_version: ProtocolVersion,
                 crate_name: "app".into(),
                 crate_id: "app".into(),
                 is_product_root: true,
@@ -974,6 +977,7 @@ mod tests {
                 required_public_roots: vec![],
             },
             Fragment {
+                protocol_version: ProtocolVersion,
                 crate_name: "lib".into(),
                 crate_id: "lib".into(),
                 is_product_root: false,
@@ -990,6 +994,7 @@ mod tests {
     fn test_fragments(definitions: Vec<Definition>, edges: Vec<Edge>) -> Vec<Fragment> {
         vec![
             Fragment {
+                protocol_version: ProtocolVersion,
                 crate_name: "integration_test".into(),
                 crate_id: "integration_test".into(),
                 is_product_root: true,
@@ -1005,6 +1010,7 @@ mod tests {
                 required_public_roots: vec![],
             },
             Fragment {
+                protocol_version: ProtocolVersion,
                 crate_name: "lib".into(),
                 crate_id: "lib".into(),
                 is_product_root: false,
@@ -1016,6 +1022,21 @@ mod tests {
                 required_public_roots: vec![],
             },
         ]
+    }
+
+    #[test]
+    fn serialized_fragments_require_complete_protocol_fields() {
+        let mut fragment =
+            serde_json::to_value(&fragments(vec![], vec![])[0]).expect("serialize fragment");
+        fragment
+            .as_object_mut()
+            .expect("fragment is a JSON object")
+            .remove("test_surface");
+
+        let error = serde_json::from_value::<Fragment>(fragment)
+            .expect_err("missing protocol field should fail");
+
+        assert_eq!(error.to_string(), "missing field `test_surface`");
     }
 
     #[test]
@@ -1951,6 +1972,7 @@ mod tests {
         input[1].definitions[1].name = "duplicate".into();
         let duplicate = input[1].definitions.pop().unwrap();
         input.push(Fragment {
+            protocol_version: ProtocolVersion,
             crate_name: "lib".into(),
             crate_id: "lib-test".into(),
             is_product_root: false,

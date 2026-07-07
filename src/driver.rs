@@ -5,7 +5,7 @@ use std::io::{BufWriter, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::ExitCode;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use rustc_ast as ast;
 use rustc_driver::{Callbacks, Compilation};
 use rustc_errors::Applicability;
@@ -31,18 +31,37 @@ use crate::graph::{
     Definition, DefinitionKind, Edge, EdgeKind, FindingKind, FixPlan, Fragment, Span,
     VisibilityReduction,
 };
+use crate::protocol;
+
+pub fn is_protocol_version_query(args: &[String]) -> bool {
+    args.get(1)
+        .is_some_and(|argument| argument == protocol::VERSION_ARGUMENT)
+        && args.len() == 2
+}
+
+pub fn print_protocol_version() -> ExitCode {
+    println!("{}", protocol::VERSION);
+    ExitCode::SUCCESS
+}
 
 pub fn is_wrapper_invocation(args: &[String]) -> bool {
-    env::var_os("HAWK_OUTPUT_DIR").is_some()
-        && env::var_os("HAWK_ROOT_CRATE").is_some()
+    env::var_os(protocol::OUTPUT_DIR_ENV).is_some()
+        && env::var_os(protocol::ROOT_CRATE_ENV).is_some()
         && args.get(1).is_some()
 }
 
 pub fn run_wrapper(mut args: Vec<String>) -> ExitCode {
+    if let Err(error) = validate_frontend_protocol() {
+        eprintln!("hawk: {error:#}");
+        return ExitCode::FAILURE;
+    }
     args.remove(1);
-    let output_dir = PathBuf::from(env::var_os("HAWK_OUTPUT_DIR").expect("HAWK_OUTPUT_DIR set"));
-    let root_crate = env::var("HAWK_ROOT_CRATE").expect("HAWK_ROOT_CRATE set");
-    let fix_plan = match env::var_os("HAWK_FIX_PLAN")
+    let output_dir = PathBuf::from(
+        env::var_os(protocol::OUTPUT_DIR_ENV).expect("HAWK_OUTPUT_DIR checked before dispatch"),
+    );
+    let root_crate =
+        env::var(protocol::ROOT_CRATE_ENV).expect("HAWK_ROOT_CRATE checked before dispatch");
+    let fix_plan = match env::var_os(protocol::FIX_PLAN_ENV)
         .map(PathBuf::from)
         .map(|path| read_fix_plan(&path))
         .transpose()
@@ -72,6 +91,25 @@ pub fn run_wrapper(mut args: Vec<String>) -> ExitCode {
     })
 }
 
+fn validate_frontend_protocol() -> Result<()> {
+    let version = env::var(protocol::VERSION_ENV)
+        .context("Hawk frontend did not provide a compiler driver protocol version")?;
+    validate_frontend_protocol_version(&version)
+}
+
+fn validate_frontend_protocol_version(version: &str) -> Result<()> {
+    let version = version
+        .parse::<u32>()
+        .context("Hawk frontend provided an invalid compiler driver protocol version")?;
+    if version != protocol::VERSION {
+        bail!(
+            "Hawk frontend uses compiler driver protocol {version}, but this driver uses protocol {}; install `cargo-hawk` and `cargo-hawk-driver` from the same release",
+            protocol::VERSION
+        );
+    }
+    Ok(())
+}
+
 struct HawkCallbacks {
     output_dir: PathBuf,
     root_crate: String,
@@ -80,10 +118,10 @@ struct HawkCallbacks {
 
 impl Callbacks for HawkCallbacks {
     fn config(&mut self, config: &mut interface::Config) {
-        let run_id = env::var("HAWK_RUN_ID").ok();
+        let run_id = env::var(protocol::RUN_ID_ENV).ok();
         config.track_state = Some(Box::new(move |session, _| {
             session.env_depinfo.borrow_mut().insert((
-                Symbol::intern("HAWK_RUN_ID"),
+                Symbol::intern(protocol::RUN_ID_ENV),
                 run_id.as_deref().map(Symbol::intern),
             ));
         }));
@@ -221,7 +259,8 @@ fn emit_fix(
 fn emit_fragment(tcx: TyCtxt<'_>, root_crate: &str, output_dir: &Path) -> Result<()> {
     let crate_name = tcx.crate_name(LOCAL_CRATE).to_string();
     let crate_id = id(tcx, CRATE_DEF_ID.to_def_id());
-    let is_non_production = env::var("HAWK_CONSUMER_MODE").as_deref() == Ok("non-production");
+    let is_non_production =
+        env::var(protocol::CONSUMER_MODE_ENV).as_deref() == Ok("non-production");
     let test_surface = is_non_production && tcx.sess.opts.test;
     let is_product_root = if is_non_production {
         // Non-production executables, including custom tests and benchmarks,
@@ -626,6 +665,7 @@ fn collect_fragment(
     conservative_roots.dedup();
 
     Fragment {
+        protocol_version: crate::protocol::ProtocolVersion,
         crate_name,
         crate_id,
         is_product_root,
@@ -1103,7 +1143,10 @@ mod tests {
     use std::io::{self, Write};
     use std::path::Path;
 
-    use super::{compact_visibility_modifier, normalize_source_path, write_fragment};
+    use super::{
+        compact_visibility_modifier, normalize_source_path, validate_frontend_protocol_version,
+        write_fragment,
+    };
     use crate::graph::Fragment;
 
     struct FailingWriter;
@@ -1119,8 +1162,20 @@ mod tests {
     }
 
     #[test]
+    fn rejects_mismatched_frontend_protocol() {
+        let error = validate_frontend_protocol_version("2")
+            .expect_err("mismatched frontend protocol should fail");
+
+        assert_eq!(
+            error.to_string(),
+            "Hawk frontend uses compiler driver protocol 2, but this driver uses protocol 1; install `cargo-hawk` and `cargo-hawk-driver` from the same release"
+        );
+    }
+
+    #[test]
     fn fragment_emission_reports_buffered_write_failures() {
         let fragment = Fragment {
+            protocol_version: crate::protocol::ProtocolVersion,
             crate_name: "library".into(),
             crate_id: "library".into(),
             is_product_root: false,

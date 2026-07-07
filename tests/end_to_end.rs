@@ -75,9 +75,11 @@ fn rejects_non_utf8_arguments_without_panicking() {
 }
 
 #[test]
-fn prints_version() {
+fn prints_version_despite_stale_rustc_probe_environment() {
     let output = Command::new(env!("CARGO_BIN_EXE_cargo-hawk"))
         .args(["hawk", "--version"])
+        .env("HAWK_RUSTC_PROBE", "stale-rustc-probe")
+        .env("HAWK_RUSTC_PROBE_TOKEN", "stale-probe-directory")
         .output()
         .expect("run cargo-hawk --version");
 
@@ -87,6 +89,31 @@ fn prints_version() {
         concat!("cargo hawk ", env!("CARGO_PKG_VERSION"), "\n")
     );
     assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn ignores_stale_fix_plan_during_analysis() {
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/basic/Cargo.toml");
+    let target_dir = tempfile::tempdir().expect("temporary target directory");
+    let output = Command::new(env!("CARGO_BIN_EXE_cargo-hawk"))
+        .arg("--manifest-path")
+        .arg(manifest)
+        .arg("--target-dir")
+        .arg(target_dir.path())
+        .arg("-A")
+        .arg("warnings")
+        .env(
+            "HAWK_FIX_PLAN",
+            target_dir.path().join("stale-fix-plan.json"),
+        )
+        .output()
+        .expect("run cargo-hawk with a stale fix plan");
+
+    assert!(
+        output.status.success(),
+        "cargo-hawk failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[cfg(unix)]
