@@ -1,0 +1,12 @@
+---
+source: tests/end_to_end.rs
+expression: context.normalized_stdout(&output)
+---
+warning[hawk::dead_public]: `unused` is public but is not reachable from the configured production binaries
+  --> library/src/lib.rs:5:1
+  |
+5 | pub fn unused() {}
+  | ^^^ public declaration
+  = help: consider restricting this declaration's visibility or removing it
+
+hawk: 1 finding(s) for 2 configured production binaries and workspace non-production targets on the host target

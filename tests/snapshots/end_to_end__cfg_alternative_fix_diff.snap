@@ -1,0 +1,16 @@
+---
+source: tests/end_to_end.rs
+expression: context.git_diff()
+---
+diff --git a/library/src/lib.rs b/library/src/lib.rs
+--- a/library/src/lib.rs
++++ b/library/src/lib.rs
+@@ -2,7 +2,7 @@
+ pub fn dual() {}
+
+ #[cfg(test)]
+-pub fn dual() {}
++fn dual() {}
+
+ #[cfg(test)]
+ mod tests {

@@ -1004,6 +1004,20 @@ mod tests {
             .collect()
     }
 
+    fn finding_summaries(findings: Vec<Finding<'_>>) -> Vec<(FindingKind, String, bool, bool)> {
+        findings
+            .into_iter()
+            .map(|finding| {
+                (
+                    finding.kind,
+                    finding.definition.name.clone(),
+                    finding.test_only,
+                    finding.test_compiled_only,
+                )
+            })
+            .collect()
+    }
+
     #[test]
     fn finding_kind_determines_visibility_reduction() {
         assert_eq!(FindingKind::DeadPublic.visibility_reduction(), None);
@@ -1196,6 +1210,56 @@ mod tests {
             .expect_err("missing protocol field should fail");
 
         assert_eq!(error.to_string(), "missing field `test_surface`");
+    }
+
+    #[test]
+    fn fragment_order_does_not_change_findings() {
+        let mut production = fragments(
+            vec![
+                node("production_entry", "lib", true),
+                node("production_helper", "lib", true),
+                node("unused", "lib", true),
+            ],
+            vec![Edge {
+                from: "production_entry".into(),
+                to: "production_helper".into(),
+                kind: EdgeKind::Body,
+            }],
+        );
+        production[0].edges.push(Edge {
+            from: "main".into(),
+            to: "production_entry".into(),
+            kind: EdgeKind::Body,
+        });
+        let mut test_entry = node("test_entry", "lib", true);
+        test_entry.name = "production_entry".into();
+        let mut test_helper = node("test_helper", "lib", true);
+        test_helper.name = "production_helper".into();
+        let mut tests = test_fragments(
+            vec![test_entry, test_helper],
+            vec![Edge {
+                from: "test_entry".into(),
+                to: "test_helper".into(),
+                kind: EdgeKind::Body,
+            }],
+        );
+        let expected = finding_summaries(analyze_with_tests(
+            &production,
+            &tests,
+            &candidate_crates(),
+            &HashSet::new(),
+        ));
+
+        production.reverse();
+        tests.reverse();
+        let actual = finding_summaries(analyze_with_tests(
+            &production,
+            &tests,
+            &candidate_crates(),
+            &HashSet::new(),
+        ));
+
+        assert_eq!(actual, expected);
     }
 
     #[test]

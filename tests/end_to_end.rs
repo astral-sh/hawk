@@ -1,6 +1,6 @@
 use std::fs;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Command, Output, Stdio};
 
 #[cfg(unix)]
 use std::os::unix::fs::{PermissionsExt, symlink};
@@ -53,6 +53,98 @@ fn initialize_git_repository(path: &Path) {
         .status()
         .expect("commit fixture workspace");
     assert!(status.success());
+}
+
+struct HawkTestContext {
+    workspace: tempfile::TempDir,
+    target_dir: tempfile::TempDir,
+}
+
+impl HawkTestContext {
+    fn new(fixture: &str) -> Self {
+        let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures")
+            .join(fixture);
+        let workspace = tempfile::tempdir().expect("temporary fixture workspace");
+        copy_directory(&source, workspace.path());
+        Self {
+            workspace,
+            target_dir: tempfile::tempdir().expect("temporary target directory"),
+        }
+    }
+
+    fn workspace(&self) -> &Path {
+        self.workspace.path()
+    }
+
+    fn command(&self) -> Command {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_cargo-hawk"));
+        command
+            .current_dir(self.workspace())
+            .arg("--manifest-path")
+            .arg(self.workspace().join("Cargo.toml"))
+            .arg("--target-dir")
+            .arg(self.target_dir.path())
+            .arg("--color=never");
+        command
+    }
+
+    fn run(&self, args: &[&str]) -> Output {
+        self.command().args(args).output().expect("run cargo-hawk")
+    }
+
+    fn initialize_git(&self) {
+        initialize_git_repository(self.workspace());
+    }
+
+    fn assert_success(&self, output: &Output) {
+        assert!(
+            output.status.success(),
+            "cargo-hawk failed:\n{}",
+            self.normalized_stderr(output)
+        );
+    }
+
+    fn normalized_stdout(&self, output: &Output) -> String {
+        self.normalize(&output.stdout)
+    }
+
+    fn normalized_stderr(&self, output: &Output) -> String {
+        self.normalize(&output.stderr)
+    }
+
+    fn git_diff(&self) -> String {
+        let output = Command::new("git")
+            .args(["diff", "--no-ext-diff", "--no-color"])
+            .current_dir(self.workspace())
+            .output()
+            .expect("read fixture diff");
+        assert!(output.status.success());
+        self.normalize(&output.stdout)
+            .lines()
+            .filter(|line| !line.starts_with("index "))
+            .map(str::trim_end)
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n"
+    }
+
+    fn normalize(&self, output: &[u8]) -> String {
+        let output = String::from_utf8_lossy(output);
+        let mut output = anstream::adapter::strip_str(&output)
+            .to_string()
+            .replace("\r\n", "\n");
+        for (path, replacement) in [
+            (self.workspace(), "[WORKSPACE]"),
+            (self.target_dir.path(), "[TARGET_DIR]"),
+        ] {
+            output = output.replace(&path.display().to_string(), replacement);
+            if let Ok(path) = path.canonicalize() {
+                output = output.replace(&path.display().to_string(), replacement);
+            }
+        }
+        output
+    }
 }
 
 #[cfg(unix)]
@@ -566,31 +658,13 @@ fn diagnoses_public_surface_of_a_binary_product() {
 
 #[test]
 fn production_binary_named_like_a_library_does_not_suppress_its_findings() {
-    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/production_consumers/Cargo.toml");
-    let target_dir = tempfile::tempdir().expect("temporary target directory");
-    let output = Command::new(env!("CARGO_BIN_EXE_cargo-hawk"))
-        .arg("--manifest-path")
-        .arg(manifest)
-        .arg("--target-dir")
-        .arg(target_dir.path())
-        .arg("--color=never")
-        .output()
-        .expect("run cargo-hawk");
+    let context = HawkTestContext::new("production_consumers");
+    let output = context.run(&[]);
 
-    assert!(
-        output.status.success(),
-        "cargo-hawk failed:\n{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(!stdout.contains("`secondary_api` is public"));
-    assert!(stdout.contains(
-        "`unused` is public but is not reachable from the configured production binaries"
-    ));
-    assert!(
-        stdout
-            .contains("for 2 configured production binaries and workspace non-production targets")
+    context.assert_success(&output);
+    insta::assert_snapshot!(
+        "multiple_production_consumers",
+        context.normalized_stdout(&output)
     );
 }
 
@@ -949,32 +1023,16 @@ fn fixes_grouped_public_reexports_only_when_all_aliases_are_safe() {
 
 #[test]
 fn fixes_only_the_matching_cfg_alternative_declaration() {
-    let source_workspace =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/cfg_alternative_fixes");
-    let workspace = tempfile::tempdir().expect("temporary fixture workspace");
-    copy_directory(&source_workspace, workspace.path());
-    let target_dir = tempfile::tempdir().expect("temporary target directory");
-    let output = Command::new(env!("CARGO_BIN_EXE_cargo-hawk"))
-        .arg("--manifest-path")
-        .arg(workspace.path().join("Cargo.toml"))
-        .arg("--fix")
-        .arg("--allow-no-vcs")
-        .arg("--target-dir")
-        .arg(target_dir.path())
-        .arg("--color=never")
-        .output()
-        .expect("run cargo-hawk with fixes");
+    let context = HawkTestContext::new("cfg_alternative_fixes");
+    context.initialize_git();
+    let output = context.run(&["--fix"]);
 
-    assert!(
-        output.status.success(),
-        "cargo-hawk fix failed:\n{}",
-        String::from_utf8_lossy(&output.stderr)
+    context.assert_success(&output);
+    insta::assert_snapshot!(
+        "cfg_alternative_fix_output",
+        context.normalized_stdout(&output)
     );
-
-    let library =
-        fs::read_to_string(workspace.path().join("library/src/lib.rs")).expect("read fixed source");
-    assert!(library.contains("#[cfg(not(test))]\npub fn dual() {}"));
-    assert!(library.contains("#[cfg(test)]\nfn dual() {}"));
+    insta::assert_snapshot!("cfg_alternative_fix_diff", context.git_diff());
 }
 
 #[test]
