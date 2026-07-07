@@ -3,7 +3,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// Version of the protocol shared by the Hawk frontend and compiler driver.
 ///
-/// Increment this whenever the serialized graph or fix-plan schema changes.
+/// Increment this whenever the shared environment contract or a serialized schema changes.
 pub const VERSION: u32 = 2;
 
 pub const VERSION_ARGUMENT: &str = "--hawk-protocol-version";
