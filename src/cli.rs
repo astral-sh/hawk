@@ -689,33 +689,15 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
         driver: &driver,
         toolchain: &toolchain,
     };
-    // Every production product uses the same compiler mode and feature set. Reuse one
-    // dependency fingerprint across the product builds so Cargo can retain fragments from
-    // shared dependencies instead of compiling them once per configured binary.
-    let production_run_id = format!("{run_id}-production");
-    for product in production_products.iter().copied() {
-        cargo.run(
-            "check",
-            &production_run_id,
-            &production_graph_dir,
-            CargoSelection::Production(product),
-        )?;
-    }
-    cargo.run(
-        "check",
-        &format!("{run_id}-non-production"),
+    let CollectedFragments {
+        production: mut production_fragments,
+        non_production: mut test_fragments,
+    } = cargo.collect_fragments(
+        &run_id,
+        &production_products,
+        &production_graph_dir,
         &non_production_graph_dir,
-        CargoSelection::NonProduction,
     )?;
-    cargo.run(
-        "test",
-        &format!("{run_id}-doctests"),
-        &non_production_graph_dir,
-        CargoSelection::Doctests,
-    )?;
-
-    let mut production_fragments = read_fragments(&production_graph_dir)?;
-    let mut test_fragments = read_fragments(&non_production_graph_dir)?;
     if !production_fragments
         .iter()
         .any(|fragment| fragment.is_product_root)
@@ -786,14 +768,13 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
                 let fix_plan_path = graph_dir.join(format!("test-fix-plan-{fix_iteration}"));
                 write_fix_plan(&fix_plan_path, &test_emission_plan)?;
                 cargo.run(
-                    "fix",
                     &format!("{run_id}-test-fix-{fix_iteration}"),
                     &non_production_graph_dir,
-                    CargoSelection::FixNonProduction(FixRequest {
+                    CargoInvocation::FixNonProduction {
                         plan: &fix_plan_path,
                         packages: &fix_packages,
                         allow_dirty: fix_iteration > 0,
-                    }),
+                    },
                 )?;
                 applied_fixes = true;
             }
@@ -802,14 +783,13 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
                 let fix_plan_path = graph_dir.join(format!("production-fix-plan-{fix_iteration}"));
                 write_fix_plan(&fix_plan_path, &production_emission_plan)?;
                 cargo.run(
-                    "fix",
                     &format!("{run_id}-production-fix-{fix_iteration}"),
                     &production_graph_dir,
-                    CargoSelection::FixProduction(FixRequest {
+                    CargoInvocation::FixProduction {
                         plan: &fix_plan_path,
                         packages: &fix_packages,
                         allow_dirty: fix_iteration > 0 || applied_fixes,
-                    }),
+                    },
                 )?;
                 applied_fixes = true;
             }
@@ -822,29 +802,14 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
             }
             clear_fragments(&production_graph_dir)?;
             clear_fragments(&non_production_graph_dir)?;
-            let production_run_id = format!("{run_id}-post-fix-{fix_iteration}-production");
-            for product in production_products.iter().copied() {
-                cargo.run(
-                    "check",
-                    &production_run_id,
-                    &production_graph_dir,
-                    CargoSelection::Production(product),
-                )?;
-            }
-            cargo.run(
-                "check",
-                &format!("{run_id}-post-fix-{fix_iteration}-non-production"),
+            let fragments = cargo.collect_fragments(
+                &format!("{run_id}-post-fix-{fix_iteration}"),
+                &production_products,
+                &production_graph_dir,
                 &non_production_graph_dir,
-                CargoSelection::NonProduction,
             )?;
-            cargo.run(
-                "test",
-                &format!("{run_id}-post-fix-{fix_iteration}-doctests"),
-                &non_production_graph_dir,
-                CargoSelection::Doctests,
-            )?;
-            production_fragments = read_fragments(&production_graph_dir)?;
-            test_fragments = read_fragments(&non_production_graph_dir)?;
+            production_fragments = fragments.production;
+            test_fragments = fragments.non_production;
         }
     }
     let findings = config.apply(
@@ -947,36 +912,155 @@ struct InstrumentedCargo<'a> {
     toolchain: &'a RustToolchain,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ProductionSelection<'a> {
     package: &'a str,
     binary: &'a str,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ConsumerMode {
+    Production,
+    NonProduction,
+}
+
+impl ConsumerMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Production => "production",
+            Self::NonProduction => "non-production",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum CargoInvocation<'a> {
+    CheckProduction(ProductionSelection<'a>),
+    CheckNonProduction,
+    CheckDoctests,
+    FixProduction {
+        plan: &'a Path,
+        packages: &'a [String],
+        allow_dirty: bool,
+    },
+    FixNonProduction {
+        plan: &'a Path,
+        packages: &'a [String],
+        allow_dirty: bool,
+    },
+}
+
+struct CargoInvocationSpec<'a> {
+    subcommand: &'static str,
+    selection_arguments: Vec<OsString>,
+    consumer_mode: ConsumerMode,
+    root_crate: String,
+    fix: Option<FixOptions<'a>>,
+    doctests: bool,
+}
+
 #[derive(Clone, Copy)]
-struct FixRequest<'a> {
+struct FixOptions<'a> {
     plan: &'a Path,
-    packages: &'a [String],
     allow_dirty: bool,
 }
 
-#[derive(Clone, Copy)]
-enum CargoSelection<'a> {
-    Production(ProductionSelection<'a>),
-    NonProduction,
-    Doctests,
-    FixProduction(FixRequest<'a>),
-    FixNonProduction(FixRequest<'a>),
+struct ConfiguredCargoCommand {
+    command: Command,
+    subcommand: &'static str,
+    capture_output: bool,
+}
+
+struct CollectedFragments {
+    production: Vec<Fragment>,
+    non_production: Vec<Fragment>,
+}
+
+impl<'a> CargoInvocation<'a> {
+    fn specification(self) -> CargoInvocationSpec<'a> {
+        match self {
+            Self::CheckProduction(product) => CargoInvocationSpec {
+                subcommand: "check",
+                selection_arguments: vec![
+                    "--package".into(),
+                    product.package.into(),
+                    "--bin".into(),
+                    product.binary.into(),
+                ],
+                consumer_mode: ConsumerMode::Production,
+                root_crate: product.binary.replace('-', "_"),
+                fix: None,
+                doctests: false,
+            },
+            Self::CheckNonProduction => CargoInvocationSpec {
+                subcommand: "check",
+                selection_arguments: vec!["--workspace".into(), "--all-targets".into()],
+                consumer_mode: ConsumerMode::NonProduction,
+                root_crate: String::new(),
+                fix: None,
+                doctests: false,
+            },
+            Self::CheckDoctests => CargoInvocationSpec {
+                subcommand: "test",
+                selection_arguments: vec!["--workspace".into(), "--doc".into()],
+                consumer_mode: ConsumerMode::NonProduction,
+                root_crate: String::new(),
+                fix: None,
+                doctests: true,
+            },
+            Self::FixProduction {
+                plan,
+                packages,
+                allow_dirty,
+            } => CargoInvocationSpec {
+                subcommand: "fix",
+                selection_arguments: package_arguments(packages, "--lib"),
+                consumer_mode: ConsumerMode::Production,
+                root_crate: String::new(),
+                fix: Some(FixOptions { plan, allow_dirty }),
+                doctests: false,
+            },
+            Self::FixNonProduction {
+                plan,
+                packages,
+                allow_dirty,
+            } => CargoInvocationSpec {
+                subcommand: "fix",
+                selection_arguments: package_arguments(packages, "--all-targets"),
+                consumer_mode: ConsumerMode::NonProduction,
+                root_crate: String::new(),
+                fix: Some(FixOptions { plan, allow_dirty }),
+                doctests: false,
+            },
+        }
+    }
+}
+
+fn package_arguments(packages: &[String], target: &str) -> Vec<OsString> {
+    let mut arguments = Vec::with_capacity(packages.len() * 2 + 1);
+    for package in packages {
+        arguments.push("--package".into());
+        arguments.push(package.as_str().into());
+    }
+    arguments.push(target.into());
+    arguments
 }
 
 impl InstrumentedCargo<'_> {
-    fn run(
+    fn command(
         &self,
-        subcommand: &str,
         run_id: &str,
         graph_dir: &Path,
-        selection: CargoSelection<'_>,
-    ) -> Result<()> {
+        invocation: CargoInvocation<'_>,
+    ) -> Result<ConfiguredCargoCommand> {
+        let CargoInvocationSpec {
+            subcommand,
+            selection_arguments,
+            consumer_mode,
+            root_crate,
+            fix,
+            doctests,
+        } = invocation.specification();
         let mut command = Command::new("cargo");
         clear_protocol_environment(&mut command);
         command
@@ -987,48 +1071,14 @@ impl InstrumentedCargo<'_> {
             .arg("--all-features")
             .arg("--locked")
             .arg("--target-dir")
-            .arg(self.target_dir);
+            .arg(self.target_dir)
+            .args(selection_arguments);
         self.toolchain.configure_command(&mut command)?;
-        match selection {
-            CargoSelection::Production(product) => {
-                command
-                    .arg("--package")
-                    .arg(product.package)
-                    .arg("--bin")
-                    .arg(product.binary);
-            }
-            CargoSelection::NonProduction => {
-                command.arg("--workspace").arg("--all-targets");
-            }
-            CargoSelection::Doctests => {
-                command.arg("--workspace").arg("--doc");
-            }
-            CargoSelection::FixProduction(fix_request) => {
-                for package in fix_request.packages {
-                    command.arg("--package").arg(package);
-                }
-                command.arg("--lib");
-            }
-            CargoSelection::FixNonProduction(fix_request) => {
-                for package in fix_request.packages {
-                    command.arg("--package").arg(package);
-                }
-                command.arg("--all-targets");
-            }
-        }
         if let Some(target) = &self.args.target {
             command.arg("--target").arg(target);
         }
-        if matches!(
-            selection,
-            CargoSelection::FixProduction(_) | CargoSelection::FixNonProduction(_)
-        ) {
-            let allow_dirty = match selection {
-                CargoSelection::FixProduction(request)
-                | CargoSelection::FixNonProduction(request) => request.allow_dirty,
-                _ => false,
-            };
-            if self.args.allow_dirty || allow_dirty {
+        if let Some(fix) = fix {
+            if self.args.allow_dirty || fix.allow_dirty {
                 command.arg("--allow-dirty");
             }
             if self.args.allow_staged {
@@ -1037,28 +1087,16 @@ impl InstrumentedCargo<'_> {
             if self.args.allow_no_vcs {
                 command.arg("--allow-no-vcs");
             }
+            command.env(protocol::FIX_PLAN_ENV, fix.plan);
         }
-        let consumer_mode = match selection {
-            CargoSelection::NonProduction
-            | CargoSelection::Doctests
-            | CargoSelection::FixNonProduction(_) => "non-production",
-            CargoSelection::Production(_) | CargoSelection::FixProduction(_) => "production",
-        };
-        let root_crate = match selection {
-            CargoSelection::Production(product) => product.binary.replace('-', "_"),
-            CargoSelection::NonProduction
-            | CargoSelection::Doctests
-            | CargoSelection::FixProduction(_)
-            | CargoSelection::FixNonProduction(_) => String::new(),
-        };
         command
             .env("RUSTC_WORKSPACE_WRAPPER", self.driver)
             .env(protocol::VERSION_ENV, protocol::VERSION.to_string())
             .env(protocol::OUTPUT_DIR_ENV, graph_dir)
             .env(protocol::ROOT_CRATE_ENV, root_crate)
-            .env(protocol::CONSUMER_MODE_ENV, consumer_mode)
+            .env(protocol::CONSUMER_MODE_ENV, consumer_mode.as_str())
             .env(protocol::RUN_ID_ENV, run_id);
-        if matches!(selection, CargoSelection::Doctests) {
+        if doctests {
             command
                 .env("RUSTC_BOOTSTRAP", "1")
                 .env(
@@ -1067,12 +1105,20 @@ impl InstrumentedCargo<'_> {
                 )
                 .env_remove("RUSTDOCFLAGS");
         }
-        if let CargoSelection::FixProduction(fix_request)
-        | CargoSelection::FixNonProduction(fix_request) = selection
-        {
-            command.env(protocol::FIX_PLAN_ENV, fix_request.plan);
-        }
-        let status = if matches!(selection, CargoSelection::Doctests) {
+        Ok(ConfiguredCargoCommand {
+            command,
+            subcommand,
+            capture_output: doctests,
+        })
+    }
+
+    fn run(&self, run_id: &str, graph_dir: &Path, invocation: CargoInvocation<'_>) -> Result<()> {
+        let ConfiguredCargoCommand {
+            mut command,
+            subcommand,
+            capture_output,
+        } = self.command(run_id, graph_dir, invocation)?;
+        let status = if capture_output {
             let output = command
                 .output()
                 .with_context(|| format!("run instrumented Cargo {subcommand}"))?;
@@ -1094,6 +1140,41 @@ impl InstrumentedCargo<'_> {
             bail!("instrumented Cargo {subcommand} failed with {status}");
         }
         Ok(())
+    }
+
+    fn collect_fragments(
+        &self,
+        run_id: &str,
+        production_products: &[ProductionSelection<'_>],
+        production_graph_dir: &Path,
+        non_production_graph_dir: &Path,
+    ) -> Result<CollectedFragments> {
+        // Every production product uses the same compiler mode and feature set. Reuse one
+        // dependency fingerprint across the product builds so Cargo can retain fragments from
+        // shared dependencies instead of compiling them once per configured binary.
+        let production_run_id = format!("{run_id}-production");
+        for product in production_products.iter().copied() {
+            self.run(
+                &production_run_id,
+                production_graph_dir,
+                CargoInvocation::CheckProduction(product),
+            )?;
+        }
+        self.run(
+            &format!("{run_id}-non-production"),
+            non_production_graph_dir,
+            CargoInvocation::CheckNonProduction,
+        )?;
+        self.run(
+            &format!("{run_id}-doctests"),
+            non_production_graph_dir,
+            CargoInvocation::CheckDoctests,
+        )?;
+
+        Ok(CollectedFragments {
+            production: read_fragments(production_graph_dir)?,
+            non_production: read_fragments(non_production_graph_dir)?,
+        })
     }
 }
 
@@ -1763,6 +1844,7 @@ fn clear_fragments(graph_dir: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
+    use std::ffi::OsString;
     use std::path::Path;
 
     use clap::CommandFactory;
@@ -1770,7 +1852,10 @@ mod tests {
     use crate::config::ConfigDiagnosticKind;
     use crate::graph::{Definition, DefinitionKind, Finding, FindingKind, Span};
 
-    use super::{Args, DiagnosticRenderer, LintLevel, LintLevels, default_target_dir};
+    use super::{
+        Args, CargoInvocation, ConsumerMode, DiagnosticRenderer, LintLevel, LintLevels,
+        ProductionSelection, default_target_dir,
+    };
 
     fn render_diagnostic(finding: &Finding<'_>) -> String {
         let mut renderer = DiagnosticRenderer::new(Path::new(env!("CARGO_MANIFEST_DIR")));
@@ -1778,6 +1863,33 @@ mod tests {
             .write_diagnostic(finding, "binary `app`", LintLevel::Warn)
             .expect("render diagnostic");
         renderer.into_output()
+    }
+
+    fn assert_cargo_invocation(
+        invocation: CargoInvocation<'_>,
+        subcommand: &str,
+        arguments: &[&str],
+        consumer_mode: ConsumerMode,
+        root_crate: &str,
+        fix: Option<(&Path, bool)>,
+        doctests: bool,
+    ) {
+        let specification = invocation.specification();
+        assert_eq!(specification.subcommand, subcommand);
+        assert_eq!(
+            specification.selection_arguments,
+            arguments
+                .iter()
+                .map(|argument| OsString::from(*argument))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(specification.consumer_mode, consumer_mode);
+        assert_eq!(specification.root_crate, root_crate);
+        assert_eq!(
+            specification.fix.map(|fix| (fix.plan, fix.allow_dirty)),
+            fix
+        );
+        assert_eq!(specification.doctests, doctests);
     }
 
     #[test]
@@ -1813,6 +1925,75 @@ mod tests {
         span.line = 3;
         assert_eq!(renderer.source_line(&span), None);
         assert_eq!(load_count.get(), 1);
+    }
+
+    #[test]
+    fn cargo_invocations_encode_valid_subcommands_and_modes() {
+        let packages = vec!["library".to_owned(), "support".to_owned()];
+        let fix_plan = Path::new("fix-plan.json");
+
+        assert_cargo_invocation(
+            CargoInvocation::CheckProduction(ProductionSelection {
+                package: "app-package",
+                binary: "app-cli",
+            }),
+            "check",
+            &["--package", "app-package", "--bin", "app-cli"],
+            ConsumerMode::Production,
+            "app_cli",
+            None,
+            false,
+        );
+        assert_cargo_invocation(
+            CargoInvocation::CheckNonProduction,
+            "check",
+            &["--workspace", "--all-targets"],
+            ConsumerMode::NonProduction,
+            "",
+            None,
+            false,
+        );
+        assert_cargo_invocation(
+            CargoInvocation::CheckDoctests,
+            "test",
+            &["--workspace", "--doc"],
+            ConsumerMode::NonProduction,
+            "",
+            None,
+            true,
+        );
+        assert_cargo_invocation(
+            CargoInvocation::FixProduction {
+                plan: fix_plan,
+                packages: &packages,
+                allow_dirty: false,
+            },
+            "fix",
+            &["--package", "library", "--package", "support", "--lib"],
+            ConsumerMode::Production,
+            "",
+            Some((fix_plan, false)),
+            false,
+        );
+        assert_cargo_invocation(
+            CargoInvocation::FixNonProduction {
+                plan: fix_plan,
+                packages: &packages,
+                allow_dirty: true,
+            },
+            "fix",
+            &[
+                "--package",
+                "library",
+                "--package",
+                "support",
+                "--all-targets",
+            ],
+            ConsumerMode::NonProduction,
+            "",
+            Some((fix_plan, true)),
+            false,
+        );
     }
 
     #[test]
