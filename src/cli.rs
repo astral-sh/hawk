@@ -1155,7 +1155,13 @@ fn fix_plan_for<'a>(
     FixPlan {
         protocol_version: crate::protocol::ProtocolVersion,
         targets: findings
-            .flat_map(|finding| {
+            .filter_map(|finding| {
+                finding
+                    .kind
+                    .visibility_reduction()
+                    .map(|replacement| (finding, replacement))
+            })
+            .flat_map(|(finding, replacement)| {
                 definitions
                     .get(&DefinitionIdentity::new(
                         &finding.definition.crate_name,
@@ -1172,9 +1178,7 @@ fn fix_plan_for<'a>(
                         definition_kind: definition.kind,
                         span: definition.span.clone(),
                         kind: finding.kind,
-                        replacement: finding
-                            .replacement
-                            .expect("fixable visibility finding has a replacement"),
+                        replacement,
                     })
             })
             .collect(),
@@ -1460,46 +1464,34 @@ fn write_diagnostic(
         ) => {
             unreachable!("restricted visibility findings exclude variants and re-exports")
         }
-        (FindingKind::UnnecessaryRestrictedVisibility, definition_kind, _) => {
-            let replacement = finding
-                .replacement
-                .expect("restricted visibility finding has a replacement");
-            assert_eq!(replacement, crate::graph::VisibilityReduction::Private);
-            (
-                format!(
-                    "`{}` has explicit restricted visibility but all compiled uses fit within the defining module; it can be private",
-                    finding.definition.name
-                ),
-                match definition_kind {
-                    DefinitionKind::Module => "remove this module's visibility modifier",
-                    _ => "remove this declaration's visibility modifier",
-                },
-                match definition_kind {
-                    DefinitionKind::Module => "restricted-visibility module",
-                    _ => "restricted-visibility declaration",
-                },
-            )
-        }
-        (FindingKind::UnnecessaryCrateVisibility, definition_kind, _) => {
-            let replacement = finding
-                .replacement
-                .expect("crate visibility finding has a replacement");
-            assert_eq!(replacement, crate::graph::VisibilityReduction::Super);
-            (
-                format!(
-                    "`{}` is visible throughout the crate but all compiled uses fit within the parent module; it can be `pub(super)`",
-                    finding.definition.name
-                ),
-                match definition_kind {
-                    DefinitionKind::Module => "change this module to `pub(super) mod`",
-                    _ => "change this declaration to `pub(super)`",
-                },
-                match definition_kind {
-                    DefinitionKind::Module => "crate-visible module",
-                    _ => "crate-visible declaration",
-                },
-            )
-        }
+        (FindingKind::UnnecessaryRestrictedVisibility, definition_kind, _) => (
+            format!(
+                "`{}` has explicit restricted visibility but all compiled uses fit within the defining module; it can be private",
+                finding.definition.name
+            ),
+            match definition_kind {
+                DefinitionKind::Module => "remove this module's visibility modifier",
+                _ => "remove this declaration's visibility modifier",
+            },
+            match definition_kind {
+                DefinitionKind::Module => "restricted-visibility module",
+                _ => "restricted-visibility declaration",
+            },
+        ),
+        (FindingKind::UnnecessaryCrateVisibility, definition_kind, _) => (
+            format!(
+                "`{}` is visible throughout the crate but all compiled uses fit within the parent module; it can be `pub(super)`",
+                finding.definition.name
+            ),
+            match definition_kind {
+                DefinitionKind::Module => "change this module to `pub(super) mod`",
+                _ => "change this declaration to `pub(super)`",
+            },
+            match definition_kind {
+                DefinitionKind::Module => "crate-visible module",
+                _ => "crate-visible declaration",
+            },
+        ),
     };
     write_diagnostic_header(output, finding.kind.code(), message, level)?;
 
@@ -1838,7 +1830,6 @@ mod tests {
         let finding = Finding {
             kind: FindingKind::UnnecessaryPublic,
             definition: &definition,
-            replacement: Some(crate::graph::VisibilityReduction::Crate),
             test_only: false,
             test_compiled_only: false,
         };
@@ -1879,7 +1870,6 @@ mod tests {
         let finding = Finding {
             kind: FindingKind::UnnecessaryCrateVisibility,
             definition: &definition,
-            replacement: Some(crate::graph::VisibilityReduction::Super),
             test_only: false,
             test_compiled_only: false,
         };
@@ -1919,7 +1909,6 @@ mod tests {
         let finding = Finding {
             kind: FindingKind::UnnecessaryRestrictedVisibility,
             definition: &definition,
-            replacement: Some(crate::graph::VisibilityReduction::Private),
             test_only: false,
             test_compiled_only: false,
         };
@@ -1955,7 +1944,6 @@ mod tests {
         let finding = Finding {
             kind: FindingKind::DeadPublic,
             definition: &definition,
-            replacement: None,
             test_only: false,
             test_compiled_only: false,
         };

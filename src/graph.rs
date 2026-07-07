@@ -149,13 +149,21 @@ impl FindingKind {
             _ => None,
         }
     }
+
+    pub const fn visibility_reduction(self) -> Option<VisibilityReduction> {
+        match self {
+            Self::DeadPublic => None,
+            Self::UnnecessaryPublic => Some(VisibilityReduction::Crate),
+            Self::UnnecessaryRestrictedVisibility => Some(VisibilityReduction::Private),
+            Self::UnnecessaryCrateVisibility => Some(VisibilityReduction::Super),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
 pub struct Finding<'a> {
     pub kind: FindingKind,
     pub definition: &'a Definition,
-    pub replacement: Option<VisibilityReduction>,
     pub test_only: bool,
     pub test_compiled_only: bool,
 }
@@ -401,7 +409,6 @@ pub fn analyze_with_options<'a>(
             findings.push(Finding {
                 kind: FindingKind::DeadPublic,
                 definition,
-                replacement: None,
                 test_only: false,
                 test_compiled_only,
             });
@@ -415,7 +422,6 @@ pub fn analyze_with_options<'a>(
         findings.push(Finding {
             kind: FindingKind::UnnecessaryPublic,
             definition,
-            replacement: Some(VisibilityReduction::Crate),
             test_only: !is_production_live && is_test_live,
             test_compiled_only,
         });
@@ -445,8 +451,8 @@ pub fn analyze_with_options<'a>(
             continue;
         }
 
-        let Some(replacement) =
-            restricted_visibility_reduction(definition, &required_scopes, &equivalents)
+        let Some(kind) =
+            restricted_visibility_finding_kind(definition, &required_scopes, &equivalents)
         else {
             continue;
         };
@@ -455,17 +461,8 @@ pub fn analyze_with_options<'a>(
         let is_production_live = is_live(definition, &production_edges, &production, &equivalents);
         let is_test_live = is_live(definition, &test_edges, &tests, &equivalents);
         findings.push(Finding {
-            kind: match replacement {
-                VisibilityReduction::Private => FindingKind::UnnecessaryRestrictedVisibility,
-                VisibilityReduction::Super => FindingKind::UnnecessaryCrateVisibility,
-                VisibilityReduction::Crate => {
-                    unreachable!(
-                        "restricted visibility findings always reduce below crate visibility"
-                    )
-                }
-            },
+            kind,
             definition,
-            replacement: Some(replacement),
             test_only: !is_production_live && is_test_live,
             test_compiled_only,
         });
@@ -540,16 +537,17 @@ fn has_known_restricted_visibility_requirement(
     equivalents: &HashMap<&str, Vec<&str>>,
 ) -> bool {
     let required_scope = merged_required_scope(definition, required_scopes, equivalents);
-    !required_scope.unknown_source
-        && required_scope.crate_name.as_deref() == Some(definition.crate_name.as_str())
-        && restricted_visibility_reduction(definition, required_scopes, equivalents).is_none()
+    matches!(
+        &required_scope,
+        RequiredScope::Known { crate_name, .. } if crate_name == &definition.crate_name
+    ) && restricted_visibility_finding_kind(definition, required_scopes, equivalents).is_none()
 }
 
-fn restricted_visibility_reduction(
+fn restricted_visibility_finding_kind(
     definition: &Definition,
     required_scopes: &HashMap<&str, RequiredScope>,
     equivalents: &HashMap<&str, Vec<&str>>,
-) -> Option<VisibilityReduction> {
+) -> Option<FindingKind> {
     if matches!(
         definition.kind,
         DefinitionKind::EnumVariant | DefinitionKind::Reexport
@@ -557,30 +555,28 @@ fn restricted_visibility_reduction(
         return None;
     }
 
-    let required_scope = merged_required_scope(definition, required_scopes, equivalents);
-    if required_scope.unknown_source {
-        return None;
+    match merged_required_scope(definition, required_scopes, equivalents) {
+        RequiredScope::Bottom => Some(FindingKind::UnnecessaryRestrictedVisibility),
+        RequiredScope::Unknown => None,
+        RequiredScope::Known {
+            crate_name,
+            module_scope,
+        } => {
+            if crate_name != definition.crate_name {
+                return None;
+            }
+            if module_scope.starts_with(&definition.module_scope) {
+                return Some(FindingKind::UnnecessaryRestrictedVisibility);
+            }
+            if definition.crate_visible_api {
+                let parent_scope = definition.module_scope.split_last()?.1;
+                return module_scope
+                    .starts_with(parent_scope)
+                    .then_some(FindingKind::UnnecessaryCrateVisibility);
+            }
+            None
+        }
     }
-    let Some(required_crate) = required_scope.crate_name.as_deref() else {
-        return Some(VisibilityReduction::Private);
-    };
-    if required_crate != definition.crate_name {
-        return None;
-    }
-    if required_scope
-        .module_scope
-        .starts_with(&definition.module_scope)
-    {
-        return Some(VisibilityReduction::Private);
-    }
-    if definition.crate_visible_api {
-        let parent_scope = definition.module_scope.split_last()?.1;
-        return required_scope
-            .module_scope
-            .starts_with(parent_scope)
-            .then_some(VisibilityReduction::Super);
-    }
-    None
 }
 
 fn merged_required_scope(
@@ -604,50 +600,70 @@ fn merged_required_scope(
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-struct RequiredScope {
-    crate_name: Option<String>,
-    module_scope: Vec<String>,
-    unknown_source: bool,
+enum RequiredScope {
+    #[default]
+    Bottom,
+    Known {
+        crate_name: String,
+        module_scope: Vec<String>,
+    },
+    Unknown,
 }
 
 impl RequiredScope {
     fn for_definition(definition: &Definition) -> Self {
-        Self {
-            crate_name: Some(definition.crate_name.clone()),
+        Self::Known {
+            crate_name: definition.crate_name.clone(),
             module_scope: definition.module_scope.clone(),
-            unknown_source: false,
         }
     }
 
     fn unknown() -> Self {
-        Self {
-            unknown_source: true,
-            ..Self::default()
-        }
+        Self::Unknown
     }
 
     fn merge(&mut self, other: &Self) -> bool {
-        let previous = self.clone();
-        self.unknown_source |= other.unknown_source;
-        if let Some(other_crate) = &other.crate_name {
-            match &self.crate_name {
-                None => {
-                    self.crate_name = Some(other_crate.clone());
-                    self.module_scope = other.module_scope.clone();
+        match other {
+            Self::Bottom => false,
+            Self::Unknown => {
+                if matches!(self, Self::Unknown) {
+                    false
+                } else {
+                    *self = Self::Unknown;
+                    true
                 }
-                Some(crate_name) if crate_name == other_crate => {
-                    let shared = self
-                        .module_scope
+            }
+            Self::Known {
+                crate_name: other_crate,
+                module_scope: other_scope,
+            } => match self {
+                Self::Bottom => {
+                    *self = other.clone();
+                    true
+                }
+                Self::Unknown => false,
+                Self::Known {
+                    crate_name,
+                    module_scope,
+                } if crate_name == other_crate => {
+                    let shared = module_scope
                         .iter()
-                        .zip(&other.module_scope)
+                        .zip(other_scope)
                         .take_while(|(left, right)| left == right)
                         .count();
-                    self.module_scope.truncate(shared);
+                    if shared == module_scope.len() {
+                        false
+                    } else {
+                        module_scope.truncate(shared);
+                        true
+                    }
                 }
-                Some(_) => self.unknown_source = true,
-            }
+                Self::Known { .. } => {
+                    *self = Self::Unknown;
+                    true
+                }
+            },
         }
-        *self != previous
     }
 }
 
@@ -923,8 +939,8 @@ fn reachable<'a>(
 #[cfg(test)]
 mod tests {
     use super::{
-        Definition, DefinitionKind, Edge, EdgeKind, Finding, FindingKind, Fragment, Span,
-        VisibilityReduction, analyze as analyze_with_tests, analyze_with_options,
+        Definition, DefinitionKind, Edge, EdgeKind, Finding, FindingKind, Fragment, RequiredScope,
+        Span, VisibilityReduction, analyze as analyze_with_tests, analyze_with_options,
     };
     use crate::protocol::ProtocolVersion;
     use std::collections::HashSet;
@@ -945,6 +961,53 @@ mod tests {
             .into_iter()
             .map(str::to_owned)
             .collect()
+    }
+
+    #[test]
+    fn finding_kind_determines_visibility_reduction() {
+        assert_eq!(FindingKind::DeadPublic.visibility_reduction(), None);
+        assert_eq!(
+            FindingKind::UnnecessaryPublic.visibility_reduction(),
+            Some(VisibilityReduction::Crate)
+        );
+        assert_eq!(
+            FindingKind::UnnecessaryRestrictedVisibility.visibility_reduction(),
+            Some(VisibilityReduction::Private)
+        );
+        assert_eq!(
+            FindingKind::UnnecessaryCrateVisibility.visibility_reduction(),
+            Some(VisibilityReduction::Super)
+        );
+    }
+
+    #[test]
+    fn required_scope_merge_follows_its_lattice() {
+        let mut scope = RequiredScope::Bottom;
+        assert!(scope.merge(&RequiredScope::Known {
+            crate_name: "lib".into(),
+            module_scope: vec!["api".into(), "nested".into()],
+        }));
+        assert!(scope.merge(&RequiredScope::Known {
+            crate_name: "lib".into(),
+            module_scope: vec!["api".into(), "sibling".into()],
+        }));
+        assert_eq!(
+            scope,
+            RequiredScope::Known {
+                crate_name: "lib".into(),
+                module_scope: vec!["api".into()],
+            }
+        );
+        assert!(scope.merge(&RequiredScope::Known {
+            crate_name: "other".into(),
+            module_scope: vec![],
+        }));
+        assert_eq!(scope, RequiredScope::Unknown);
+        assert!(!scope.merge(&RequiredScope::Bottom));
+        assert!(!scope.merge(&RequiredScope::Known {
+            crate_name: "lib".into(),
+            module_scope: vec![],
+        }));
     }
 
     fn node(id: &str, crate_name: &str, public_api: bool) -> Definition {
@@ -1339,7 +1402,6 @@ mod tests {
             findings[0].kind,
             FindingKind::UnnecessaryRestrictedVisibility
         );
-        assert_eq!(findings[0].replacement, Some(VisibilityReduction::Private));
         assert_eq!(findings[0].definition.id, "scoped::helper");
     }
 
@@ -1357,7 +1419,6 @@ mod tests {
             findings[0].kind,
             FindingKind::UnnecessaryRestrictedVisibility
         );
-        assert_eq!(findings[0].replacement, Some(VisibilityReduction::Private));
         assert_eq!(findings[0].definition.id, "scoped::unused");
     }
 
@@ -1500,7 +1561,6 @@ mod tests {
             findings[0].kind,
             FindingKind::UnnecessaryRestrictedVisibility
         );
-        assert_eq!(findings[0].replacement, Some(VisibilityReduction::Private));
         assert_eq!(findings[0].definition.id, "scoped::helper");
     }
 
@@ -1522,7 +1582,6 @@ mod tests {
 
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].kind, FindingKind::UnnecessaryCrateVisibility);
-        assert_eq!(findings[0].replacement, Some(VisibilityReduction::Super));
         assert_eq!(findings[0].definition.id, "scoped::nested::helper");
     }
 
@@ -1569,7 +1628,6 @@ mod tests {
 
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].kind, FindingKind::UnnecessaryCrateVisibility);
-        assert_eq!(findings[0].replacement, Some(VisibilityReduction::Super));
         assert_eq!(findings[0].definition.id, "scoped::nested");
     }
 
@@ -1609,7 +1667,6 @@ mod tests {
 
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].kind, FindingKind::UnnecessaryCrateVisibility);
-        assert_eq!(findings[0].replacement, Some(VisibilityReduction::Super));
         assert_eq!(findings[0].definition.id, "scoped::nested::ErrorKind");
     }
 
@@ -1644,7 +1701,7 @@ mod tests {
         assert!(
             findings
                 .iter()
-                .all(|finding| finding.replacement == Some(VisibilityReduction::Super))
+                .all(|finding| finding.kind == FindingKind::UnnecessaryCrateVisibility)
         );
     }
 
