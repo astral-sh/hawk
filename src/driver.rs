@@ -168,8 +168,10 @@ impl Callbacks for HawkCallbacks {
             tcx,
             &self.root_crate,
             &self.output_dir,
-            self.collection_options,
-            self.experimental_trait_dispatch,
+            FragmentOptions {
+                collection: self.collection_options,
+                experimental_trait_dispatch: self.experimental_trait_dispatch,
+            },
         ) {
             tcx.dcx()
                 .fatal(format!("hawk could not emit analysis graph: {error:#}"));
@@ -341,12 +343,17 @@ fn emit_fix(
     diagnostic.emit();
 }
 
+#[derive(Clone, Copy)]
+struct FragmentOptions {
+    collection: CollectionOptions,
+    experimental_trait_dispatch: bool,
+}
+
 fn emit_fragment(
     tcx: TyCtxt<'_>,
     root_crate: &str,
     output_dir: &Path,
-    collection_options: CollectionOptions,
-    experimental_trait_dispatch: bool,
+    options: FragmentOptions,
 ) -> Result<()> {
     let package_name = env::var("CARGO_PKG_NAME").context("read Cargo package name")?;
     let crate_name = tcx.crate_name(LOCAL_CRATE).to_string();
@@ -372,8 +379,7 @@ fn emit_fragment(
         crate_id,
         is_product_root,
         test_surface,
-        collection_options,
-        experimental_trait_dispatch,
+        options,
     );
     let path = output_dir.join(format!("{crate_name}-{suffix}.json"));
     let mut file = tempfile::NamedTempFile::new_in(output_dir)
@@ -402,8 +408,7 @@ fn collect_fragment(
     crate_id: String,
     is_product_root: bool,
     test_surface: bool,
-    collection_options: CollectionOptions,
-    experimental_trait_dispatch: bool,
+    options: FragmentOptions,
 ) -> Fragment {
     let mut definitions = Vec::new();
     let mut defined = HashSet::new();
@@ -441,7 +446,7 @@ fn collect_fragment(
         match item.kind {
             hir::ItemKind::Struct(_, _, data) | hir::ItemKind::Union(_, _, data) => {
                 let uniform_field_group = uniform_field_group(
-                    collection_options,
+                    options.collection,
                     || source_fields_have_uniform_visibility(tcx, item.span),
                     || span(tcx, item.owner_id.def_id),
                 );
@@ -508,7 +513,7 @@ fn collect_fragment(
             EdgeKind::Body,
             Some(tcx.typeck_body(body.id())),
             true,
-            experimental_trait_dispatch,
+            options.experimental_trait_dispatch,
         );
         visitor.visit_body(body);
         visitor.finish(&mut edges);
@@ -526,7 +531,7 @@ fn collect_fragment(
             },
             None,
             false,
-            experimental_trait_dispatch,
+            options.experimental_trait_dispatch,
         );
         visitor.visit_node(tcx.hir_node_by_def_id(def_id));
         visitor.finish(&mut edges);
@@ -591,7 +596,7 @@ fn collect_fragment(
                 EdgeKind::Interface,
                 None,
                 false,
-                experimental_trait_dispatch,
+                options.experimental_trait_dispatch,
             );
             visitor.visit_field_def(field);
             visitor.finish(&mut edges);
@@ -633,7 +638,7 @@ fn collect_fragment(
                 kind: EdgeKind::VisibilityRequirement,
             })
     }));
-    if experimental_trait_dispatch {
+    if options.experimental_trait_dispatch {
         // Trait-defining crates cannot see downstream implementations. A synthetic
         // identity lets every compiled impl contribute to the merged dispatch fan-out.
         edges.extend(tcx.hir_body_owners().filter_map(|def_id| {
@@ -756,7 +761,7 @@ fn collect_fragment(
             )
         })
         .filter(|def_id| {
-            !experimental_trait_dispatch
+            !options.experimental_trait_dispatch
                 || is_lang_item_trait_impl_body(tcx, *def_id)
                 || !is_private_local_trait_body(tcx, *def_id)
         })
