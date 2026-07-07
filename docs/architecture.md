@@ -230,20 +230,22 @@ Both closures include conservative roots, normally used for every
 trait-associated body because direct HIR reference edges do not represent all
 forms of trait dispatch.
 
-The opt-in `experimental-trait-dispatch` model replaces non-language trait
-roots with explicit edges. A concrete call or associated-constant reference
-uses rustc's resolved `Instance`. An unresolved generic or dynamic reference
-targets a synthetic node keyed by the trait item's stable compiler identity;
-each crate fragment connects that node to the implementation bodies it
-defines. Merging fragments therefore preserves downstream workspace impls,
-including local implementations of traits defined by dependencies. Rustc
-language-item impls remain roots because compiler-inserted calls are not
-uniformly represented in typed HIR. An implementation also remains rooted
-when its trait item is absent from the fragments for that analysis mode: the
-sysroot and non-workspace dependencies are not compiled through
-`RUSTC_WORKSPACE_WRAPPER`, so their dispatch sites are unavailable. The model
-remains experimental because the same limitation can apply to other
-compiler-generated dispatch paths.
+The opt-in `experimental-trait-dispatch` model replaces blanket roots for
+bodies associated with private, same-crate traits with explicit edges. A
+concrete call or associated-constant reference uses rustc's resolved
+`Instance`. An unresolved generic or dynamic reference targets a synthetic
+node keyed by the trait item's stable compiler identity; each crate fragment
+connects that node to the implementation bodies it defines.
+
+Bodies for nonlocal traits and effectively exported local traits remain
+conservative roots. Although their definitions can be instrumented workspace
+code, a non-workspace dependency can dispatch those traits from an
+uninstrumented generic or dynamic call site. Rustc language-item impls also
+remain roots because compiler-inserted calls are not uniformly represented in
+typed HIR. As a final defense, an implementation remains rooted when its trait
+item is absent from the fragments for that analysis mode. The model remains
+experimental because the same limitation can apply to other compiler-generated
+dispatch paths.
 
 Separately, Hawk computes the declarations whose public visibility is
 required. Any compiled cross-crate reference requires the referenced

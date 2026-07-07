@@ -755,7 +755,11 @@ fn collect_fragment(
                 DefKind::Trait | DefKind::Impl { of_trait: true }
             )
         })
-        .filter(|def_id| !experimental_trait_dispatch || is_lang_item_trait_impl_body(tcx, *def_id))
+        .filter(|def_id| {
+            !experimental_trait_dispatch
+                || is_lang_item_trait_impl_body(tcx, *def_id)
+                || !is_private_local_trait_body(tcx, *def_id)
+        })
         .map(|def_id| id(tcx, def_id.to_def_id()))
         .chain(
             definitions
@@ -808,6 +812,18 @@ fn is_lang_item_trait_impl_body(tcx: TyCtxt<'_>, def_id: LocalDefId) -> bool {
             || tcx
                 .trait_item_of(def_id.to_def_id())
                 .is_some_and(|trait_item| tcx.lang_items().from_def_id(trait_item).is_some()))
+}
+
+fn is_private_local_trait_body(tcx: TyCtxt<'_>, def_id: LocalDefId) -> bool {
+    // Uninstrumented dependencies cannot name a trait that is both local and
+    // effectively private, so every possible dispatch site is in this fragment.
+    let Some(trait_def_id) = trait_item(tcx, def_id.to_def_id())
+        .and_then(|trait_item| tcx.trait_of_assoc(trait_item))
+        .and_then(DefId::as_local)
+    else {
+        return false;
+    };
+    !tcx.effective_visibilities(()).is_exported(trait_def_id)
 }
 
 fn is_public_candidate(tcx: TyCtxt<'_>, def_id: LocalDefId, test_surface: bool) -> bool {

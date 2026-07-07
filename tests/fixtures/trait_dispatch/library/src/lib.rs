@@ -118,6 +118,20 @@ impl EntirelyUnusedDispatch for EntirelyUnused {
 
 pub fn unused_trait_helper() {}
 
+pub trait ExportedDispatch {
+    fn run(&self);
+}
+
+struct ExportedUnused;
+
+impl ExportedDispatch for ExportedUnused {
+    fn run(&self) {
+        exported_trait_helper();
+    }
+}
+
+pub fn exported_trait_helper() {}
+
 struct ExternalUsed;
 
 impl ExternalDispatch for ExternalUsed {
@@ -168,7 +182,7 @@ pub fn entry() {
     call_generic(&GenericUsed);
     call_dynamic(&DynamicUsed);
     DefaultUsed.run();
-    external_trait::call_external(&ExternalUsed);
+    external_caller::call_external(&ExternalUsed);
     let _ = <ConstantUsed as ConstantDispatch>::VALUE;
     let _dropped = Dropped;
 }

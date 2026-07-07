@@ -1,3 +1,4 @@
 [workspace]
 members = ["app", "external_trait", "library"]
+exclude = ["external_caller"]
 resolver = "2"

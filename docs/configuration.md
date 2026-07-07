@@ -94,20 +94,21 @@ such as macro-generated structs.
 ## Experimental trait dispatch
 
 Set `experimental-trait-dispatch = true` to replace Hawk's blanket liveness
-roots for non-language trait bodies with typed dispatch edges:
+roots for private, same-crate trait bodies with typed dispatch edges:
 
 ```toml
 experimental-trait-dispatch = true
 ```
 
 Concrete method and associated-constant references use rustc's selected
-implementation. Generic and dynamic references remain conservative: they
-reach every implementation body for the referenced trait item found across
-the compiled workspace. Implementations also remain conservative roots when
-the trait definition is absent from the instrumented workspace fragments,
-covering dispatch performed by the sysroot or a non-workspace dependency.
-Trait implementations of rustc language items remain conservative roots
-because the compiler can invoke them without an explicit HIR call.
+implementation. Generic and dynamic references to private, same-crate traits
+remain conservative: they reach every implementation body for the referenced
+trait item in that crate. Bodies for nonlocal traits and effectively exported
+local traits remain conservative roots because a non-workspace dependency can
+dispatch them from an uninstrumented call site. Implementations also remain
+roots when the trait definition is absent from the instrumented workspace
+fragments. Trait implementations of rustc language items remain conservative
+roots because the compiler can invoke them without an explicit HIR call.
 
 This setting is disabled by default and is intended for evaluating the model,
 not unattended fixes. Rustc does not expose every compiler-generated dispatch

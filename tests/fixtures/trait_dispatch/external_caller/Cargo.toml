@@ -1,5 +1,5 @@
 [package]
-name = "library"
+name = "external_caller"
 version = "0.0.0"
 edition = "2024"
 
@@ -7,5 +7,4 @@ edition = "2024"
 path = "src/lib.rs"
 
 [dependencies]
-external_caller = { path = "../external_caller" }
 external_trait = { path = "../external_trait" }

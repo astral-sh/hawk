@@ -1074,6 +1074,7 @@ fn experimental_trait_dispatch_models_static_and_conservative_calls() {
         "dynamic_other_helper",
         "default_helper",
         "external_helper",
+        "exported_trait_helper",
         "constant_used_helper",
         "drop_helper",
         "display_helper",
