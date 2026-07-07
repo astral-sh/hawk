@@ -226,26 +226,9 @@ The analysis then computes two reachability closures:
 - **non-production live** begins at executable entry points compiled for
   tests, benches, examples, or doctests.
 
-Both closures include conservative roots, normally used for every
-trait-associated body because direct HIR reference edges do not represent all
-forms of trait dispatch.
-
-The opt-in `experimental-trait-dispatch` model replaces blanket roots for
-bodies associated with private, same-crate traits with explicit edges. A
-concrete call or associated-constant reference uses rustc's resolved
-`Instance`. An unresolved generic or dynamic reference targets a synthetic
-node keyed by the trait item's stable compiler identity; each crate fragment
-connects that node to the implementation bodies it defines.
-
-Bodies for nonlocal traits and effectively exported local traits remain
-conservative roots. Although their definitions can be instrumented workspace
-code, a non-workspace dependency can dispatch those traits from an
-uninstrumented generic or dynamic call site. Rustc language-item impls also
-remain roots because compiler-inserted calls are not uniformly represented in
-typed HIR. As a final defense, an implementation remains rooted when its trait
-item is absent from the fragments for that analysis mode. The model remains
-experimental because the same limitation can apply to other compiler-generated
-dispatch paths.
+Both closures include conservative roots, currently used for trait-associated
+implementation code whose dispatch is not safely modeled by direct call
+edges.
 
 Separately, Hawk computes the declarations whose public visibility is
 required. Any compiled cross-crate reference requires the referenced

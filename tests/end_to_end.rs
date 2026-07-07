@@ -1037,56 +1037,6 @@ fn exported_symbols_are_treated_as_external_roots() {
 }
 
 #[test]
-fn experimental_trait_dispatch_models_static_and_conservative_calls() {
-    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/trait_dispatch/Cargo.toml");
-    let target_dir = tempfile::tempdir().expect("temporary target directory");
-    let output = Command::new(env!("CARGO_BIN_EXE_cargo-hawk"))
-        .arg("--manifest-path")
-        .arg(manifest)
-        .arg("--target-dir")
-        .arg(target_dir.path())
-        .arg("--color=never")
-        .output()
-        .expect("run cargo-hawk");
-
-    assert!(
-        output.status.success(),
-        "cargo-hawk failed:\n{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    for dead in [
-        "static_unused_helper",
-        "unused_trait_helper",
-        "constant_unused_helper",
-    ] {
-        assert!(
-            stdout.contains(&format!("warning[hawk::dead_public]: `{dead}`")),
-            "expected `{dead}` to be dead:\n{stdout}"
-        );
-    }
-    for retained in [
-        "static_used_helper",
-        "generic_used_helper",
-        "generic_other_helper",
-        "dynamic_used_helper",
-        "dynamic_other_helper",
-        "default_helper",
-        "external_helper",
-        "exported_trait_helper",
-        "constant_used_helper",
-        "drop_helper",
-        "display_helper",
-    ] {
-        assert!(
-            stdout.contains(&format!("warning[hawk::unnecessary_public]: `{retained}`")),
-            "expected `{retained}` to remain reachable:\n{stdout}"
-        );
-    }
-}
-
-#[test]
 fn doctest_consumers_preserve_required_public_visibility_during_fixes() {
     let source_workspace =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/doctest_consumers");

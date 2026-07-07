@@ -1,6 +1,0 @@
-experimental-trait-dispatch = true
-
-[[production]]
-package = "app"
-bin = "app"
-reason = "exercise trait dispatch from the shipped binary"

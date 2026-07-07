@@ -91,31 +91,6 @@ This setting is disabled by default. It does not apply to mixed-visibility
 declarations or declarations whose complete source field list is unavailable,
 such as macro-generated structs.
 
-## Experimental trait dispatch
-
-Set `experimental-trait-dispatch = true` to replace Hawk's blanket liveness
-roots for private, same-crate trait bodies with typed dispatch edges:
-
-```toml
-experimental-trait-dispatch = true
-```
-
-Concrete method and associated-constant references use rustc's selected
-implementation. Generic and dynamic references to private, same-crate traits
-remain conservative: they reach every implementation body for the referenced
-trait item in that crate. Bodies for nonlocal traits and effectively exported
-local traits remain conservative roots because a non-workspace dependency can
-dispatch them from an uninstrumented call site. Implementations also remain
-roots when the trait definition is absent from the instrumented workspace
-fragments. Trait implementations of rustc language items remain conservative
-roots because the compiler can invoke them without an explicit HIR call.
-
-This setting is disabled by default and is intended for evaluating the model,
-not unattended fixes. Rustc does not expose every compiler-generated dispatch
-as a typed HIR reference, so a non-language trait body reached only through
-such a path can still be reported as dead. Review findings produced with this
-setting before changing visibility or removing code.
-
 ## Overrides
 
 An override records an intentional finding without changing the analysis:

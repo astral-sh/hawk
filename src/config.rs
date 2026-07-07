@@ -14,7 +14,6 @@ use cargo_hawk_internal::graph::{Definition, DefinitionKind, Finding, FindingKin
 pub struct Config {
     path: Option<PathBuf>,
     source: String,
-    experimental_trait_dispatch: bool,
     preserve_uniform_field_visibility: bool,
     overrides: Vec<LintOverride>,
     exclusions: Vec<DiagnosticExclusion>,
@@ -123,8 +122,6 @@ pub struct AppliedFindings<'findings, 'config> {
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawConfig {
-    #[serde(default, rename = "experimental-trait-dispatch")]
-    experimental_trait_dispatch: bool,
     #[serde(default, rename = "preserve-uniform-field-visibility")]
     preserve_uniform_field_visibility: bool,
     #[serde(default, rename = "override")]
@@ -189,7 +186,6 @@ impl Default for Config {
         Self {
             path: None,
             source: String::new(),
-            experimental_trait_dispatch: false,
             preserve_uniform_field_visibility: false,
             overrides: Vec::new(),
             exclusions: Vec::new(),
@@ -461,7 +457,6 @@ impl Config {
         Ok(Self {
             path: Some(path),
             source,
-            experimental_trait_dispatch: raw.experimental_trait_dispatch,
             preserve_uniform_field_visibility: raw.preserve_uniform_field_visibility,
             overrides,
             exclusions,
@@ -485,10 +480,6 @@ impl Config {
 
     pub fn preserve_uniform_field_visibility(&self) -> bool {
         self.preserve_uniform_field_visibility
-    }
-
-    pub fn experimental_trait_dispatch(&self) -> bool {
-        self.experimental_trait_dispatch
     }
 
     pub fn apply<'findings, 'config>(
@@ -1472,18 +1463,5 @@ no-default-features = true
                 .to_string()
                 .contains("duplicate feature profile `default`")
         );
-    }
-
-    #[test]
-    fn trait_dispatch_model_is_experimental_and_opt_in() {
-        let directory = tempfile::tempdir().expect("temporary configuration directory");
-        let path = directory.path().join("hawk.toml");
-
-        let default = Config::load(directory.path(), None).expect("load default configuration");
-        assert!(!default.experimental_trait_dispatch());
-
-        std::fs::write(&path, "experimental-trait-dispatch = true\n").expect("write configuration");
-        let configured = Config::load(directory.path(), Some(&path)).expect("load configuration");
-        assert!(configured.experimental_trait_dispatch());
     }
 }
