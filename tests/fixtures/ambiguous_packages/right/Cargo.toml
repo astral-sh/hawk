@@ -4,5 +4,5 @@ version = "0.0.0"
 edition = "2024"
 
 [lib]
-name = "shared"
+name = "right_shared"
 path = "src/lib.rs"

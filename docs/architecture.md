@@ -163,8 +163,8 @@ not findings, during the collection phase.
 The wrapper records a `Fragment` for each compiled workspace crate. A fragment
 contains:
 
-- the owning Cargo package name and rustc crate identity, which remain
-  distinct when multiple packages share a library target name;
+- the owning Cargo package name and rustc crate identity, which are tracked
+  separately;
 - definitions, including source location, item kind, lexical module scope,
   and whether the item is a public-surface, restricted-visibility, or
   crate-visible candidate;

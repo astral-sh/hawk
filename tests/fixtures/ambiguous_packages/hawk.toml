@@ -5,8 +5,8 @@ reason = "binary product under analysis"
 
 [[override]]
 lint = "hawk::dead_public"
-crate = "shared"
+crate = "left_shared"
 item = "duplicate"
 kind = "function"
 level = "expect"
-reason = "exercise package-level override ambiguity"
+reason = "select one of two packages with the same item name"

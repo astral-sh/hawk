@@ -1003,7 +1003,7 @@ reason = "test-only alternative remains intentionally public"
 }
 
 #[test]
-fn override_keeps_same_named_items_from_distinct_packages_ambiguous() {
+fn override_does_not_suppress_a_same_named_item_in_another_crate() {
     let manifest =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ambiguous_packages/Cargo.toml");
     let target_dir = tempfile::tempdir().expect("temporary target directory");
@@ -1026,16 +1026,14 @@ fn override_keeps_same_named_items_from_distinct_packages_ambiguous() {
         stdout
             .matches("warning[hawk::dead_public]: `duplicate`")
             .count(),
-        2,
-        "both package declarations should remain unsuppressed:\n{stdout}"
+        1,
+        "only the unselected package declaration should remain:\n{stdout}"
     );
-    assert!(stdout.contains("left/src/lib.rs:3:1"));
+    assert!(!stdout.contains("left/src/lib.rs:3:1"));
     assert!(stdout.contains("right/src/lib.rs:3:1"));
-    assert!(stdout.contains(
-        "warning[hawk::ambiguous_item]: override for `hawk::dead_public` matches multiple items named `shared::duplicate`"
-    ));
+    assert!(!stdout.contains("hawk::ambiguous_item"));
     assert!(!stdout.contains("hawk::unfulfilled_expectation"));
-    assert!(stdout.contains("hawk: 3 finding(s)"));
+    assert!(stdout.contains("hawk: 1 finding(s)"));
 }
 
 #[test]
