@@ -74,7 +74,7 @@ pub enum EdgeKind {
     VisibilityRequirement,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DefinitionKind {
     Function,
@@ -102,7 +102,7 @@ pub struct Span {
     pub column: usize,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FindingKind {
     DeadPublic,
@@ -484,7 +484,11 @@ pub fn analyze_with_options<'a>(
         (
             span.map(|span| span.file.as_str()).unwrap_or(""),
             span.map(|span| span.line).unwrap_or(0),
+            span.map(|span| span.column).unwrap_or(0),
+            finding.definition.crate_name.as_str(),
             finding.definition.name.as_str(),
+            finding.definition.kind,
+            finding.kind,
         )
     });
     findings
