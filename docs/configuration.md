@@ -30,9 +30,48 @@ required by that binary are not reported as dead or unnecessarily public.
 Every package and binary must be a target of the selected Cargo workspace. At
 least one production target must apply to the analyzed target.
 
-All configured binaries are analyzed with the same `--all-features` and
+All configured binaries are analyzed with the same feature profiles and
 compilation target. Hawk intentionally does not infer production targets from
 the workspace: configure each intended target explicitly.
+
+## Feature profiles
+
+By default, Hawk performs one analysis with Cargo's `--all-features` option.
+Configure a feature matrix when code that is required with a feature disabled
+would otherwise be absent from that build:
+
+```toml
+[[feature-profile]]
+name = "all"
+all-features = true
+
+[[feature-profile]]
+name = "minimal"
+no-default-features = true
+
+[[feature-profile]]
+name = "serde-only"
+no-default-features = true
+features = ["serde"]
+```
+
+Hawk compiles every production binary, workspace non-production target, and
+doctest under each profile. Fragments are stored separately for each profile,
+then their reachability and visibility requirements are combined before
+diagnostics are produced. A declaration required in any configured profile is
+therefore preserved.
+
+Profile names must be unique and contain only ASCII letters, digits, `-`, or
+`_`. `all-features = true` cannot be combined with `no-default-features` or an
+explicit `features` list. A profile with none of those settings uses Cargo's
+default features. Each string in `features` is passed as a separate Cargo
+`--features` value.
+
+Automatic fixes are currently rejected when multiple feature profiles are
+configured. Applying a visibility change safely across several configurations
+requires a coordinated fix plan; run the matrix without `--fix`, or select a
+single profile for a fixing run. Feature profiles do not select compilation
+targets; `--target` still selects one target for the entire analysis.
 
 ## Uniform field visibility
 

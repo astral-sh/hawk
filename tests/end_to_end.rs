@@ -720,6 +720,83 @@ fn rejects_duplicate_workspace_library_crate_names() {
 }
 
 #[test]
+fn feature_profiles_union_reachability_across_configurations() {
+    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/feature_profiles/Cargo.toml");
+    let target_dir = tempfile::tempdir().expect("temporary target directory");
+    let graph_dir = tempfile::tempdir().expect("temporary graph directory");
+    let output = Command::new(env!("CARGO_BIN_EXE_cargo-hawk"))
+        .arg("--manifest-path")
+        .arg(manifest)
+        .arg("--target-dir")
+        .arg(target_dir.path())
+        .arg("--graph-dir")
+        .arg(graph_dir.path())
+        .arg("--color=never")
+        .output()
+        .expect("run cargo-hawk");
+
+    assert!(
+        output.status.success(),
+        "cargo-hawk failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("`fallback_api` is public"),
+        "API used by the default-disabled profile was diagnosed:\n{stdout}"
+    );
+    assert!(stdout.contains("`unused_api` is public"));
+    assert!(stdout.contains("`app --bin app` across 2 feature profiles"));
+
+    let run_dir = fs::read_dir(graph_dir.path())
+        .expect("read graph directory")
+        .map(|entry| entry.expect("read graph entry"))
+        .find(|entry| entry.file_type().expect("read graph entry type").is_dir())
+        .expect("retained graph run directory")
+        .path();
+    for profile in ["0-all", "1-fallback"] {
+        let production_dir = run_dir
+            .join("feature-profiles")
+            .join(profile)
+            .join("production");
+        assert!(
+            fs::read_dir(&production_dir)
+                .expect("read feature-profile graph directory")
+                .map(|entry| entry.expect("read graph entry").path())
+                .any(|path| path
+                    .extension()
+                    .is_some_and(|extension| extension == "json")),
+            "no fragments retained in {}",
+            production_dir.display()
+        );
+    }
+}
+
+#[test]
+fn rejects_fixes_with_multiple_feature_profiles() {
+    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/feature_profiles/Cargo.toml");
+    let target_dir = tempfile::tempdir().expect("temporary target directory");
+    let output = Command::new(env!("CARGO_BIN_EXE_cargo-hawk"))
+        .arg("--manifest-path")
+        .arg(manifest)
+        .arg("--target-dir")
+        .arg(target_dir.path())
+        .arg("--fix")
+        .arg("--allow-no-vcs")
+        .arg("--color=never")
+        .output()
+        .expect("run cargo-hawk with fixes");
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("--fix does not support multiple feature profiles")
+    );
+}
+
+#[test]
 fn requires_a_configured_production_binary() {
     let manifest =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/basic/Cargo.toml");

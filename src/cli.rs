@@ -13,7 +13,9 @@ use anyhow::{Context, Result, bail};
 use cargo_metadata::{MetadataCommand, TargetKind};
 use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser, ValueEnum};
 
-use crate::config::{AnalysisTarget, Config, ConfigDiagnostic, ConfigDiagnosticKind};
+use crate::config::{
+    AnalysisTarget, Config, ConfigDiagnostic, ConfigDiagnosticKind, FeatureProfile,
+};
 use crate::graph::{
     CollectionOptions, Definition, DefinitionIdentity, DefinitionKind, Finding, FindingKind,
     FixPlan, FixTarget, Fragment, Span, analyze_with_options,
@@ -380,7 +382,7 @@ fn cargo_rustc(workspace_root: &Path, manifest_path: &Path) -> Result<OsString> 
     let executable = env::current_exe().context("locate Hawk executable for Cargo rustc probe")?;
     let mut command = Command::new("cargo");
     clear_protocol_environment(&mut command);
-    let output = command
+    command
         .current_dir(workspace_root)
         .arg("check")
         .arg("--manifest-path")
@@ -392,7 +394,8 @@ fn cargo_rustc(workspace_root: &Path, manifest_path: &Path) -> Result<OsString> 
         .arg("--quiet")
         .env("RUSTC_WORKSPACE_WRAPPER", executable)
         .env(protocol::RUSTC_PROBE_ENV, &output_path)
-        .env(protocol::RUSTC_PROBE_TOKEN_ENV, probe_token)
+        .env(protocol::RUSTC_PROBE_TOKEN_ENV, probe_token);
+    let output = command
         .output()
         .context("query Cargo's selected compiler")?;
     let rustc = fs::read_to_string(&output_path).with_context(|| {
@@ -618,6 +621,11 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
         .canonicalize()
         .with_context(|| format!("resolve manifest path for {}", args.manifest_path.display()))?;
     let config = Config::load(&workspace_root, args.config.as_deref())?;
+    if args.fix && config.feature_profiles().len() > 1 {
+        bail!(
+            "--fix does not support multiple feature profiles; run analysis without --fix or configure a single `[[feature-profile]]`"
+        );
+    }
     let toolchain = RustToolchain::discover(&workspace_root, &manifest_path)?;
     let analysis_target = AnalysisTarget::from_rustc(
         args.target.as_deref(),
@@ -688,20 +696,32 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
         .unwrap_or(graph_dir.as_os_str())
         .to_string_lossy()
         .into_owned();
-    let production_graph_dir = graph_dir.join("production");
-    let non_production_graph_dir = graph_dir.join("non-production");
-    fs::create_dir_all(&production_graph_dir).with_context(|| {
-        format!(
-            "create production graph directory {}",
-            production_graph_dir.display()
-        )
-    })?;
-    fs::create_dir_all(&non_production_graph_dir).with_context(|| {
-        format!(
-            "create non-production graph directory {}",
-            non_production_graph_dir.display()
-        )
-    })?;
+    let mut profile_graphs = Vec::new();
+    for (index, feature_profile) in config.feature_profiles().iter().enumerate() {
+        let profile_graph_dir = graph_dir
+            .join("feature-profiles")
+            .join(format!("{index}-{}", feature_profile.name()));
+        let production_dir = profile_graph_dir.join("production");
+        let non_production_dir = profile_graph_dir.join("non-production");
+        fs::create_dir_all(&production_dir).with_context(|| {
+            format!(
+                "create production graph directory {}",
+                production_dir.display()
+            )
+        })?;
+        fs::create_dir_all(&non_production_dir).with_context(|| {
+            format!(
+                "create non-production graph directory {}",
+                non_production_dir.display()
+            )
+        })?;
+        profile_graphs.push(FeatureProfileGraph {
+            feature_profile,
+            run_id: format!("{run_id}-feature-profile-{index}"),
+            production_dir,
+            non_production_dir,
+        });
+    }
 
     let driver = driver_executable()?;
     validate_driver_protocol(&driver, &toolchain)?;
@@ -714,25 +734,19 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
         toolchain: &toolchain,
         collection_options: CollectionOptions::new(config.preserve_uniform_field_visibility()),
     };
-    let CollectedFragments {
-        production: mut production_fragments,
-        non_production: mut test_fragments,
-    } = cargo.collect_fragments(
-        &run_id,
-        &production_products,
-        &production_graph_dir,
-        &non_production_graph_dir,
-    )?;
-    if !production_fragments
-        .iter()
-        .any(|fragment| fragment.is_product_root)
-    {
-        bail!(
-            "no instrumented fragment was emitted for a configured production binary; rerun with a fresh --target-dir"
-        );
+    let mut production_fragments = Vec::new();
+    let mut test_fragments = Vec::new();
+    for profile_graph in &profile_graphs {
+        let (profile_production, profile_tests) =
+            collect_profile_fragments(&cargo, profile_graph, &production_products, "initial")?;
+        production_fragments.extend(profile_production);
+        test_fragments.extend(profile_tests);
     }
     let excluded: HashSet<String> = args.excluded_crates.iter().cloned().collect();
     if args.fix {
+        let profile_graph = profile_graphs
+            .first()
+            .expect("every feature profile has a graph directory");
         let mut fix_iteration = 0;
         let mut applied_fix_plans = HashSet::new();
         loop {
@@ -804,12 +818,13 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
                 write_fix_plan(&fix_plan_path, &test_emission_plan)?;
                 cargo.run(
                     &format!("{run_id}-test-fix-{fix_iteration}"),
-                    &non_production_graph_dir,
+                    &profile_graph.non_production_dir,
                     CargoInvocation::FixNonProduction {
                         plan: &fix_plan_path,
                         packages: &fix_packages,
                         allow_dirty: fix_iteration > 0,
                     },
+                    profile_graph.feature_profile,
                 )?;
                 applied_fixes = true;
             }
@@ -819,12 +834,13 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
                 write_fix_plan(&fix_plan_path, &production_emission_plan)?;
                 cargo.run(
                     &format!("{run_id}-production-fix-{fix_iteration}"),
-                    &production_graph_dir,
+                    &profile_graph.production_dir,
                     CargoInvocation::FixProduction {
                         plan: &fix_plan_path,
                         packages: &fix_packages,
                         allow_dirty: fix_iteration > 0 || applied_fixes,
                     },
+                    profile_graph.feature_profile,
                 )?;
                 applied_fixes = true;
             }
@@ -833,16 +849,14 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
                 "a non-empty fix plan applies at least one mode"
             );
             fix_iteration += 1;
-            clear_fragments(&production_graph_dir)?;
-            clear_fragments(&non_production_graph_dir)?;
-            let fragments = cargo.collect_fragments(
-                &format!("{run_id}-post-fix-{fix_iteration}"),
+            clear_fragments(&profile_graph.production_dir)?;
+            clear_fragments(&profile_graph.non_production_dir)?;
+            (production_fragments, test_fragments) = collect_profile_fragments(
+                &cargo,
+                profile_graph,
                 &production_products,
-                &production_graph_dir,
-                &non_production_graph_dir,
+                &format!("post-fix-{fix_iteration}"),
             )?;
-            production_fragments = fragments.production;
-            test_fragments = fragments.non_production;
         }
     }
     let findings = config.apply(
@@ -889,17 +903,7 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
         || "the host target".to_owned(),
         |target| format!("target `{target}`"),
     );
-    let production_summary = if production_products.len() == 1 {
-        format!(
-            "`{} --bin {} --all-features`",
-            production_products[0].package, production_products[0].binary
-        )
-    } else {
-        format!(
-            "{} configured production binaries",
-            production_products.len()
-        )
-    };
+    let production_summary = production_summary(&production_products, config.feature_profiles());
     renderer
         .write_summary(diagnostic_count, &production_summary, &compilation_target)
         .expect("formatting diagnostics into a string cannot fail");
@@ -950,6 +954,13 @@ struct InstrumentedCargo<'a> {
 struct ProductionSelection<'a> {
     package: &'a str,
     binary: &'a str,
+}
+
+struct FeatureProfileGraph<'a> {
+    feature_profile: &'a FeatureProfile,
+    run_id: String,
+    production_dir: PathBuf,
+    non_production_dir: PathBuf,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1086,6 +1097,7 @@ impl InstrumentedCargo<'_> {
         run_id: &str,
         graph_dir: &Path,
         invocation: CargoInvocation<'_>,
+        feature_profile: &FeatureProfile,
     ) -> Result<ConfiguredCargoCommand> {
         let CargoInvocationSpec {
             subcommand,
@@ -1102,13 +1114,13 @@ impl InstrumentedCargo<'_> {
             .arg(subcommand)
             .arg("--manifest-path")
             .arg(self.manifest_path)
-            .arg("--all-features")
             .arg("--locked")
             .arg("--target-dir")
             .arg(self.target_dir)
             .args(selection_arguments)
             .arg("--color")
             .arg(self.args.color.cargo_value());
+        feature_profile.configure_cargo(&mut command);
         self.toolchain.configure_command(&mut command)?;
         if let Some(target) = &self.args.target {
             command.arg("--target").arg(target);
@@ -1154,12 +1166,18 @@ impl InstrumentedCargo<'_> {
         })
     }
 
-    fn run(&self, run_id: &str, graph_dir: &Path, invocation: CargoInvocation<'_>) -> Result<()> {
+    fn run(
+        &self,
+        run_id: &str,
+        graph_dir: &Path,
+        invocation: CargoInvocation<'_>,
+        feature_profile: &FeatureProfile,
+    ) -> Result<()> {
         let ConfiguredCargoCommand {
             mut command,
             subcommand,
             capture_output,
-        } = self.command(run_id, graph_dir, invocation)?;
+        } = self.command(run_id, graph_dir, invocation, feature_profile)?;
         let status = if capture_output {
             let output = command
                 .output()
@@ -1190,6 +1208,7 @@ impl InstrumentedCargo<'_> {
         production_products: &[ProductionSelection<'_>],
         production_graph_dir: &Path,
         non_production_graph_dir: &Path,
+        feature_profile: &FeatureProfile,
     ) -> Result<CollectedFragments> {
         // Every production product uses the same compiler mode and feature set. Reuse one
         // dependency fingerprint across the product builds so Cargo can retain fragments from
@@ -1200,23 +1219,90 @@ impl InstrumentedCargo<'_> {
                 &production_run_id,
                 production_graph_dir,
                 CargoInvocation::CheckProduction(product),
+                feature_profile,
             )?;
         }
         self.run(
             &format!("{run_id}-non-production"),
             non_production_graph_dir,
             CargoInvocation::CheckNonProduction,
+            feature_profile,
         )?;
         self.run(
             &format!("{run_id}-doctests"),
             non_production_graph_dir,
             CargoInvocation::CheckDoctests,
+            feature_profile,
         )?;
 
         Ok(CollectedFragments {
             production: read_fragments(production_graph_dir)?,
             non_production: read_fragments(non_production_graph_dir)?,
         })
+    }
+}
+
+fn collect_profile_fragments(
+    cargo: &InstrumentedCargo<'_>,
+    profile_graph: &FeatureProfileGraph<'_>,
+    production_products: &[ProductionSelection<'_>],
+    phase: &str,
+) -> Result<(Vec<Fragment>, Vec<Fragment>)> {
+    let CollectedFragments {
+        production: production_fragments,
+        non_production: test_fragments,
+    } = cargo.collect_fragments(
+        &format!("{}-{phase}", profile_graph.run_id),
+        production_products,
+        &profile_graph.production_dir,
+        &profile_graph.non_production_dir,
+        profile_graph.feature_profile,
+    )?;
+    if !production_fragments
+        .iter()
+        .any(|fragment| fragment.is_product_root)
+    {
+        bail!(
+            "no instrumented fragment was emitted for a configured production binary under feature profile `{}`; rerun with a fresh --target-dir",
+            profile_graph.feature_profile.name()
+        );
+    }
+    Ok((production_fragments, test_fragments))
+}
+
+fn production_summary(
+    production_products: &[ProductionSelection<'_>],
+    feature_profiles: &[FeatureProfile],
+) -> String {
+    if production_products.len() == 1 {
+        let product = production_products[0];
+        if feature_profiles.len() == 1 {
+            let cargo_arguments = feature_profiles[0].cargo_arguments_description();
+            let separator = if cargo_arguments.is_empty() { "" } else { " " };
+            return format!(
+                "`{} --bin {}{separator}{cargo_arguments}`",
+                product.package, product.binary
+            );
+        }
+        return format!(
+            "`{} --bin {}` across {} feature profiles",
+            product.package,
+            product.binary,
+            feature_profiles.len()
+        );
+    }
+
+    let summary = format!(
+        "{} configured production binaries",
+        production_products.len()
+    );
+    if feature_profiles.len() == 1 {
+        summary
+    } else {
+        format!(
+            "{summary} across {} feature profiles",
+            feature_profiles.len()
+        )
     }
 }
 

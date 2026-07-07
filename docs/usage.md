@@ -69,10 +69,12 @@ multiple binaries, target-scoped entries, and accepted findings.
 ```
 
 Configured production targets and workspace non-production targets are
-analyzed under `--all-features --locked` on the host target by default. The
-non-production surface includes tests, benches, examples, and compile-only
-doctests. Diagnostics apply to workspace library crates compiled for those
-targets, including declarations enabled only under `cfg(test)`.
+analyzed under `--all-features --locked` on the host target by default. A
+`[[feature-profile]]` matrix in `hawk.toml` can replace that single feature
+selection; Hawk unions evidence from every profile before producing
+diagnostics. The non-production surface includes tests, benches, examples, and
+compile-only doctests. Diagnostics apply to workspace library crates compiled
+for those targets, including declarations enabled only under `cfg(test)`.
 
 Workspace libraries are treated as internal unless exempted. Exclude a
 library crate whose public API is consumed outside the configured production
@@ -92,6 +94,10 @@ checkouts and worktrees from sharing Cargo locks and artifacts. Use
 compiler fragments for investigation. Diagnostics are colored automatically
 in a terminal; use `--color=always` or `--color=never` to override terminal
 detection.
+
+`--fix` supports the default profile or one explicitly configured feature
+profile. Hawk rejects fixing runs with a multi-profile matrix; run analysis
+without `--fix` to review the combined findings.
 
 ## Enforce diagnostics
 

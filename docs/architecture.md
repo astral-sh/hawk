@@ -98,8 +98,9 @@ compiles workspace non-production targets under
 - test-only compilation can expose `#[cfg(test)]` declarations and
   dev-dependency support crates as diagnostic candidates.
 
-All instrumented builds currently use `--all-features` and one selected target
-triple. A `target = "cfg(...)"` selector on a production entry, override, or
+Instrumented builds use the configured feature profiles and one selected
+target triple. With no explicit profiles, Hawk uses one `--all-features`
+profile. A `target = "cfg(...)"` selector on a production entry, override, or
 exclusion limits it to applicable target configurations.
 
 Workspace library target names must be unique after Rust crate-name
@@ -125,9 +126,9 @@ An analysis run proceeds as follows:
      |
      | read Cargo metadata, hawk.toml, lint levels, and target cfg
      v
- cargo check --package <package> --bin <target>    (once per production target)
- cargo check --workspace --all-targets              (non-production surface)
- cargo test --workspace --doc                       (compile-only doctests)
+ cargo check --package <package> --bin <target>    (once per target and feature profile)
+ cargo check --workspace --all-targets              (once per feature profile)
+ cargo test --workspace --doc                       (once per feature profile)
      |
      | RUSTC_WORKSPACE_WRAPPER=cargo-hawk-driver
      v
@@ -135,17 +136,19 @@ An analysis run proceeds as follows:
      |
      | one JSON Fragment per compiled workspace crate
      v
- graph::analyze(production fragments, non-production fragments)
+ graph::analyze(all production fragments, all non-production fragments)
      |
      | apply hawk.toml suppressions and command-line levels
      v
  rustc-shaped Hawk diagnostics
 ```
 
-Every Cargo invocation includes `--all-features --locked`, a shared target
-directory, and optional `--target`. Environment variables identify the
-fragment output directory, selected production-target root, analysis mode,
-and run ID.
+Every Cargo invocation includes the selected profile's feature arguments,
+`--locked`, a shared target directory, and optional `--target`. Each profile
+writes to separate production and non-production fragment directories. The
+frontend combines those fragments before graph analysis. Environment variables
+identify the fragment output directory, selected production-target root,
+analysis mode, and run ID.
 For doctests, Hawk additionally uses rustdoc's test-builder wrapper to route
 the generated test crates through the compiler wrapper without executing
 them. The run ID is tracked as compiler dependency input so Cargo does not

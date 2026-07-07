@@ -14,7 +14,7 @@ they require.
 The analysis includes:
 
 - one or more configured same-workspace binary targets;
-- `--all-features`;
+- one or more feature profiles, defaulting to `--all-features`;
 - one selected compilation target, defaulting to the host target;
 - production reachability from those binary targets;
 - test reachability and visibility requirements from workspace

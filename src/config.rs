@@ -10,7 +10,7 @@ use serde::Deserialize;
 
 use crate::graph::{Definition, DefinitionKind, Finding, FindingKind, Fragment};
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Config {
     path: Option<PathBuf>,
     source: String,
@@ -18,6 +18,15 @@ pub struct Config {
     overrides: Vec<LintOverride>,
     exclusions: Vec<DiagnosticExclusion>,
     production: Vec<ProductionConsumer>,
+    feature_profiles: Vec<FeatureProfile>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FeatureProfile {
+    name: String,
+    all_features: bool,
+    no_default_features: bool,
+    features: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -121,6 +130,20 @@ struct RawConfig {
     exclusions: Vec<toml::Spanned<RawDiagnosticExclusion>>,
     #[serde(default)]
     production: Vec<toml::Spanned<RawProductionConsumer>>,
+    #[serde(default, rename = "feature-profile")]
+    feature_profiles: Vec<toml::Spanned<RawFeatureProfile>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawFeatureProfile {
+    name: String,
+    #[serde(default, rename = "all-features")]
+    all_features: bool,
+    #[serde(default, rename = "no-default-features")]
+    no_default_features: bool,
+    #[serde(default)]
+    features: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -158,6 +181,55 @@ struct RawProductionConsumer {
     target: Option<String>,
 }
 
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            path: None,
+            source: String::new(),
+            preserve_uniform_field_visibility: false,
+            overrides: Vec::new(),
+            exclusions: Vec::new(),
+            production: Vec::new(),
+            feature_profiles: vec![FeatureProfile::all_features()],
+        }
+    }
+}
+
+impl FeatureProfile {
+    fn all_features() -> Self {
+        Self {
+            name: "all-features".to_owned(),
+            all_features: true,
+            no_default_features: false,
+            features: Vec::new(),
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn configure_cargo(&self, command: &mut Command) {
+        command.args(self.cargo_arguments());
+    }
+
+    pub fn cargo_arguments_description(&self) -> String {
+        self.cargo_arguments().collect::<Vec<_>>().join(" ")
+    }
+
+    fn cargo_arguments(&self) -> impl Iterator<Item = &str> {
+        self.all_features
+            .then_some("--all-features")
+            .into_iter()
+            .chain(self.no_default_features.then_some("--no-default-features"))
+            .chain(
+                self.features
+                    .iter()
+                    .flat_map(|feature| ["--features", feature.as_str()]),
+            )
+    }
+}
+
 impl Config {
     pub fn load(workspace_root: &Path, configured_path: Option<&Path>) -> Result<Self> {
         let path = configured_path
@@ -176,6 +248,73 @@ impl Config {
         };
         let raw: RawConfig =
             toml::from_str(&source).with_context(|| format!("parse {}", path.display()))?;
+        let mut feature_profiles = Vec::new();
+        let mut feature_profile_names = HashSet::new();
+        for entry in raw.feature_profiles {
+            let span = config_span(&source, entry.span().start);
+            let entry = entry.into_inner();
+            if entry.name.trim().is_empty() {
+                bail!(
+                    "feature profile in {}:{}:{} must provide a non-empty name",
+                    path.display(),
+                    span.line,
+                    span.column
+                );
+            }
+            if !entry
+                .name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+            {
+                bail!(
+                    "feature profile `{}` in {}:{}:{} must use only ASCII letters, digits, `-`, or `_` in its name",
+                    entry.name,
+                    path.display(),
+                    span.line,
+                    span.column
+                );
+            }
+            if !feature_profile_names.insert(entry.name.clone()) {
+                bail!(
+                    "duplicate feature profile `{}` in {}:{}:{}",
+                    entry.name,
+                    path.display(),
+                    span.line,
+                    span.column
+                );
+            }
+            if entry.all_features && (entry.no_default_features || !entry.features.is_empty()) {
+                bail!(
+                    "feature profile `{}` in {}:{}:{} cannot combine `all-features = true` with `no-default-features` or `features`",
+                    entry.name,
+                    path.display(),
+                    span.line,
+                    span.column
+                );
+            }
+            if entry
+                .features
+                .iter()
+                .any(|feature| feature.trim().is_empty())
+            {
+                bail!(
+                    "feature profile `{}` in {}:{}:{} must not contain an empty feature",
+                    entry.name,
+                    path.display(),
+                    span.line,
+                    span.column
+                );
+            }
+            feature_profiles.push(FeatureProfile {
+                name: entry.name,
+                all_features: entry.all_features,
+                no_default_features: entry.no_default_features,
+                features: entry.features,
+            });
+        }
+        if feature_profiles.is_empty() {
+            feature_profiles.push(FeatureProfile::all_features());
+        }
         let mut overrides = Vec::new();
         for entry in raw.overrides {
             let span = config_span(&source, entry.span().start);
@@ -322,7 +461,12 @@ impl Config {
             overrides,
             exclusions,
             production,
+            feature_profiles,
         })
+    }
+
+    pub fn feature_profiles(&self) -> &[FeatureProfile] {
+        &self.feature_profiles
     }
 
     pub fn production_consumers(
@@ -1215,5 +1359,107 @@ reason = "shipped on Windows"
             .expect("write configuration");
         let configured = Config::load(directory.path(), Some(&path)).expect("load configuration");
         assert!(configured.preserve_uniform_field_visibility());
+    }
+
+    #[test]
+    fn feature_profiles_default_to_all_features() {
+        let directory = tempfile::tempdir().expect("temporary configuration directory");
+
+        let config = Config::load(directory.path(), None).expect("load default configuration");
+
+        let [profile] = config.feature_profiles() else {
+            panic!("expected one default feature profile");
+        };
+        assert_eq!(profile.name(), "all-features");
+        assert_eq!(profile.cargo_arguments_description(), "--all-features");
+    }
+
+    #[test]
+    fn parses_multiple_feature_profiles() {
+        let directory = tempfile::tempdir().expect("temporary configuration directory");
+        let path = directory.path().join("hawk.toml");
+        std::fs::write(
+            &path,
+            r#"
+[[feature-profile]]
+name = "all"
+all-features = true
+
+[[feature-profile]]
+name = "minimal"
+no-default-features = true
+features = ["serde", "cli"]
+"#,
+        )
+        .expect("write configuration");
+
+        let config = Config::load(directory.path(), Some(&path)).expect("load configuration");
+
+        assert_eq!(
+            config
+                .feature_profiles()
+                .iter()
+                .map(|profile| (profile.name(), profile.cargo_arguments_description()))
+                .collect::<Vec<_>>(),
+            [
+                ("all", "--all-features".to_owned()),
+                (
+                    "minimal",
+                    "--no-default-features --features serde --features cli".to_owned()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn all_features_profile_rejects_other_feature_selection() {
+        let directory = tempfile::tempdir().expect("temporary configuration directory");
+        let path = directory.path().join("hawk.toml");
+        std::fs::write(
+            &path,
+            r#"
+[[feature-profile]]
+name = "invalid"
+all-features = true
+features = ["serde"]
+"#,
+        )
+        .expect("write configuration");
+
+        let error = Config::load(directory.path(), Some(&path))
+            .expect_err("reject conflicting feature selection");
+
+        assert!(
+            error
+                .to_string()
+                .contains("cannot combine `all-features = true`")
+        );
+    }
+
+    #[test]
+    fn feature_profile_names_must_be_unique() {
+        let directory = tempfile::tempdir().expect("temporary configuration directory");
+        let path = directory.path().join("hawk.toml");
+        std::fs::write(
+            &path,
+            r#"
+[[feature-profile]]
+name = "default"
+
+[[feature-profile]]
+name = "default"
+no-default-features = true
+"#,
+        )
+        .expect("write configuration");
+
+        let error = Config::load(directory.path(), Some(&path))
+            .expect_err("reject duplicate feature profile");
+
+        assert!(
+            error
+                .to_string()
+                .contains("duplicate feature profile `default`")
+        );
     }
 }

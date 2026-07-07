@@ -1,0 +1,12 @@
+[[production]]
+package = "app"
+bin = "app"
+reason = "binary product under analysis"
+
+[[feature-profile]]
+name = "all"
+all-features = true
+
+[[feature-profile]]
+name = "fallback"
+no-default-features = true
