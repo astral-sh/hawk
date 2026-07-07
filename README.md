@@ -6,7 +6,7 @@
 
 A workspace-aware Cargo lint for unnecessary Rust visibility.
 
-**Experimental:** This project was authored by GPT-5.5 and is not intended
+**Experimental:** This project was authored by [Codex](https://openai.com/codex/) and is not intended
 for public consumption. Use at your own risk.
 
 Hawk finds `pub` declarations that are unused or can be restricted to
@@ -143,7 +143,7 @@ cargo hawk \
 Hawk is experimental. It assumes workspace library crates are internal to the
 configured binary product unless they are explicitly excluded from analysis.
 Because it integrates with compiler internals, it is pinned to Rust 1.96.1.
-Hawk was authored entirely by GPT-5.5 in Codex.
+Hawk was authored entirely by [Codex](https://openai.com/codex/).
 
 ## License
 
