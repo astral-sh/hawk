@@ -75,11 +75,14 @@ fn rejects_non_utf8_arguments_without_panicking() {
 }
 
 #[test]
-fn prints_version_despite_stale_rustc_probe_environment() {
+fn prints_version_without_overwriting_an_inherited_rustc_probe_path() {
+    let probe_dir = tempfile::tempdir().expect("temporary rustc probe directory");
+    let victim = probe_dir.path().join("rustc");
+    fs::write(&victim, "do not overwrite").expect("write probe victim");
     let output = Command::new(env!("CARGO_BIN_EXE_cargo-hawk"))
         .args(["hawk", "--version"])
-        .env("HAWK_RUSTC_PROBE", "stale-rustc-probe")
-        .env("HAWK_RUSTC_PROBE_TOKEN", "stale-probe-directory")
+        .env("HAWK_RUSTC_PROBE", &victim)
+        .env("HAWK_RUSTC_PROBE_TOKEN", probe_dir.path())
         .output()
         .expect("run cargo-hawk --version");
 
@@ -89,6 +92,10 @@ fn prints_version_despite_stale_rustc_probe_environment() {
         concat!("cargo hawk ", env!("CARGO_PKG_VERSION"), "\n")
     );
     assert!(output.stderr.is_empty());
+    assert_eq!(
+        fs::read_to_string(&victim).expect("read probe victim"),
+        "do not overwrite"
+    );
 }
 
 #[test]
