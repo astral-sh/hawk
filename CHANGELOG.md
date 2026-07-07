@@ -2,6 +2,32 @@
 
 <!-- prettier-ignore-start -->
 
+## 0.1.5
+
+Released on 2026-07-07.
+
+### Other changes
+
+- Analyze multiple feature profiles ([#104](https://github.com/astral-sh/hawk/pull/104))
+- Cache diagnostic source files ([#94](https://github.com/astral-sh/hawk/pull/94))
+- Encode finding invariants in types ([#101](https://github.com/astral-sh/hawk/pull/101))
+- Extract graph analysis library ([#105](https://github.com/astral-sh/hawk/pull/105))
+- Harden analysis lifecycle ([#96](https://github.com/astral-sh/hawk/pull/96))
+- Harden frontend-driver protocol ([#95](https://github.com/astral-sh/hawk/pull/95))
+- Index visibility fix plans ([#92](https://github.com/astral-sh/hawk/pull/92))
+- Introduce Hawk test context ([#102](https://github.com/astral-sh/hawk/pull/102))
+- Isolate Cargo rustc probe state ([#108](https://github.com/astral-sh/hawk/pull/108))
+- Reduce driver collection work ([#98](https://github.com/astral-sh/hawk/pull/98))
+- Reject ambiguous library crate names ([#93](https://github.com/astral-sh/hawk/pull/93))
+- Reuse production dependency compilations ([#90](https://github.com/astral-sh/hawk/pull/90))
+- Scope unstable compiler access ([#103](https://github.com/astral-sh/hawk/pull/103))
+- Separate consumer reachability graphs ([#91](https://github.com/astral-sh/hawk/pull/91))
+- Support --version ([#89](https://github.com/astral-sh/hawk/pull/89))
+- Type diagnostic selectors ([#99](https://github.com/astral-sh/hawk/pull/99))
+- Type instrumented Cargo invocations ([#100](https://github.com/astral-sh/hawk/pull/100))
+- Unify cfg alternative overrides ([#97](https://github.com/astral-sh/hawk/pull/97))
+- Use unique crate names in override fixture ([#107](https://github.com/astral-sh/hawk/pull/107))
+
 ## 0.1.4
 
 Released on 2026-07-06.
