@@ -359,6 +359,9 @@ impl RustToolchain {
 fn cargo_rustc(workspace_root: &Path, manifest_path: &Path) -> Result<OsString> {
     let probe_dir = tempfile::tempdir().context("create Cargo rustc probe directory")?;
     let output_path = probe_dir.path().join("rustc");
+    // The probe wrapper exits unsuccessfully after reporting rustc. Keep Cargo's cached
+    // result for that failed query out of the workspace target directory.
+    let target_dir = probe_dir.path().join("target");
     // A random marker name inside the private probe directory acts as a
     // capability. Inherited environment variables cannot identify a live
     // probe merely by pointing at an existing directory.
@@ -388,6 +391,8 @@ fn cargo_rustc(workspace_root: &Path, manifest_path: &Path) -> Result<OsString> 
         .arg("--workspace")
         .arg("--all-targets")
         .arg("--all-features")
+        .arg("--target-dir")
+        .arg(target_dir)
         .arg("--locked")
         .arg("--quiet")
         .env("RUSTC_WORKSPACE_WRAPPER", executable)

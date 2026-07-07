@@ -212,6 +212,25 @@ fn prints_version_without_overwriting_an_inherited_rustc_probe_path() {
 }
 
 #[test]
+fn repeated_runs_do_not_reuse_a_failed_rustc_probe() {
+    let context = HawkTestContext::new("basic");
+
+    for run in 1..=2 {
+        let output = context.run(&["-A", "warnings"]);
+
+        assert!(
+            output.status.success(),
+            "cargo-hawk run {run} failed:\n{}",
+            context.normalized_stderr(&output)
+        );
+        assert!(
+            !context.workspace().join("target/.rustc_info.json").exists(),
+            "cargo-hawk run {run} persisted rustc probe state in the workspace target directory"
+        );
+    }
+}
+
+#[test]
 fn ignores_stale_fix_plan_during_analysis() {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/basic/Cargo.toml");
     let target_dir = tempfile::tempdir().expect("temporary target directory");
