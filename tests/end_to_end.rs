@@ -1076,6 +1076,7 @@ fn experimental_trait_dispatch_models_static_and_conservative_calls() {
         "external_helper",
         "constant_used_helper",
         "drop_helper",
+        "display_helper",
     ] {
         assert!(
             stdout.contains(&format!("warning[hawk::unnecessary_public]: `{retained}`")),

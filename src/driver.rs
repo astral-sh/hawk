@@ -31,7 +31,7 @@ use rustc_span::{BytePos, FileName, Pos};
 use crate::protocol;
 use cargo_hawk_internal::graph::{
     CollectionOptions, Definition, DefinitionIdentity, DefinitionKind, Edge, EdgeKind, FindingKind,
-    FixPlan, FixTarget, Fragment, Span, VisibilityReduction,
+    FixPlan, FixTarget, Fragment, Span, TRAIT_DISPATCH_PREFIX, VisibilityReduction,
 };
 
 pub fn is_protocol_version_query(args: &[String]) -> bool {
@@ -1122,7 +1122,8 @@ fn trait_item(tcx: TyCtxt<'_>, def_id: DefId) -> Option<DefId> {
 }
 
 fn trait_dispatch_id(tcx: TyCtxt<'_>, def_id: DefId) -> Option<String> {
-    trait_item(tcx, def_id).map(|trait_item| format!("trait-dispatch:{}", id(tcx, trait_item)))
+    trait_item(tcx, def_id)
+        .map(|trait_item| format!("{TRAIT_DISPATCH_PREFIX}{}", id(tcx, trait_item)))
 }
 
 struct ReferenceVisitor<'tcx> {

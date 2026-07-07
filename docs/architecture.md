@@ -238,8 +238,12 @@ each crate fragment connects that node to the implementation bodies it
 defines. Merging fragments therefore preserves downstream workspace impls,
 including local implementations of traits defined by dependencies. Rustc
 language-item impls remain roots because compiler-inserted calls are not
-uniformly represented in typed HIR. The model remains experimental because
-the same limitation can apply to other compiler-generated dispatch paths.
+uniformly represented in typed HIR. An implementation also remains rooted
+when its trait item is absent from the fragments for that analysis mode: the
+sysroot and non-workspace dependencies are not compiled through
+`RUSTC_WORKSPACE_WRAPPER`, so their dispatch sites are unavailable. The model
+remains experimental because the same limitation can apply to other
+compiler-generated dispatch paths.
 
 Separately, Hawk computes the declarations whose public visibility is
 required. Any compiled cross-crate reference requires the referenced

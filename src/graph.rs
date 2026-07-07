@@ -40,6 +40,8 @@ impl CollectionOptions {
     }
 }
 
+pub const TRAIT_DISPATCH_PREFIX: &str = "trait-dispatch:";
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Fragment {
@@ -324,6 +326,7 @@ pub fn analyze_with_options<'a>(
         adjacency(&production_edges, &equivalents, &production_definition_ids);
     let test_adjacency = adjacency(&test_edges, &equivalents, &test_definition_ids);
 
+    let production_trait_dispatch_fallbacks = trait_dispatch_fallback_roots(production_fragments);
     let production_roots = production_fragments
         .iter()
         .filter(|fragment| fragment.is_product_root)
@@ -332,8 +335,10 @@ pub fn analyze_with_options<'a>(
             production_fragments
                 .iter()
                 .flat_map(|fragment| fragment.conservative_roots.iter().map(String::as_str)),
-        );
+        )
+        .chain(production_trait_dispatch_fallbacks);
     let production = reachable(production_roots, &production_adjacency);
+    let test_trait_dispatch_fallbacks = trait_dispatch_fallback_roots(test_fragments);
     let test_roots = test_fragments
         .iter()
         .filter(|fragment| fragment.is_product_root)
@@ -342,7 +347,8 @@ pub fn analyze_with_options<'a>(
             test_fragments
                 .iter()
                 .flat_map(|fragment| fragment.conservative_roots.iter().map(String::as_str)),
-        );
+        )
+        .chain(test_trait_dispatch_fallbacks);
     let tests = reachable(test_roots, &test_adjacency);
 
     let mut explicitly_required: HashSet<&str> = production_fragments
@@ -902,6 +908,28 @@ fn adjacency<'a>(
     adjacency
 }
 
+/// Conservatively retains implementations whose possible callers were not instrumented.
+///
+/// `RUSTC_WORKSPACE_WRAPPER` only visits workspace crates. If a trait item is defined in the
+/// sysroot or a non-workspace dependency, its generic or dynamic dispatch sites cannot contribute
+/// an edge to the synthetic dispatch node. When the trait definition is present in this analysis
+/// mode, the collected dispatch edges are complete enough for the experimental model instead.
+fn trait_dispatch_fallback_roots(fragments: &[Fragment]) -> Vec<&str> {
+    let definitions: HashSet<&str> = fragments
+        .iter()
+        .flat_map(|fragment| &fragment.definitions)
+        .map(|definition| definition.id.as_str())
+        .collect();
+    fragments
+        .iter()
+        .flat_map(|fragment| &fragment.edges)
+        .filter_map(|edge| {
+            let trait_item = edge.from.strip_prefix(TRAIT_DISPATCH_PREFIX)?;
+            (!definitions.contains(trait_item)).then_some(edge.to.as_str())
+        })
+        .collect()
+}
+
 fn equivalent_definitions<'a>(
     definitions: &HashMap<&'a str, &'a Definition>,
     definition_compilation_ids: &HashMap<&'a str, usize>,
@@ -981,7 +1009,8 @@ fn reachable<'a>(
 mod tests {
     use super::{
         Definition, DefinitionKind, Edge, EdgeKind, Finding, FindingKind, Fragment, RequiredScope,
-        Span, VisibilityReduction, analyze as analyze_with_tests, analyze_with_options,
+        Span, TRAIT_DISPATCH_PREFIX, VisibilityReduction, analyze as analyze_with_tests,
+        analyze_with_options,
     };
     use crate::protocol::ProtocolVersion;
     use std::collections::HashSet;
@@ -2516,5 +2545,62 @@ mod tests {
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].kind, FindingKind::UnnecessaryPublic);
         assert_eq!(findings[0].definition.id, "extension_trait");
+    }
+
+    #[test]
+    fn missing_trait_fragment_conservatively_roots_its_implementation() {
+        let input = fragments(
+            vec![
+                node("implementation", "lib", false),
+                node("helper", "lib", true),
+            ],
+            vec![
+                Edge {
+                    from: format!("{TRAIT_DISPATCH_PREFIX}external_trait_item"),
+                    to: "implementation".into(),
+                    kind: EdgeKind::Body,
+                },
+                Edge {
+                    from: "implementation".into(),
+                    to: "helper".into(),
+                    kind: EdgeKind::Body,
+                },
+            ],
+        );
+
+        let findings = analyze(&input, &HashSet::new());
+
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, FindingKind::UnnecessaryPublic);
+        assert_eq!(findings[0].definition.id, "helper");
+    }
+
+    #[test]
+    fn instrumented_trait_definition_keeps_dispatch_edge_precise() {
+        let input = fragments(
+            vec![
+                node("trait_item", "lib", false),
+                node("implementation", "lib", false),
+                node("helper", "lib", true),
+            ],
+            vec![
+                Edge {
+                    from: format!("{TRAIT_DISPATCH_PREFIX}trait_item"),
+                    to: "implementation".into(),
+                    kind: EdgeKind::Body,
+                },
+                Edge {
+                    from: "implementation".into(),
+                    to: "helper".into(),
+                    kind: EdgeKind::Body,
+                },
+            ],
+        );
+
+        let findings = analyze(&input, &HashSet::new());
+
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, FindingKind::DeadPublic);
+        assert_eq!(findings[0].definition.id, "helper");
     }
 }

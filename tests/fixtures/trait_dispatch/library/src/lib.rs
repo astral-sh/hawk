@@ -1,4 +1,16 @@
 use external_trait::ExternalDispatch;
+use std::fmt;
+
+struct Formatted;
+
+impl fmt::Display for Formatted {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        display_helper();
+        formatter.write_str("formatted")
+    }
+}
+
+pub fn display_helper() {}
 
 trait StaticDispatch {
     fn run(&self);
@@ -151,6 +163,7 @@ impl Drop for Dropped {
 pub fn drop_helper() {}
 
 pub fn entry() {
+    let _ = format!("{Formatted}");
     StaticDispatch::run(&StaticUsed);
     call_generic(&GenericUsed);
     call_dynamic(&DynamicUsed);
