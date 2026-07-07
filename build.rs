@@ -1,14 +1,28 @@
 use std::env;
+use std::error::Error;
+use std::io;
 use std::process::Command;
 
-fn main() {
+fn command_output(command: &mut Command, description: &str) -> Result<Vec<u8>, Box<dyn Error>> {
+    let output = command.output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "{description} failed with {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))
+        .into());
+    }
+    Ok(output.stdout)
+}
+
+fn main() -> Result<(), Box<dyn Error>> {
     let rustc = env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
-    let output = Command::new(&rustc)
-        .args(["--print", "sysroot"])
-        .output()
-        .expect("run rustc --print sysroot");
-    assert!(output.status.success(), "rustc --print sysroot failed");
-    let sysroot = String::from_utf8(output.stdout).expect("sysroot is utf-8");
+    let sysroot = command_output(
+        Command::new(&rustc).args(["--print", "sysroot"]),
+        "rustc --print sysroot",
+    )?;
+    let sysroot = String::from_utf8(sysroot)?;
     let sysroot = sysroot.trim();
 
     println!("cargo:rustc-link-search=native={sysroot}/lib");
@@ -17,12 +31,8 @@ fn main() {
         println!("cargo:rustc-link-arg-tests=-Wl,-rpath,{sysroot}/lib");
     }
 
-    let output = Command::new(rustc)
-        .arg("-vV")
-        .output()
-        .expect("run rustc -vV");
-    assert!(output.status.success(), "rustc -vV failed");
-    let version = String::from_utf8(output.stdout).expect("rustc version is utf-8");
+    let version = command_output(Command::new(rustc).arg("-vV"), "rustc -vV")?;
+    let version = String::from_utf8(version)?;
     for (field, environment) in [
         ("release", "HAWK_RUSTC_RELEASE"),
         ("commit-hash", "HAWK_RUSTC_COMMIT_HASH"),
@@ -31,7 +41,8 @@ fn main() {
         let value = version
             .lines()
             .find_map(|line| line.strip_prefix(&format!("{field}: ")))
-            .unwrap_or_else(|| panic!("rustc -vV did not report {field}"));
+            .ok_or_else(|| io::Error::other(format!("rustc -vV did not report {field}")))?;
         println!("cargo:rustc-env={environment}={value}");
     }
+    Ok(())
 }
