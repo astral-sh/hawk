@@ -984,6 +984,42 @@ reason = "test-only alternative remains intentionally public"
 }
 
 #[test]
+fn override_keeps_same_named_items_from_distinct_packages_ambiguous() {
+    let manifest =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ambiguous_packages/Cargo.toml");
+    let target_dir = tempfile::tempdir().expect("temporary target directory");
+    let output = Command::new(env!("CARGO_BIN_EXE_cargo-hawk"))
+        .arg("--manifest-path")
+        .arg(manifest)
+        .arg("--target-dir")
+        .arg(target_dir.path())
+        .arg("--color=never")
+        .output()
+        .expect("run cargo-hawk");
+
+    assert!(
+        output.status.success(),
+        "cargo-hawk failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        stdout
+            .matches("warning[hawk::dead_public]: `duplicate`")
+            .count(),
+        2,
+        "both package declarations should remain unsuppressed:\n{stdout}"
+    );
+    assert!(stdout.contains("left/src/lib.rs:3:1"));
+    assert!(stdout.contains("right/src/lib.rs:3:1"));
+    assert!(stdout.contains(
+        "warning[hawk::ambiguous_item]: override for `hawk::dead_public` matches multiple items named `shared::duplicate`"
+    ));
+    assert!(!stdout.contains("hawk::unfulfilled_expectation"));
+    assert!(stdout.contains("hawk: 3 finding(s)"));
+}
+
+#[test]
 fn removes_unnecessary_restricted_visibility_by_default() {
     let source_workspace =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/crate_visibility_fixes");

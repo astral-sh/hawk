@@ -291,6 +291,7 @@ fn emit_fix(
 }
 
 fn emit_fragment(tcx: TyCtxt<'_>, root_crate: &str, output_dir: &Path) -> Result<()> {
+    let package_name = env::var("CARGO_PKG_NAME").context("read Cargo package name")?;
     let crate_name = tcx.crate_name(LOCAL_CRATE).to_string();
     let crate_id = id(tcx, CRATE_DEF_ID.to_def_id());
     let is_non_production =
@@ -309,6 +310,7 @@ fn emit_fragment(tcx: TyCtxt<'_>, root_crate: &str, output_dir: &Path) -> Result
         .collect();
     let fragment = collect_fragment(
         tcx,
+        package_name,
         crate_name.clone(),
         crate_id,
         is_product_root,
@@ -330,6 +332,7 @@ fn write_fragment(writer: impl Write, fragment: &Fragment, path: &Path) -> Resul
 
 fn collect_fragment(
     tcx: TyCtxt<'_>,
+    package_name: String,
     crate_name: String,
     crate_id: String,
     is_product_root: bool,
@@ -700,6 +703,7 @@ fn collect_fragment(
 
     Fragment {
         protocol_version: crate::protocol::ProtocolVersion,
+        package_name,
         crate_name,
         crate_id,
         is_product_root,
@@ -1210,6 +1214,7 @@ mod tests {
     fn fragment_emission_reports_buffered_write_failures() {
         let fragment = Fragment {
             protocol_version: crate::protocol::ProtocolVersion,
+            package_name: "library".into(),
             crate_name: "library".into(),
             crate_id: "library".into(),
             is_product_root: false,

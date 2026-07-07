@@ -8,6 +8,7 @@ use crate::protocol::ProtocolVersion;
 #[serde(deny_unknown_fields)]
 pub struct Fragment {
     pub protocol_version: ProtocolVersion,
+    pub package_name: String,
     pub crate_name: String,
     pub crate_id: String,
     pub is_product_root: bool,
@@ -1017,6 +1018,7 @@ mod tests {
         vec![
             Fragment {
                 protocol_version: ProtocolVersion,
+                package_name: "app".into(),
                 crate_name: "app".into(),
                 crate_id: "app".into(),
                 is_product_root: true,
@@ -1029,6 +1031,7 @@ mod tests {
             },
             Fragment {
                 protocol_version: ProtocolVersion,
+                package_name: "lib".into(),
                 crate_name: "lib".into(),
                 crate_id: "lib".into(),
                 is_product_root: false,
@@ -1046,6 +1049,7 @@ mod tests {
         vec![
             Fragment {
                 protocol_version: ProtocolVersion,
+                package_name: "integration_test".into(),
                 crate_name: "integration_test".into(),
                 crate_id: "integration_test".into(),
                 is_product_root: true,
@@ -1062,6 +1066,7 @@ mod tests {
             },
             Fragment {
                 protocol_version: ProtocolVersion,
+                package_name: "lib".into(),
                 crate_name: "lib".into(),
                 crate_id: "lib".into(),
                 is_product_root: false,
@@ -2066,6 +2071,7 @@ mod tests {
         let duplicate = input[1].definitions.pop().unwrap();
         input.push(Fragment {
             protocol_version: ProtocolVersion,
+            package_name: "lib".into(),
             crate_name: "lib".into(),
             crate_id: "lib-test".into(),
             is_product_root: false,

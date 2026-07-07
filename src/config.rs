@@ -351,8 +351,15 @@ impl Config {
             .flat_map(|fragment| &fragment.definitions)
             .map(known_item_identity)
             .collect();
-        let logical_items: HashSet<LogicalItemIdentity<'_>> =
-            known_items.iter().map(KnownItemIdentity::logical).collect();
+        let logical_items: HashSet<LogicalItemIdentity<'_>> = production_fragments
+            .iter()
+            .chain(test_fragments)
+            .flat_map(|fragment| {
+                fragment.definitions.iter().map(|definition| {
+                    logical_item_identity(fragment.package_name.as_str(), definition)
+                })
+            })
+            .collect();
         let mut config_diagnostics = Vec::new();
         let mut active_overrides = Vec::new();
         for entry in self
@@ -426,21 +433,24 @@ struct KnownItemIdentity<'a> {
     column: Option<usize>,
 }
 
-impl KnownItemIdentity<'_> {
-    fn logical(&self) -> LogicalItemIdentity<'_> {
-        LogicalItemIdentity {
-            crate_name: self.crate_name,
-            item: self.item,
-            kind: self.kind,
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct LogicalItemIdentity<'a> {
+    package_name: &'a str,
     crate_name: &'a str,
     item: &'a str,
     kind: DefinitionKind,
+}
+
+fn logical_item_identity<'a>(
+    package_name: &'a str,
+    definition: &'a Definition,
+) -> LogicalItemIdentity<'a> {
+    LogicalItemIdentity {
+        package_name,
+        crate_name: definition.crate_name.as_str(),
+        item: definition.name.as_str(),
+        kind: definition.kind,
+    }
 }
 
 fn known_item_identity(definition: &Definition) -> KnownItemIdentity<'_> {
@@ -597,6 +607,7 @@ mod tests {
     fn fragment() -> Fragment {
         Fragment {
             protocol_version: crate::protocol::ProtocolVersion,
+            package_name: "library".into(),
             crate_name: "library".into(),
             crate_id: "library".into(),
             is_product_root: false,
