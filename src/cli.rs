@@ -119,7 +119,62 @@ impl LintLevel {
 
 #[derive(Debug, Default)]
 struct LintLevels {
-    overrides: Vec<(String, LintLevel)>,
+    overrides: Vec<(LintSelector, LintLevel)>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LintSelector {
+    Warnings,
+    Diagnostic(DiagnosticKind),
+}
+
+impl LintSelector {
+    fn parse(selector: &str) -> Result<Self> {
+        if selector == "warnings" {
+            return Ok(Self::Warnings);
+        }
+        DiagnosticKind::from_code(selector)
+            .map(Self::Diagnostic)
+            .with_context(|| {
+                format!(
+                    "unknown lint selector `{selector}`; expected `warnings` or a `hawk::...` diagnostic name"
+                )
+            })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DiagnosticKind {
+    Finding(FindingKind),
+    Config(ConfigDiagnosticKind),
+}
+
+impl DiagnosticKind {
+    fn from_code(code: &str) -> Option<Self> {
+        FindingKind::from_code(code)
+            .map(Self::Finding)
+            .or_else(|| ConfigDiagnosticKind::from_code(code).map(Self::Config))
+    }
+
+    const fn default_level(self) -> LintLevel {
+        if matches!(self, Self::Finding(FindingKind::UnnecessaryCrateVisibility)) {
+            LintLevel::Allow
+        } else {
+            LintLevel::Warn
+        }
+    }
+}
+
+impl From<FindingKind> for DiagnosticKind {
+    fn from(kind: FindingKind) -> Self {
+        Self::Finding(kind)
+    }
+}
+
+impl From<ConfigDiagnosticKind> for DiagnosticKind {
+    fn from(kind: ConfigDiagnosticKind) -> Self {
+        Self::Config(kind)
+    }
 }
 
 impl LintLevels {
@@ -137,8 +192,7 @@ impl LintLevels {
                 .indices_of(argument)
                 .expect("present lint-level values have argument indices");
             for (index, selector) in indices.zip(values) {
-                Self::validate_selector(selector)?;
-                indexed_overrides.push((index, selector.clone(), level));
+                indexed_overrides.push((index, LintSelector::parse(selector)?, level));
             }
         }
         indexed_overrides.sort_unstable_by_key(|(index, _, _)| *index);
@@ -150,44 +204,20 @@ impl LintLevels {
         })
     }
 
-    fn validate_selector(selector: &str) -> Result<()> {
-        if matches!(
-            selector,
-            "warnings"
-                | "hawk::dead_public"
-                | "hawk::unnecessary_public"
-                | "hawk::unnecessary_restricted_visibility"
-                | "hawk::unnecessary_crate_visibility"
-                | "hawk::unknown_item"
-                | "hawk::ambiguous_item"
-                | "hawk::unfulfilled_expectation"
-        ) {
-            return Ok(());
-        }
-        bail!(
-            "unknown lint selector `{selector}`; expected `warnings` or a `hawk::...` diagnostic name"
-        );
-    }
-
-    fn level(&self, code: &str) -> LintLevel {
+    fn level(&self, diagnostic: impl Into<DiagnosticKind>) -> LintLevel {
+        let diagnostic = diagnostic.into();
         self.overrides.iter().fold(
-            default_lint_level(code),
+            diagnostic.default_level(),
             |level, (selector, override_level)| {
-                if selector == code || (selector == "warnings" && level.is_emitted()) {
+                if *selector == LintSelector::Diagnostic(diagnostic)
+                    || (*selector == LintSelector::Warnings && level.is_emitted())
+                {
                     *override_level
                 } else {
                     level
                 }
             },
         )
-    }
-}
-
-fn default_lint_level(code: &str) -> LintLevel {
-    if code == "hawk::unnecessary_crate_visibility" {
-        LintLevel::Allow
-    } else {
-        LintLevel::default()
     }
 }
 
@@ -566,7 +596,7 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
             let fixable_findings: Vec<_> = initial_findings
                 .findings
                 .iter()
-                .filter(|finding| lint_levels.level(finding.kind.code()).is_emitted())
+                .filter(|finding| lint_levels.level(finding.kind).is_emitted())
                 // Restricting unreachable public surface to `pub(crate)` can
                 // make rustc's ordinary `dead_code` lint start firing. Such
                 // findings need coordinated removal rather than a
@@ -688,7 +718,7 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
         "the configured production binaries".to_owned()
     };
     for finding in &findings.findings {
-        let level = lint_levels.level(finding.kind.code());
+        let level = lint_levels.level(finding.kind);
         if level.is_emitted() {
             diagnostic_count += 1;
             has_denied_diagnostic |= level == LintLevel::Deny;
@@ -703,7 +733,7 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
         }
     }
     for diagnostic in &findings.config_diagnostics {
-        let level = lint_levels.level(config_diagnostic_code(diagnostic.kind));
+        let level = lint_levels.level(diagnostic.kind);
         if level.is_emitted() {
             diagnostic_count += 1;
             has_denied_diagnostic |= level == LintLevel::Deny;
@@ -1260,12 +1290,7 @@ fn write_config_diagnostic(
             "remove this expectation or update its `lint` selector",
         ),
     };
-    write_diagnostic_header(
-        output,
-        config_diagnostic_code(diagnostic.kind),
-        message,
-        level,
-    )?;
+    write_diagnostic_header(output, diagnostic.kind.code(), message, level)?;
 
     let config_path = config.path().expect("diagnostic requires a loaded config");
     let display_path = config_path
@@ -1295,14 +1320,6 @@ fn write_config_diagnostic(
         styled("help", HELP)
     )?;
     writeln!(output)
-}
-
-fn config_diagnostic_code(kind: ConfigDiagnosticKind) -> &'static str {
-    match kind {
-        ConfigDiagnosticKind::UnknownItem => "hawk::unknown_item",
-        ConfigDiagnosticKind::AmbiguousItem => "hawk::ambiguous_item",
-        ConfigDiagnosticKind::UnfulfilledExpectation => "hawk::unfulfilled_expectation",
-    }
 }
 
 fn write_diagnostic_header(
@@ -1479,6 +1496,7 @@ mod tests {
 
     use clap::CommandFactory;
 
+    use crate::config::ConfigDiagnosticKind;
     use crate::graph::{Definition, DefinitionKind, Finding, FindingKind, Span};
 
     use super::{Args, LintLevel, LintLevels, default_target_dir, write_diagnostic};
@@ -1704,19 +1722,25 @@ mod tests {
             .expect("parse lint-level arguments");
         let levels = LintLevels::from_matches(&matches).expect("valid lint selectors");
 
-        assert_eq!(levels.level("hawk::dead_public"), LintLevel::Deny);
-        assert_eq!(levels.level("hawk::unnecessary_public"), LintLevel::Warn);
+        assert_eq!(levels.level(FindingKind::DeadPublic), LintLevel::Deny);
         assert_eq!(
-            levels.level("hawk::unnecessary_restricted_visibility"),
+            levels.level(FindingKind::UnnecessaryPublic),
+            LintLevel::Warn
+        );
+        assert_eq!(
+            levels.level(FindingKind::UnnecessaryRestrictedVisibility),
             LintLevel::Deny
         );
         assert_eq!(
-            levels.level("hawk::unnecessary_crate_visibility"),
+            levels.level(FindingKind::UnnecessaryCrateVisibility),
             LintLevel::Allow
         );
-        assert_eq!(levels.level("hawk::unknown_item"), LintLevel::Allow);
         assert_eq!(
-            levels.level("hawk::unfulfilled_expectation"),
+            levels.level(ConfigDiagnosticKind::UnknownItem),
+            LintLevel::Allow
+        );
+        assert_eq!(
+            levels.level(ConfigDiagnosticKind::UnfulfilledExpectation),
             LintLevel::Deny
         );
     }
@@ -1734,7 +1758,7 @@ mod tests {
         let levels = LintLevels::from_matches(&matches).expect("valid lint selectors");
 
         assert_eq!(
-            levels.level("hawk::unnecessary_crate_visibility"),
+            levels.level(FindingKind::UnnecessaryCrateVisibility),
             LintLevel::Deny
         );
     }

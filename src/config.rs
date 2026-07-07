@@ -80,6 +80,25 @@ pub enum ConfigDiagnosticKind {
     UnfulfilledExpectation,
 }
 
+impl ConfigDiagnosticKind {
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::UnknownItem => "hawk::unknown_item",
+            Self::AmbiguousItem => "hawk::ambiguous_item",
+            Self::UnfulfilledExpectation => "hawk::unfulfilled_expectation",
+        }
+    }
+
+    pub fn from_code(code: &str) -> Option<Self> {
+        match code {
+            "hawk::unknown_item" => Some(Self::UnknownItem),
+            "hawk::ambiguous_item" => Some(Self::AmbiguousItem),
+            "hawk::unfulfilled_expectation" => Some(Self::UnfulfilledExpectation),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct ConfigDiagnostic<'a> {
     pub kind: ConfigDiagnosticKind,
