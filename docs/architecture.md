@@ -385,14 +385,16 @@ compile in their edited state.
 
 ## Implementation map
 
-| File                  | Responsibility                                                                                                             |
-| --------------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| `src/main.rs`         | Dispatch between the user-facing command and wrapper execution.                                                            |
-| `src/cli.rs`          | Cargo metadata, production target selection, instrumented Cargo runs, diagnostic rendering, lint levels, and the fix loop. |
-| `src/driver.rs`       | `rustc_driver` callback, HIR/type-based fragment collection, and suggestion emission during fix compilations.              |
-| `src/graph.rs`        | Serialized graph model, global reachability and visibility analysis, findings, and fix-plan representation.                |
-| `src/config.rs`       | `hawk.toml` parsing, target selectors, production declarations, exact overrides, and scoped exclusions.                    |
-| `tests/end_to_end.rs` | User-facing behavior across Cargo builds, diagnostics, configuration, and fixes.                                           |
+| File                           | Responsibility                                                                                                             |
+| ------------------------------ | -------------------------------------------------------------------------------------------------------------------------- |
+| `src/lib.rs`                   | Doc-hidden internal library target that shares the rustc-independent graph model, protocol, and analysis between binaries. |
+| `src/main.rs`                  | User-facing command entry point.                                                                                           |
+| `src/bin/cargo-hawk-driver.rs` | Internal compiler-wrapper entry point; the rustc-private implementation remains isolated to this binary.                   |
+| `src/cli.rs`                   | Cargo metadata, production target selection, instrumented Cargo runs, diagnostic rendering, lint levels, and the fix loop. |
+| `src/driver.rs`                | `rustc_driver` callback, HIR/type-based fragment collection, and suggestion emission during fix compilations.              |
+| `src/graph.rs`                 | Serialized graph model, global reachability and visibility analysis, findings, and fix-plan representation.                |
+| `src/config.rs`                | `hawk.toml` parsing, target selectors, production declarations, exact overrides, and scoped exclusions.                    |
+| `tests/end_to_end.rs`          | User-facing behavior across Cargo builds, diagnostics, configuration, and fixes.                                           |
 
 ## References
 
@@ -402,6 +404,7 @@ Hawk:
 - [Using Hawk](usage.md)
 - [Configuration](configuration.md)
 - [MVP design](mvp-design.md)
+- [`src/lib.rs`](../src/lib.rs)
 - [`src/cli.rs`](../src/cli.rs)
 - [`src/driver.rs`](../src/driver.rs)
 - [`src/graph.rs`](../src/graph.rs)

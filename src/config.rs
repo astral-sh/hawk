@@ -8,7 +8,7 @@ use anyhow::{Context, Result, bail};
 use cargo_platform::{Cfg, Platform};
 use serde::Deserialize;
 
-use crate::graph::{Definition, DefinitionKind, Finding, FindingKind, Fragment};
+use cargo_hawk_internal::graph::{Definition, DefinitionKind, Finding, FindingKind, Fragment};
 
 #[derive(Debug)]
 pub struct Config {
@@ -733,7 +733,9 @@ mod tests {
     use cargo_platform::Cfg;
 
     use super::{AnalysisTarget, Config, ConfigDiagnosticKind};
-    use crate::graph::{Definition, DefinitionKind, FindingKind, Fragment, Span, analyze};
+    use cargo_hawk_internal::graph::{
+        Definition, DefinitionKind, FindingKind, Fragment, Span, analyze,
+    };
 
     fn fragment() -> Fragment {
         Fragment {

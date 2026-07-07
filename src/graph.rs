@@ -206,7 +206,7 @@ pub struct Finding<'a> {
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(crate) struct DefinitionIdentity<'a> {
+pub struct DefinitionIdentity<'a> {
     crate_name: &'a str,
     name: &'a str,
     kind: DefinitionKind,
@@ -216,7 +216,7 @@ pub(crate) struct DefinitionIdentity<'a> {
 }
 
 impl<'a> DefinitionIdentity<'a> {
-    pub(crate) fn new(
+    pub fn new(
         crate_name: &'a str,
         name: &'a str,
         kind: DefinitionKind,

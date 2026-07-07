@@ -28,11 +28,11 @@ use rustc_span::def_id::LOCAL_CRATE;
 use rustc_span::hygiene::{ExpnKind, MacroKind};
 use rustc_span::{BytePos, FileName, Pos};
 
-use crate::graph::{
+use crate::protocol;
+use cargo_hawk_internal::graph::{
     CollectionOptions, Definition, DefinitionIdentity, DefinitionKind, Edge, EdgeKind, FindingKind,
     FixPlan, FixTarget, Fragment, Span, VisibilityReduction,
 };
-use crate::protocol;
 
 pub fn is_protocol_version_query(args: &[String]) -> bool {
     args.get(1)
@@ -1275,7 +1275,7 @@ mod tests {
         compact_visibility_modifier, normalize_source_path, parse_collection_options,
         uniform_field_group, validate_frontend_protocol_version, write_fragment,
     };
-    use crate::graph::{CollectionOptions, Fragment};
+    use cargo_hawk_internal::graph::{CollectionOptions, Fragment};
 
     struct FailingWriter;
 

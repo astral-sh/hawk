@@ -8,6 +8,12 @@ description = "Workspace-aware public API lints"
 repository = "https://github.com/astral-sh/hawk"
 readme = "README.md"
 
+[lib]
+name = "cargo_hawk_internal"
+path = "src/lib.rs"
+doc = false
+doctest = false
+
 [[bin]]
 name = "cargo-hawk"
 path = "src/main.rs"

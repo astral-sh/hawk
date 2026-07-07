@@ -16,11 +16,11 @@ use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser, ValueEnum};
 use crate::config::{
     AnalysisTarget, Config, ConfigDiagnostic, ConfigDiagnosticKind, FeatureProfile,
 };
-use crate::graph::{
+use crate::protocol;
+use cargo_hawk_internal::graph::{
     CollectionOptions, Definition, DefinitionIdentity, DefinitionKind, Finding, FindingKind,
     FixPlan, FixTarget, Fragment, Span, analyze_with_options,
 };
-use crate::protocol;
 
 const RUSTC_PROBE_MARKER: &[u8] = b"cargo-hawk-rustc-probe-v1";
 
@@ -2038,7 +2038,7 @@ mod tests {
     use clap::CommandFactory;
 
     use crate::config::ConfigDiagnosticKind;
-    use crate::graph::{
+    use cargo_hawk_internal::graph::{
         Definition, DefinitionKind, Finding, FindingKind, FixPlan, FixTarget, Span,
         VisibilityReduction,
     };

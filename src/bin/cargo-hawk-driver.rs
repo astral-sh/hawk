@@ -11,15 +11,10 @@ extern crate rustc_parse;
 extern crate rustc_session;
 extern crate rustc_span;
 
+use cargo_hawk_internal::protocol;
+
 #[path = "../driver.rs"]
 mod driver;
-// The frontend and compiler driver use different halves of the shared graph model.
-#[allow(dead_code)]
-#[path = "../graph.rs"]
-mod graph;
-#[expect(dead_code)]
-#[path = "../protocol.rs"]
-mod protocol;
 
 fn main() -> std::process::ExitCode {
     let Ok(args): Result<Vec<String>, _> = std::env::args_os()

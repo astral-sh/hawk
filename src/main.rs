@@ -1,9 +1,7 @@
+use cargo_hawk_internal::protocol;
+
 mod cli;
 mod config;
-// The frontend and compiler driver use different halves of the shared graph model.
-#[allow(dead_code)]
-mod graph;
-mod protocol;
 
 fn main() -> std::process::ExitCode {
     let Ok(args): Result<Vec<String>, _> = std::env::args_os()
