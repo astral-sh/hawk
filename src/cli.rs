@@ -738,6 +738,7 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
         driver: &driver,
         toolchain: &toolchain,
         collection_options: CollectionOptions::new(config.preserve_uniform_field_visibility()),
+        experimental_trait_dispatch: config.experimental_trait_dispatch(),
     };
     let mut production_fragments = Vec::new();
     let mut test_fragments = Vec::new();
@@ -953,6 +954,7 @@ struct InstrumentedCargo<'a> {
     driver: &'a Path,
     toolchain: &'a RustToolchain,
     collection_options: CollectionOptions,
+    experimental_trait_dispatch: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1152,7 +1154,16 @@ impl InstrumentedCargo<'_> {
             .env(
                 protocol::COLLECTION_OPTIONS_ENV,
                 self.collection_options.as_env_value(),
-            );
+            )
+            .env(
+                protocol::EXPERIMENTAL_TRAIT_DISPATCH_ENV,
+                if self.experimental_trait_dispatch {
+                    "1"
+                } else {
+                    "0"
+                },
+            )
+            .env(protocol::RUN_ID_ENV, run_id);
         if doctests {
             command
                 .arg("--quiet")

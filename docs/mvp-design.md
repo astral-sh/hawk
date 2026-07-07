@@ -114,8 +114,11 @@ treated as required-public roots because restricting them can make the crate
 fail to compile (`E0446`) even without a production call path. Trait method
 interface edges are recorded so a type returned across a compiled crate
 boundary also remains public. Trait implementation bodies are conservatively
-rooted so indirect trait dispatch does not turn into dead-public false
-positives. Any compiled cross-crate reference prevents a visibility diagnostic
+rooted by default so indirect trait dispatch does not turn into dead-public
+false positives. The experimental trait-dispatch configuration can replace
+non-language trait roots with typed concrete and conservative generic/dynamic
+dispatch edges, but is not enabled by default because compiler-generated calls
+are not uniformly visible in HIR. Any compiled cross-crate reference prevents a visibility diagnostic
 because rustc privacy-checks dead items as well as production-reachable ones
 and `pub` is the narrowest Rust visibility available for those uses.
 
