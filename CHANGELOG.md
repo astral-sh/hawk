@@ -2,6 +2,15 @@
 
 <!-- prettier-ignore-start -->
 
+## 0.1.6
+
+Released on 2026-07-09.
+
+### Other changes
+
+- Remove GPT-5.5 from README ([#111](https://github.com/astral-sh/hawk/pull/111))
+- Upgrade to Rust 1.97.0 ([#112](https://github.com/astral-sh/hawk/pull/112))
+
 ## 0.1.5
 
 Released on 2026-07-07.
