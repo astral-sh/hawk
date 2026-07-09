@@ -143,8 +143,8 @@ the analysis; it is intended for source areas such as generated code.
 ## Implementation direction
 
 `cargo hawk` invokes each configured production target build, `cargo check
---workspace --all-targets`, and compile-only workspace doctests with
-`RUSTC_WORKSPACE_WRAPPER=hawk-driver`. The doctest pass uses rustdoc's
+--workspace --all-targets`, and compile-only workspace or explicitly scoped
+doctests with `RUSTC_WORKSPACE_WRAPPER=hawk-driver`. The doctest pass uses rustdoc's
 test-builder wrapper so documentation example references are emitted into the
 same non-production graph. The compiler
 driver is pinned to the workspace Rust toolchain and emits resolved graph

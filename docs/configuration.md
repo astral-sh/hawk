@@ -34,6 +34,20 @@ All configured binaries are analyzed with the same feature profiles and
 compilation target. Hawk intentionally does not infer production targets from
 the workspace: configure each intended target explicitly.
 
+## Doctest packages
+
+By default, Hawk compiles doctests for the entire workspace. Large workspaces
+can restrict that pass to packages that contain doctests:
+
+```toml
+[[doctest]]
+package = "uv-redacted"
+```
+
+When any `[[doctest]]` entries are present, Hawk passes only those packages to
+`cargo test --doc`. Every configured package must belong to the selected Cargo
+workspace. Omit the entries to retain the default full-workspace coverage.
+
 ## Feature profiles
 
 By default, Hawk performs one analysis with Cargo's `--all-features` option.
@@ -56,10 +70,10 @@ features = ["serde"]
 ```
 
 Hawk compiles every production binary, workspace non-production target, and
-doctest under each profile. Fragments are stored separately for each profile,
-then their reachability and visibility requirements are combined before
-diagnostics are produced. A declaration required in any configured profile is
-therefore preserved.
+selected doctest package under each profile. Fragments are stored separately for
+each profile, then their reachability and visibility requirements are combined
+before diagnostics are produced. A declaration required in any configured
+profile is therefore preserved.
 
 Profile names must be unique and contain only ASCII letters, digits, `-`, or
 `_`. `all-features = true` cannot be combined with `no-default-features` or an

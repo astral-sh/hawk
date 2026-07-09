@@ -89,7 +89,8 @@ reason = "shipped package manager binary"
 Applicable `[[production]]` entries seed the production graph. Hawk also
 compiles workspace non-production targets under
 `cargo check --workspace --all-targets` and compile-only doctests under
-`cargo test --workspace --doc`:
+`cargo test --workspace --doc`. Configured `[[doctest]]` entries replace the
+workspace selection with explicit packages:
 
 - executable non-production targets, including test harnesses and
   `harness = false` benchmarks or tests, seed a second reachability graph;
@@ -128,7 +129,7 @@ An analysis run proceeds as follows:
      v
  cargo check --package <package> --bin <target>    (once per target and feature profile)
  cargo check --workspace --all-targets              (once per feature profile)
- cargo test --workspace --doc                       (once per feature profile)
+ cargo test --workspace|--package <package> --doc   (once per feature profile)
      |
      | RUSTC_WORKSPACE_WRAPPER=cargo-hawk-driver
      v

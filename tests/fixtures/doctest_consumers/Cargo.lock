@@ -12,3 +12,7 @@ dependencies = [
 [[package]]
 name = "library"
 version = "0.1.0"
+
+[[package]]
+name = "skipped"
+version = "0.1.0"

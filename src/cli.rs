@@ -672,6 +672,28 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
             config_path.display()
         );
     }
+    let doctest_packages = config
+        .doctest_packages()
+        .map(|packages| {
+            packages
+                .iter()
+                .map(|package| {
+                    validate_package(&metadata, &package.package).with_context(|| {
+                        let config_path = config
+                            .path()
+                            .expect("configured doctest package has a configuration path");
+                        format!(
+                            "validate doctest package in {}:{}:{}",
+                            config_path.display(),
+                            package.span.line,
+                            package.span.column
+                        )
+                    })?;
+                    Ok(package.package.clone())
+                })
+                .collect::<Result<Vec<_>>>()
+        })
+        .transpose()?;
     let target_dir = args
         .target_dir
         .clone()
@@ -738,6 +760,7 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
         driver: &driver,
         toolchain: &toolchain,
         collection_options: CollectionOptions::new(config.preserve_uniform_field_visibility()),
+        doctest_packages: doctest_packages.as_deref(),
     };
     let mut production_fragments = Vec::new();
     let mut test_fragments = Vec::new();
@@ -953,6 +976,7 @@ struct InstrumentedCargo<'a> {
     driver: &'a Path,
     toolchain: &'a RustToolchain,
     collection_options: CollectionOptions,
+    doctest_packages: Option<&'a [String]>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -987,7 +1011,9 @@ impl ConsumerMode {
 enum CargoInvocation<'a> {
     CheckProduction(ProductionSelection<'a>),
     CheckNonProduction,
-    CheckDoctests,
+    CheckDoctests {
+        packages: Option<&'a [String]>,
+    },
     FixProduction {
         plan: &'a Path,
         packages: &'a [String],
@@ -1050,9 +1076,12 @@ impl<'a> CargoInvocation<'a> {
                 fix: None,
                 doctests: false,
             },
-            Self::CheckDoctests => CargoInvocationSpec {
+            Self::CheckDoctests { packages } => CargoInvocationSpec {
                 subcommand: "test",
-                selection_arguments: vec!["--workspace".into(), "--doc".into()],
+                selection_arguments: packages.map_or_else(
+                    || vec!["--workspace".into(), "--doc".into()],
+                    |packages| package_arguments(packages, "--doc"),
+                ),
                 consumer_mode: ConsumerMode::NonProduction,
                 root_crate: String::new(),
                 fix: None,
@@ -1236,7 +1265,9 @@ impl InstrumentedCargo<'_> {
         self.run(
             &format!("{run_id}-doctests"),
             non_production_graph_dir,
-            CargoInvocation::CheckDoctests,
+            CargoInvocation::CheckDoctests {
+                packages: self.doctest_packages,
+            },
             feature_profile,
         )?;
 
@@ -1952,13 +1983,7 @@ fn validate_product(
     package: &str,
     binary: &str,
 ) -> Result<()> {
-    let Some(package) = metadata
-        .packages
-        .iter()
-        .find(|candidate| candidate.name.as_str() == package)
-    else {
-        bail!("package `{package}` is not in the selected workspace");
-    };
+    let package = workspace_package(metadata, package)?;
     if !package
         .targets
         .iter()
@@ -1967,6 +1992,22 @@ fn validate_product(
         bail!("package `{}` has no binary target `{binary}`", package.name);
     }
     Ok(())
+}
+
+fn validate_package(metadata: &cargo_metadata::Metadata, package: &str) -> Result<()> {
+    workspace_package(metadata, package).map(|_| ())
+}
+
+fn workspace_package<'a>(
+    metadata: &'a cargo_metadata::Metadata,
+    package: &str,
+) -> Result<&'a cargo_metadata::Package> {
+    let Some(package) = metadata.packages.iter().find(|candidate| {
+        candidate.name.as_str() == package && metadata.workspace_members.contains(&candidate.id)
+    }) else {
+        bail!("package `{package}` is not in the selected workspace");
+    };
+    Ok(package)
 }
 
 // Stay below the 255-byte/code-unit component limits of supported filesystems
@@ -2242,9 +2283,20 @@ mod tests {
             false,
         );
         assert_cargo_invocation(
-            CargoInvocation::CheckDoctests,
+            CargoInvocation::CheckDoctests { packages: None },
             "test",
             &["--workspace", "--doc"],
+            ConsumerMode::NonProduction,
+            "",
+            None,
+            true,
+        );
+        assert_cargo_invocation(
+            CargoInvocation::CheckDoctests {
+                packages: Some(&packages),
+            },
+            "test",
+            &["--package", "library", "--package", "support", "--doc"],
             ConsumerMode::NonProduction,
             "",
             None,

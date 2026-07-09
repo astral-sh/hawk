@@ -73,7 +73,8 @@ analyzed under `--all-features --locked` on the host target by default. A
 `[[feature-profile]]` matrix in `hawk.toml` can replace that single feature
 selection; Hawk unions evidence from every profile before producing
 diagnostics. The non-production surface includes tests, benches, examples, and
-compile-only doctests. Diagnostics apply to workspace library crates compiled
+compile-only doctests, which can be restricted to explicit packages with
+`[[doctest]]` entries. Diagnostics apply to workspace library crates compiled
 for those targets, including declarations enabled only under `cfg(test)`.
 
 Workspace libraries are treated as internal unless exempted. Exclude a

@@ -18,6 +18,7 @@ pub struct Config {
     overrides: Vec<LintOverride>,
     exclusions: Vec<DiagnosticExclusion>,
     production: Vec<ProductionConsumer>,
+    doctests: Option<Vec<DoctestPackage>>,
     feature_profiles: Vec<FeatureProfile>,
 }
 
@@ -60,6 +61,12 @@ pub struct ProductionConsumer {
     pub binary: String,
     pub reason: String,
     pub target: Option<Platform>,
+    pub span: ConfigSpan,
+}
+
+#[derive(Clone, Debug)]
+pub struct DoctestPackage {
+    pub package: String,
     pub span: ConfigSpan,
 }
 
@@ -130,6 +137,8 @@ struct RawConfig {
     exclusions: Vec<toml::Spanned<RawDiagnosticExclusion>>,
     #[serde(default)]
     production: Vec<toml::Spanned<RawProductionConsumer>>,
+    #[serde(default, rename = "doctest")]
+    doctests: Vec<toml::Spanned<RawDoctestPackage>>,
     #[serde(default, rename = "feature-profile")]
     feature_profiles: Vec<toml::Spanned<RawFeatureProfile>>,
 }
@@ -181,6 +190,12 @@ struct RawProductionConsumer {
     target: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawDoctestPackage {
+    package: String,
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -190,6 +205,7 @@ impl Default for Config {
             overrides: Vec::new(),
             exclusions: Vec::new(),
             production: Vec::new(),
+            doctests: None,
             feature_profiles: vec![FeatureProfile::all_features()],
         }
     }
@@ -454,6 +470,38 @@ impl Config {
                 span,
             });
         }
+        let doctests = if raw.doctests.is_empty() {
+            None
+        } else {
+            let mut packages = Vec::new();
+            let mut package_names = HashSet::new();
+            for entry in raw.doctests {
+                let span = config_span(&source, entry.span().start);
+                let entry = entry.into_inner();
+                if entry.package.trim().is_empty() {
+                    bail!(
+                        "doctest package in {}:{}:{} must provide a non-empty package name",
+                        path.display(),
+                        span.line,
+                        span.column
+                    );
+                }
+                if !package_names.insert(entry.package.clone()) {
+                    bail!(
+                        "duplicate doctest package `{}` in {}:{}:{}",
+                        entry.package,
+                        path.display(),
+                        span.line,
+                        span.column
+                    );
+                }
+                packages.push(DoctestPackage {
+                    package: entry.package,
+                    span,
+                });
+            }
+            Some(packages)
+        };
         Ok(Self {
             path: Some(path),
             source,
@@ -461,6 +509,7 @@ impl Config {
             overrides,
             exclusions,
             production,
+            doctests,
             feature_profiles,
         })
     }
@@ -476,6 +525,10 @@ impl Config {
         self.production
             .iter()
             .filter(move |consumer| consumer.applies_to(target))
+    }
+
+    pub fn doctest_packages(&self) -> Option<&[DoctestPackage]> {
+        self.doctests.as_deref()
     }
 
     pub fn preserve_uniform_field_visibility(&self) -> bool {
@@ -1346,6 +1399,38 @@ reason = "shipped on Windows"
                 .production_consumers(&target("aarch64-apple-darwin", &["unix"]))
                 .count(),
             0
+        );
+    }
+
+    #[test]
+    fn doctest_packages_default_to_the_workspace_and_can_be_scoped() {
+        let directory = tempfile::tempdir().expect("temporary configuration directory");
+        let path = directory.path().join("hawk.toml");
+
+        let default = Config::load(directory.path(), None).expect("load default configuration");
+        assert!(default.doctest_packages().is_none());
+
+        std::fs::write(
+            &path,
+            r#"
+[[doctest]]
+package = "library"
+
+[[doctest]]
+package = "support"
+"#,
+        )
+        .expect("write configuration");
+        let configured = Config::load(directory.path(), Some(&path)).expect("load configuration");
+
+        assert_eq!(
+            configured
+                .doctest_packages()
+                .expect("configured doctest packages")
+                .iter()
+                .map(|package| package.package.as_str())
+                .collect::<Vec<_>>(),
+            ["library", "support"]
         );
     }
 
