@@ -2,6 +2,14 @@
 
 <!-- prettier-ignore-start -->
 
+## 0.1.7
+
+Released on 2026-07-09.
+
+### Other changes
+
+- Scope doctest analysis by package ([#114](https://github.com/astral-sh/hawk/pull/114))
+
 ## 0.1.6
 
 Released on 2026-07-09.
