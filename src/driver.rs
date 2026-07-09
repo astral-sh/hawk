@@ -131,7 +131,7 @@ impl Callbacks for HawkCallbacks {
     fn config(&mut self, config: &mut interface::Config) {
         let run_id = env::var(protocol::RUN_ID_ENV).ok();
         let collection_options = self.collection_options.as_env_value();
-        config.track_state = Some(Box::new(move |session, _| {
+        config.track_state = Some(Box::new(move |session| {
             let mut env_depinfo = session.env_depinfo.borrow_mut();
             env_depinfo.insert((
                 Symbol::intern(protocol::RUN_ID_ENV),
@@ -539,6 +539,7 @@ fn collect_fragment(
         ) && let ty::Adt(adt, _) = tcx
             .type_of(tcx.local_parent(def_id))
             .instantiate_identity()
+            .skip_norm_wip()
             .kind()
         {
             edges.push(Edge {
@@ -952,8 +953,8 @@ fn definition(
         module_scope: module_scope(tcx, def_id),
         uniform_field_group: None,
         dead_code_allowed: tcx
-            .lint_level_at_node(DEAD_CODE, tcx.local_def_id_to_hir_id(def_id))
-            .level
+            .lint_level_spec_at_node(DEAD_CODE, tcx.local_def_id_to_hir_id(def_id))
+            .level()
             == Level::Allow,
     }
 }
