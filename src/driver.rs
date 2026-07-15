@@ -945,6 +945,7 @@ fn definition(
         name: definition_name(tcx, def_id, kind),
         kind,
         span: span(tcx, def_id),
+        expansion_span: expansion_span(tcx, def_id),
         public_api,
         restricted_visible_api,
         crate_visible_api: restricted_visible_api
@@ -1041,8 +1042,18 @@ fn span(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Option<Span> {
     if span.from_expansion() {
         return None;
     }
+    Some(source_span(tcx, span))
+}
+
+fn expansion_span(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Option<Span> {
+    let span = tcx.def_span(def_id);
+    span.from_expansion()
+        .then(|| source_span(tcx, span.source_callsite()))
+}
+
+fn source_span(tcx: TyCtxt<'_>, span: rustc_span::Span) -> Span {
     let location = tcx.sess.source_map().lookup_char_pos(span.lo());
-    Some(Span {
+    Span {
         file: normalize_source_path(
             location
                 .file
@@ -1052,7 +1063,7 @@ fn span(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Option<Span> {
         ),
         line: location.line,
         column: location.col.to_usize() + 1,
-    })
+    }
 }
 
 fn normalize_source_path(path: String) -> String {

@@ -84,6 +84,7 @@ pub struct Definition {
     pub name: String,
     pub kind: DefinitionKind,
     pub span: Option<Span>,
+    pub expansion_span: Option<Span>,
     pub public_api: bool,
     pub restricted_visible_api: bool,
     pub crate_visible_api: bool,
@@ -974,6 +975,10 @@ fn source_definition_identity<'a>(
     definition: &'a Definition,
     fragment: &'a Fragment,
 ) -> SourceDefinitionIdentity<'a> {
+    let span = definition
+        .span
+        .as_ref()
+        .or(definition.expansion_span.as_ref());
     SourceDefinitionIdentity {
         package_name: definition
             .span
@@ -993,9 +998,9 @@ fn source_definition_identity<'a>(
             .is_none()
             .then_some(definition.name.as_str()),
         kind: definition.kind,
-        file: definition.span.as_ref().map(|span| span.file.as_str()),
-        line: definition.span.as_ref().map(|span| span.line),
-        column: definition.span.as_ref().map(|span| span.column),
+        file: span.map(|span| span.file.as_str()),
+        line: span.map(|span| span.line),
+        column: span.map(|span| span.column),
     }
 }
 
@@ -1110,6 +1115,7 @@ mod tests {
             name: id.into(),
             kind: DefinitionKind::Function,
             span: None,
+            expansion_span: None,
             public_api,
             restricted_visible_api: false,
             crate_visible_api: false,
@@ -2271,6 +2277,13 @@ mod tests {
         );
         input[1].definitions[0].name = "duplicate".into();
         input[1].definitions[1].name = "duplicate".into();
+        for definition in &mut input[1].definitions {
+            definition.expansion_span = Some(Span {
+                file: "lib/src/lib.rs".into(),
+                line: 4,
+                column: 1,
+            });
+        }
         let duplicate = input[1].definitions.pop().unwrap();
         input.push(Fragment {
             protocol_version: ProtocolVersion,
@@ -2422,6 +2435,60 @@ mod tests {
             assert_eq!(findings[0].definition.id, "unreachable_public");
             assert_eq!(findings[0].kind, FindingKind::DeadPublic);
         }
+    }
+
+    #[test]
+    fn spanless_declarations_at_different_expansion_sites_do_not_share_liveness() {
+        let mut generated_production = node("generated_production", "lib", false);
+        generated_production.name = "generated".into();
+        generated_production.expansion_span = Some(Span {
+            file: "lib/src/lib.rs".into(),
+            line: 12,
+            column: 1,
+        });
+        let mut input = fragments(
+            vec![
+                generated_production,
+                node("unreachable_public", "lib", true),
+            ],
+            vec![Edge {
+                from: "generated_production".into(),
+                to: "unreachable_public".into(),
+                kind: EdgeKind::Body,
+            }],
+        );
+
+        let mut generated_test = node("generated_test", "lib", false);
+        generated_test.name = "generated".into();
+        generated_test.expansion_span = Some(Span {
+            file: "lib/src/lib.rs".into(),
+            line: 15,
+            column: 1,
+        });
+        input.push(Fragment {
+            protocol_version: ProtocolVersion,
+            package_name: "lib".into(),
+            crate_name: "lib".into(),
+            crate_id: "lib-test".into(),
+            crate_root: Some("lib/src/lib.rs".into()),
+            is_product_root: false,
+            test_surface: true,
+            definitions: vec![node("test", "lib", false), generated_test],
+            edges: vec![Edge {
+                from: "test".into(),
+                to: "generated_test".into(),
+                kind: EdgeKind::Body,
+            }],
+            roots: vec!["test".into()],
+            conservative_roots: vec![],
+            required_public_roots: vec![],
+        });
+
+        let findings = analyze(&input, &HashSet::new());
+
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].definition.id, "unreachable_public");
+        assert_eq!(findings[0].kind, FindingKind::DeadPublic);
     }
 
     #[test]
