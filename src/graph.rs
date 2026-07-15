@@ -242,6 +242,8 @@ struct SourceDefinitionIdentity<'a> {
     column: Option<usize>,
 }
 
+type EquivalenceMap<'a> = HashMap<&'a str, Vec<&'a str>>;
+
 pub fn analyze<'a>(
     production_fragments: &'a [Fragment],
     test_fragments: &'a [Fragment],
@@ -308,8 +310,12 @@ pub fn analyze_with_options<'a>(
         .chain(&test_edges)
         .copied()
         .collect();
-    let equivalents = equivalent_definitions(&definitions, &definition_compilation_ids);
-    let required_scopes = required_scopes(&definitions, &edges, &equivalents);
+    // Repeated `#[path]` modules compile independent definitions from the same
+    // source. They must not share liveness, but any visibility edit affects all
+    // of them and must account for every use.
+    let (equivalents, visibility_equivalents) =
+        equivalent_definitions(&definitions, &definition_compilation_ids);
+    let required_scopes = required_scopes(&definitions, &edges, &visibility_equivalents);
     let production_definition_ids: HashSet<&str> = production_fragments
         .iter()
         .flat_map(|fragment| &fragment.definitions)
@@ -355,7 +361,7 @@ pub fn analyze_with_options<'a>(
         &definitions,
         &definition_crate_ids,
         &edges,
-        &equivalents,
+        &visibility_equivalents,
         &no_explicitly_required,
     );
     for definition in definitions
@@ -375,7 +381,7 @@ pub fn analyze_with_options<'a>(
         &definitions,
         &definition_crate_ids,
         &edges,
-        &equivalents,
+        &visibility_equivalents,
         &explicitly_required,
     );
 
@@ -488,9 +494,11 @@ pub fn analyze_with_options<'a>(
             continue;
         }
 
-        let Some(kind) =
-            restricted_visibility_finding_kind(definition, &required_scopes, &equivalents)
-        else {
+        let Some(kind) = restricted_visibility_finding_kind(
+            definition,
+            &required_scopes,
+            &visibility_equivalents,
+        ) else {
             continue;
         };
         reported.insert(identity);
@@ -511,7 +519,7 @@ pub fn analyze_with_options<'a>(
             &observed_definitions,
             &required_public_visibility,
             &required_scopes,
-            &equivalents,
+            &visibility_equivalents,
         );
     }
 
@@ -905,7 +913,7 @@ fn adjacency<'a>(
 fn equivalent_definitions<'a>(
     definitions: &HashMap<&'a str, &'a Definition>,
     definition_compilation_ids: &HashMap<&'a str, usize>,
-) -> HashMap<&'a str, Vec<&'a str>> {
+) -> (EquivalenceMap<'a>, EquivalenceMap<'a>) {
     let mut groups: HashMap<SourceDefinitionIdentity<'a>, Vec<(&'a str, usize)>> = HashMap::new();
     for definition in definitions.values() {
         groups
@@ -918,25 +926,27 @@ fn equivalent_definitions<'a>(
     }
 
     let mut equivalents: HashMap<&str, Vec<&str>> = HashMap::new();
-    for group in groups.values().filter(|group| {
-        group.len() > 1
-            && group
-                .iter()
-                .map(|(_, compilation_id)| compilation_id)
-                .collect::<HashSet<_>>()
-                .len()
-                == group.len()
-    }) {
+    let mut visibility_equivalents: HashMap<&str, Vec<&str>> = HashMap::new();
+    for group in groups.values().filter(|group| group.len() > 1) {
+        let share_liveness = group
+            .iter()
+            .map(|(_, compilation_id)| compilation_id)
+            .collect::<HashSet<_>>()
+            .len()
+            == group.len();
         for source in group {
-            equivalents.entry(source.0).or_default().extend(
-                group
-                    .iter()
-                    .map(|target| target.0)
-                    .filter(|target| target != &source.0),
-            );
+            let targets = group
+                .iter()
+                .map(|target| target.0)
+                .filter(|target| target != &source.0)
+                .collect::<Vec<_>>();
+            if share_liveness {
+                equivalents.insert(source.0, targets.clone());
+            }
+            visibility_equivalents.insert(source.0, targets);
         }
     }
-    equivalents
+    (equivalents, visibility_equivalents)
 }
 
 fn definition_identity<'a>(definition: &'a Definition) -> DefinitionIdentity<'a> {
@@ -2255,10 +2265,18 @@ mod tests {
     #[test]
     fn same_span_declarations_in_one_compilation_unit_do_not_share_liveness() {
         let mut input = fragments(
-            vec![node("first", "lib", true), node("second", "lib", true)],
-            vec![],
+            vec![
+                node("first", "lib", true),
+                node("second", "lib", true),
+                node("entry", "lib", false),
+            ],
+            vec![Edge {
+                from: "entry".into(),
+                to: "first".into(),
+                kind: EdgeKind::Body,
+            }],
         );
-        for definition in &mut input[1].definitions {
+        for definition in &mut input[1].definitions[..2] {
             definition.span = Some(Span {
                 file: "shared.rs".into(),
                 line: 1,
@@ -2267,15 +2285,17 @@ mod tests {
         }
         input[0].edges.push(Edge {
             from: "main".into(),
-            to: "first".into(),
+            to: "entry".into(),
             kind: EdgeKind::Body,
         });
 
         let findings = analyze(&input, &HashSet::new());
 
-        assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].definition.id, "second");
-        assert_eq!(findings[0].kind, FindingKind::DeadPublic);
+        assert_eq!(findings.len(), 2);
+        assert_eq!(findings[0].definition.id, "first");
+        assert_eq!(findings[0].kind, FindingKind::UnnecessaryPublic);
+        assert_eq!(findings[1].definition.id, "second");
+        assert_eq!(findings[1].kind, FindingKind::DeadPublic);
     }
 
     #[test]
