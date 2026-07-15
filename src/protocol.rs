@@ -4,7 +4,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 /// Version of the protocol shared by the Hawk frontend and compiler driver.
 ///
 /// Increment this whenever the serialized graph or fix-plan schema changes.
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 4;
 
 pub const VERSION_ARGUMENT: &str = "--hawk-protocol-version";
 
@@ -69,7 +69,7 @@ mod tests {
 
         assert_eq!(
             error.to_string(),
-            "unsupported Hawk protocol version 1; expected 2"
+            "unsupported Hawk protocol version 1; expected 4"
         );
     }
 }
