@@ -18,6 +18,7 @@ fn command_output(command: &mut Command, description: &str) -> Result<Vec<u8>, B
 
 fn main() -> Result<(), Box<dyn Error>> {
     let rustc = env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
+    println!("cargo:rustc-env=HAWK_RUSTC={}", rustc.to_string_lossy());
     let sysroot = command_output(
         Command::new(&rustc).args(["--print", "sysroot"]),
         "rustc --print sysroot",

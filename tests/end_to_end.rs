@@ -20,7 +20,6 @@ const ISOLATED_ENVIRONMENT: &[&str] = &[
     "CARGO_ENCODED_RUSTDOCFLAGS",
     "CARGO_ENCODED_RUSTFLAGS",
     "CARGO_TARGET_DIR",
-    "RUSTC",
     "RUSTC_WRAPPER",
     "RUSTC_WORKSPACE_WRAPPER",
     "RUSTDOC",
@@ -95,7 +94,10 @@ impl HawkTestContext {
         let source = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures")
             .join(fixture);
-        let workspace = tempfile::tempdir().expect("temporary fixture workspace");
+        let workspace = tempfile::Builder::new()
+            .prefix(".hawk-test-")
+            .tempdir_in(env!("CARGO_MANIFEST_DIR"))
+            .expect("temporary fixture workspace");
         copy_directory(&source, workspace.path());
         Self {
             workspace,
@@ -137,9 +139,19 @@ impl HawkTestContext {
     }
 
     fn isolate(&self, command: &mut Command) {
-        command.env("CARGO_HOME", self.cargo_home.path());
+        command
+            .env("CARGO_HOME", self.cargo_home.path())
+            .env("RUSTC", env!("HAWK_RUSTC"));
         for variable in ISOLATED_ENVIRONMENT {
             command.env_remove(variable);
+        }
+        for (variable, _) in std::env::vars_os() {
+            if variable
+                .to_str()
+                .is_some_and(|variable| variable.starts_with("CARGO_TARGET_"))
+            {
+                command.env_remove(variable);
+            }
         }
     }
 
@@ -215,10 +227,17 @@ fn test_context_isolates_compiler_environment() {
             "{variable} was not cleared"
         );
     }
+    assert!(environment.iter().any(|(name, value)| {
+        *name == "RUSTC" && value.is_some_and(|value| value == env!("HAWK_RUSTC"))
+    }));
+    assert!(context.workspace().starts_with(env!("CARGO_MANIFEST_DIR")));
 }
 
 #[test]
 fn test_context_ignores_inherited_compiler_environment() {
+    let host = env!("HAWK_RUSTC_HOST")
+        .to_ascii_uppercase()
+        .replace('-', "_");
     let output = Command::new(std::env::current_exe().expect("current test executable"))
         .arg("--exact")
         .arg("benchmark_consumers_preserve_required_public_visibility")
@@ -229,12 +248,46 @@ fn test_context_ignores_inherited_compiler_environment() {
         .env("RUSTC_WRAPPER", "invalid-rustc-wrapper")
         .env("RUSTDOCFLAGS", "--invalid-rustdoc-flag")
         .env("RUSTFLAGS", "--invalid-rustc-flag")
+        .env(
+            format!("CARGO_TARGET_{host}_RUSTFLAGS"),
+            "--invalid-target-rustc-flag",
+        )
+        .env(
+            format!("CARGO_TARGET_{host}_LINKER"),
+            "invalid-target-linker",
+        )
         .output()
         .expect("run nested end-to-end test");
 
     assert!(
         output.status.success(),
         "inherited compiler environment affected the nested test:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_context_ignores_ancestor_cargo_configuration() {
+    let temporary_root = tempfile::tempdir().expect("temporary root");
+    fs::create_dir(temporary_root.path().join(".cargo")).expect("temporary Cargo config");
+    fs::write(
+        temporary_root.path().join(".cargo/config.toml"),
+        "[build]\nrustflags = [\"--invalid-ancestor-rustc-flag\"]\n",
+    )
+    .expect("write temporary Cargo config");
+    let output = Command::new(std::env::current_exe().expect("current test executable"))
+        .arg("--exact")
+        .arg("benchmark_consumers_preserve_required_public_visibility")
+        .env("TMPDIR", temporary_root.path())
+        .env("RUSTC", env!("HAWK_RUSTC"))
+        .env_remove("RUSTUP_TOOLCHAIN")
+        .output()
+        .expect("run nested end-to-end test");
+
+    assert!(
+        output.status.success(),
+        "ancestor Cargo configuration affected the nested test:\n{}\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
