@@ -520,11 +520,11 @@ impl Config {
 
     pub fn production_consumers(
         &self,
-        target: &AnalysisTarget,
+        targets: &[AnalysisTarget],
     ) -> impl Iterator<Item = &ProductionConsumer> {
         self.production
             .iter()
-            .filter(move |consumer| consumer.applies_to(target))
+            .filter(move |consumer| targets.iter().any(|target| consumer.applies_to(target)))
     }
 
     pub fn doctest_packages(&self) -> Option<&[DoctestPackage]> {
@@ -537,7 +537,7 @@ impl Config {
 
     pub fn apply<'findings, 'config>(
         &'config self,
-        target: &AnalysisTarget,
+        targets: &[AnalysisTarget],
         production_fragments: &[Fragment],
         test_fragments: &[Fragment],
         findings: Vec<Finding<'findings>>,
@@ -562,7 +562,7 @@ impl Config {
         for entry in self
             .overrides
             .iter()
-            .filter(|entry| entry.applies_to(target))
+            .filter(|entry| targets.iter().any(|target| entry.applies_to(target)))
         {
             let matching_items = logical_items
                 .iter()
@@ -595,7 +595,7 @@ impl Config {
         let active_exclusions = self
             .exclusions
             .iter()
-            .filter(|entry| entry.applies_to(target))
+            .filter(|entry| targets.iter().any(|target| entry.applies_to(target)))
             .filter(|entry| known_items.iter().any(|item| entry.identifies(item)))
             .collect::<Vec<_>>();
         let findings = findings
@@ -969,7 +969,7 @@ reason = "known retained public surface"
         let findings = analyze(&fragments, &[], &candidate_crates(), &HashSet::new());
 
         let applied = config.apply(
-            &target("aarch64-apple-darwin", &["unix"]),
+            &[target("aarch64-apple-darwin", &["unix"])],
             &fragments,
             &[],
             findings,
@@ -1026,7 +1026,7 @@ reason = "retain every compiled cfg alternative"
         assert_eq!(findings.len(), 2);
 
         let applied = config.apply(
-            &target("aarch64-apple-darwin", &["unix"]),
+            &[target("aarch64-apple-darwin", &["unix"])],
             &production_fragments,
             &test_fragments,
             findings,
@@ -1057,7 +1057,7 @@ reason = "detect stale selectors"
         let findings = analyze(&fragments, &[], &candidate_crates(), &HashSet::new());
 
         let applied = config.apply(
-            &target("aarch64-apple-darwin", &["unix"]),
+            &[target("aarch64-apple-darwin", &["unix"])],
             &fragments,
             &[],
             findings,
@@ -1093,7 +1093,7 @@ reason = "ambiguous Rust namespace"
         let findings = analyze(&fragments, &[], &candidate_crates(), &HashSet::new());
 
         let applied = config.apply(
-            &target("aarch64-apple-darwin", &["unix"]),
+            &[target("aarch64-apple-darwin", &["unix"])],
             &fragments,
             &[],
             findings,
@@ -1129,7 +1129,7 @@ reason = "retain the type alias"
         let findings = analyze(&fragments, &[], &candidate_crates(), &HashSet::new());
 
         let applied = config.apply(
-            &target("aarch64-apple-darwin", &["unix"]),
+            &[target("aarch64-apple-darwin", &["unix"])],
             &fragments,
             &[],
             findings,
@@ -1164,7 +1164,7 @@ reason = "only retained on Windows"
         let fragments = vec![fragment()];
 
         let windows = config.apply(
-            &target("x86_64-pc-windows-msvc", &["windows"]),
+            &[target("x86_64-pc-windows-msvc", &["windows"])],
             &fragments,
             &[],
             analyze(&fragments, &[], &candidate_crates(), &HashSet::new()),
@@ -1173,13 +1173,25 @@ reason = "only retained on Windows"
         assert!(windows.config_diagnostics.is_empty());
 
         let unix = config.apply(
-            &target("aarch64-apple-darwin", &["unix"]),
+            &[target("aarch64-apple-darwin", &["unix"])],
             &fragments,
             &[],
             analyze(&fragments, &[], &candidate_crates(), &HashSet::new()),
         );
         assert_eq!(unix.findings.len(), 1);
         assert!(unix.config_diagnostics.is_empty());
+
+        let both = config.apply(
+            &[
+                target("aarch64-apple-darwin", &["unix"]),
+                target("x86_64-pc-windows-msvc", &["windows"]),
+            ],
+            &fragments,
+            &[],
+            analyze(&fragments, &[], &candidate_crates(), &HashSet::new()),
+        );
+        assert!(both.findings.is_empty());
+        assert!(both.config_diagnostics.is_empty());
     }
 
     #[test]
@@ -1204,7 +1216,7 @@ reason = "only compiled on Windows"
         let findings = analyze(&fragments, &[], &candidate_crates(), &HashSet::new());
 
         let applied = config.apply(
-            &target("aarch64-apple-darwin", &["unix"]),
+            &[target("aarch64-apple-darwin", &["unix"])],
             &fragments,
             &[],
             findings,
@@ -1232,7 +1244,7 @@ reason = "generated public declarations"
         let fragments = vec![scoped_fragment()];
 
         let applied = config.apply(
-            &target("aarch64-apple-darwin", &["unix"]),
+            &[target("aarch64-apple-darwin", &["unix"])],
             &fragments,
             &[],
             analyze(&fragments, &[], &candidate_crates(), &HashSet::new()),
@@ -1267,7 +1279,7 @@ reason = "not actually a module"
         let fragments = vec![scoped_fragment()];
 
         let applied = config.apply(
-            &target("aarch64-apple-darwin", &["unix"]),
+            &[target("aarch64-apple-darwin", &["unix"])],
             &fragments,
             &[],
             analyze(&fragments, &[], &candidate_crates(), &HashSet::new()),
@@ -1294,7 +1306,7 @@ reason = "generated source file"
         let fragments = vec![scoped_fragment()];
 
         let applied = config.apply(
-            &target("aarch64-apple-darwin", &["unix"]),
+            &[target("aarch64-apple-darwin", &["unix"])],
             &fragments,
             &[],
             analyze(&fragments, &[], &candidate_crates(), &HashSet::new()),
@@ -1330,7 +1342,7 @@ reason = "generated only on Windows"
         let fragments = vec![scoped_fragment()];
 
         let windows = config.apply(
-            &target("x86_64-pc-windows-msvc", &["windows"]),
+            &[target("x86_64-pc-windows-msvc", &["windows"])],
             &fragments,
             &[],
             analyze(&fragments, &[], &candidate_crates(), &HashSet::new()),
@@ -1338,12 +1350,23 @@ reason = "generated only on Windows"
         assert_eq!(windows.findings.len(), 2);
 
         let unix = config.apply(
-            &target("aarch64-apple-darwin", &["unix"]),
+            &[target("aarch64-apple-darwin", &["unix"])],
             &fragments,
             &[],
             analyze(&fragments, &[], &candidate_crates(), &HashSet::new()),
         );
         assert_eq!(unix.findings.len(), 4);
+
+        let both = config.apply(
+            &[
+                target("aarch64-apple-darwin", &["unix"]),
+                target("x86_64-pc-windows-msvc", &["windows"]),
+            ],
+            &fragments,
+            &[],
+            analyze(&fragments, &[], &candidate_crates(), &HashSet::new()),
+        );
+        assert_eq!(both.findings.len(), 2);
     }
 
     #[test]
@@ -1389,7 +1412,7 @@ reason = "shipped on Windows"
         let config = Config::load(directory.path(), Some(&path)).expect("load configuration");
 
         let windows = config
-            .production_consumers(&target("x86_64-pc-windows-msvc", &["windows"]))
+            .production_consumers(&[target("x86_64-pc-windows-msvc", &["windows"])])
             .collect::<Vec<_>>();
         assert_eq!(windows.len(), 1);
         assert_eq!(windows[0].package, "windows-runner");
@@ -1397,9 +1420,18 @@ reason = "shipped on Windows"
 
         assert_eq!(
             config
-                .production_consumers(&target("aarch64-apple-darwin", &["unix"]))
+                .production_consumers(&[target("aarch64-apple-darwin", &["unix"])])
                 .count(),
             0
+        );
+        assert_eq!(
+            config
+                .production_consumers(&[
+                    target("aarch64-apple-darwin", &["unix"]),
+                    target("x86_64-pc-windows-msvc", &["windows"]),
+                ])
+                .count(),
+            1
         );
     }
 

@@ -368,6 +368,170 @@ fn target_selectors_honor_cargo_configuration() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn target_selectors_honor_the_final_cargo_cfg_query() {
+    let context = HawkTestContext::new("basic");
+    let host_target = env!("HAWK_RUSTC_HOST");
+    fs::create_dir(context.workspace().join(".cargo")).expect("create Cargo config directory");
+    fs::write(
+        context.workspace().join(".cargo/config.toml"),
+        format!(
+            "[build]\ntarget = \"{host_target}\"\nrustflags = [\"--cfg\", \"preliminary_target\"]\n\n[target.'cfg(unix)']\nrustflags = [\"--cfg\", \"final_target\"]\n"
+        ),
+    )
+    .expect("write Cargo config");
+    fs::write(
+        context.workspace().join("hawk.toml"),
+        "[[production]]\npackage = \"app\"\nbin = \"app\"\ntarget = 'cfg(final_target)'\nreason = \"final target configuration\"\n\n[[production]]\npackage = \"not-built\"\nbin = \"not-built\"\ntarget = 'cfg(preliminary_target)'\nreason = \"preliminary configuration must not apply\"\n",
+    )
+    .expect("write Hawk config");
+
+    let output = context.run(&["-A", "warnings"]);
+
+    context.assert_success(&output);
+}
+
+#[test]
+fn target_selectors_honor_every_configured_build_target() {
+    let context = HawkTestContext::new("basic");
+    let host_target = env!("HAWK_RUSTC_HOST");
+    let other_target = if host_target == "x86_64-unknown-linux-gnu" {
+        "aarch64-apple-darwin"
+    } else {
+        "x86_64-unknown-linux-gnu"
+    };
+    fs::create_dir(context.workspace().join(".cargo")).expect("create Cargo config directory");
+    fs::write(
+        context.workspace().join(".cargo/config.toml"),
+        format!("[build]\ntarget = [\"{host_target}\", \"{other_target}\"]\n"),
+    )
+    .expect("write Cargo config");
+    fs::write(
+        context.workspace().join("hawk.toml"),
+        format!(
+            "[[production]]\npackage = \"app\"\nbin = \"app\"\ntarget = \"{other_target}\"\nreason = \"second configured target\"\n"
+        ),
+    )
+    .expect("write Hawk config");
+
+    let output = context.run(&["-A", "warnings"]);
+
+    assert!(!output.status.success());
+    assert!(
+        !context
+            .normalized_stderr(&output)
+            .contains("no applicable production binaries configured"),
+        "the second configured target was not selected:\n{}",
+        context.normalized_stderr(&output)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn target_selectors_honor_wrapper_appended_cfg_flags() {
+    let context = HawkTestContext::new("basic");
+    let wrapper = context.workspace().join("rustc-wrapper");
+    let sysroot = Command::new("rustc")
+        .arg("--print=sysroot")
+        .output()
+        .expect("read Rust compiler sysroot");
+    assert!(sysroot.status.success());
+    let sysroot = String::from_utf8(sysroot.stdout).expect("UTF-8 compiler sysroot");
+    let driver_library = Path::new(sysroot.trim())
+        .join("lib/rustlib")
+        .join(env!("HAWK_RUSTC_HOST"))
+        .join("lib");
+    let library_path = if cfg!(target_os = "macos") {
+        "DYLD_LIBRARY_PATH"
+    } else {
+        "LD_LIBRARY_PATH"
+    };
+    fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\nexport {library_path}={:?}\nrustc=\"$1\"\nshift\ncase \" $* \" in *\" -vV \"*) exec \"$rustc\" \"$@\" ;; esac\nexec \"$rustc\" \"$@\" --cfg wrapper_target\n",
+            driver_library.display().to_string()
+        ),
+    )
+    .expect("write compiler wrapper");
+    let mut permissions = fs::metadata(&wrapper)
+        .expect("read compiler wrapper metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&wrapper, permissions).expect("make compiler wrapper executable");
+    fs::create_dir(context.workspace().join(".cargo")).expect("create Cargo config directory");
+    fs::write(
+        context.workspace().join(".cargo/config.toml"),
+        format!(
+            "[build]\nrustc-wrapper = {:?}\n",
+            wrapper.display().to_string()
+        ),
+    )
+    .expect("write Cargo config");
+    fs::write(
+        context.workspace().join("hawk.toml"),
+        "[[production]]\npackage = \"app\"\nbin = \"app\"\ntarget = 'cfg(wrapper_target)'\nreason = \"compiler wrapper configuration\"\n",
+    )
+    .expect("write Hawk config");
+
+    let output = context.run(&["-A", "warnings"]);
+
+    context.assert_success(&output);
+}
+
+#[test]
+fn target_probe_does_not_run_external_build_scripts() {
+    let context = HawkTestContext::new("basic");
+    let dependency = tempfile::tempdir().expect("temporary dependency directory");
+    let marker = dependency.path().join("probe-ran");
+    fs::create_dir(dependency.path().join("src")).expect("create dependency source directory");
+    fs::write(
+        dependency.path().join("Cargo.toml"),
+        "[package]\nname = \"probe-dependency\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .expect("write dependency manifest");
+    fs::write(dependency.path().join("src/lib.rs"), "").expect("write dependency source");
+    fs::write(
+        dependency.path().join("build.rs"),
+        format!(
+            "fn main() {{ if std::env::var_os(\"HAWK_RUSTC_PROBE\").is_some() {{ std::fs::write({:?}, \"probe ran\").unwrap(); }} }}\n",
+            marker.display().to_string()
+        ),
+    )
+    .expect("write dependency build script");
+    let app_manifest = context.workspace().join("app/Cargo.toml");
+    let app = fs::read_to_string(&app_manifest)
+        .expect("read application manifest")
+        .replace(
+            "\n[dev-dependencies]",
+            &format!(
+                "\nprobe-dependency = {{ path = {:?} }}\n\n[dev-dependencies]",
+                dependency.path().display().to_string()
+            ),
+        );
+    fs::write(app_manifest, app).expect("write application manifest");
+    let lockfile = Command::new("cargo")
+        .arg("generate-lockfile")
+        .arg("--offline")
+        .current_dir(context.workspace())
+        .output()
+        .expect("update fixture lockfile");
+    assert!(
+        lockfile.status.success(),
+        "could not update fixture lockfile:\n{}",
+        String::from_utf8_lossy(&lockfile.stderr)
+    );
+
+    let output = context.run(&["-A", "warnings"]);
+
+    context.assert_success(&output);
+    assert!(
+        !marker.exists(),
+        "the rustc probe ran a dependency build script"
+    );
+}
+
 #[test]
 fn target_selectors_honor_rustflags_environment() {
     let context = HawkTestContext::new("basic");

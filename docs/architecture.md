@@ -99,8 +99,8 @@ workspace selection with explicit packages:
 - test-only compilation can expose `#[cfg(test)]` declarations and
   dev-dependency support crates as diagnostic candidates.
 
-Instrumented builds use the configured feature profiles and one selected
-target triple. With no explicit profiles, Hawk uses one `--all-features`
+Instrumented builds use the configured feature profiles and Cargo's selected
+target triples. With no explicit profiles, Hawk uses one `--all-features`
 profile. A `target = "cfg(...)"` selector on a production entry, override, or
 exclusion limits it to applicable target configurations.
 
