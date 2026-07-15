@@ -56,7 +56,21 @@ pub fn run_wrapper(mut args: Vec<String>) -> ExitCode {
         eprintln!("hawk: {error:#}");
         return ExitCode::FAILURE;
     }
-    args.remove(1);
+    let Some(rustc_index) = args
+        .iter()
+        .enumerate()
+        .skip(1)
+        .find_map(|(index, argument)| {
+            (!argument.is_empty()
+                && !argument.starts_with('-')
+                && protocol::command_exists(argument))
+            .then_some(index)
+        })
+    else {
+        eprintln!("hawk: compiler wrapper did not provide a rustc executable");
+        return ExitCode::FAILURE;
+    };
+    args.remove(rustc_index);
     let output_dir = PathBuf::from(
         env::var_os(protocol::OUTPUT_DIR_ENV).expect("HAWK_OUTPUT_DIR checked before dispatch"),
     );

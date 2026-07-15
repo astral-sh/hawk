@@ -428,8 +428,7 @@ fn target_selectors_honor_every_configured_build_target() {
 }
 
 #[cfg(unix)]
-#[test]
-fn target_selectors_honor_wrapper_appended_cfg_flags() {
+fn assert_target_selectors_honor_wrapper_cfg_flags(wrapper_command: &str) {
     let context = HawkTestContext::new("basic");
     let wrapper = context.workspace().join("rustc-wrapper");
     let sysroot = Command::new("rustc")
@@ -450,7 +449,7 @@ fn target_selectors_honor_wrapper_appended_cfg_flags() {
     fs::write(
         &wrapper,
         format!(
-            "#!/bin/sh\nexport {library_path}={:?}\nrustc=\"$1\"\nshift\nexec \"$rustc\" \"$@\" --cfg wrapper_target\n",
+            "#!/bin/sh\nexport {library_path}={:?}\nrustc=\"$1\"\nshift\n{wrapper_command}\n",
             driver_library.display().to_string()
         ),
     )
@@ -478,6 +477,26 @@ fn target_selectors_honor_wrapper_appended_cfg_flags() {
     let output = context.run(&["-A", "warnings"]);
 
     context.assert_success(&output);
+}
+
+#[cfg(unix)]
+#[test]
+fn target_selectors_honor_wrapper_appended_cfg_flags() {
+    assert_target_selectors_honor_wrapper_cfg_flags("exec \"$rustc\" \"$@\" --cfg wrapper_target");
+}
+
+#[cfg(unix)]
+#[test]
+fn target_selectors_honor_wrapper_prepended_cfg_flags() {
+    assert_target_selectors_honor_wrapper_cfg_flags("exec \"$rustc\" --cfg wrapper_target \"$@\"");
+}
+
+#[cfg(unix)]
+#[test]
+fn target_selectors_honor_package_dependent_wrapper_cfg_flags() {
+    assert_target_selectors_honor_wrapper_cfg_flags(
+        "if [ \"${CARGO_PKG_NAME:-}\" = app ]; then case \" $* \" in *\" --crate-name app \"*) exec \"$rustc\" \"$@\" --cfg wrapper_target ;; esac; fi\nexec \"$rustc\" \"$@\"",
+    );
 }
 
 #[test]

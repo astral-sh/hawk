@@ -10,7 +10,7 @@ use std::process::{Command, ExitCode, Stdio};
 
 use anstyle::{AnsiColor, Style};
 use anyhow::{Context, Result, bail};
-use cargo_metadata::{MetadataCommand, TargetKind};
+use cargo_metadata::{Metadata, MetadataCommand, TargetKind};
 use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser, ValueEnum};
 use serde::{Deserialize, Serialize};
 
@@ -268,16 +268,17 @@ struct RustToolchain {
     probes: Vec<RustcProbe>,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize, Eq, PartialEq, Serialize)]
 struct RustcProbe {
     rustc: String,
     target: Option<String>,
     rustflags: Vec<String>,
+    crate_compilation: bool,
 }
 
 impl RustToolchain {
-    fn discover(workspace_root: &Path, target: Option<&str>) -> Result<Self> {
-        let probes = cargo_rustc(workspace_root, target)?;
+    fn discover(metadata: &Metadata, workspace_root: &Path, target: Option<&str>) -> Result<Self> {
+        let probes = cargo_rustc(metadata, workspace_root, target)?;
         let rustc = OsString::from(
             probes
                 .first()
@@ -379,20 +380,63 @@ impl RustToolchain {
     }
 }
 
-fn cargo_rustc(workspace_root: &Path, target: Option<&str>) -> Result<Vec<RustcProbe>> {
+fn cargo_rustc(
+    metadata: &Metadata,
+    workspace_root: &Path,
+    target: Option<&str>,
+) -> Result<Vec<RustcProbe>> {
     let probe_dir = tempfile::tempdir().context("create Cargo rustc probe directory")?;
     let output_path = probe_dir.path().join("rustc");
     // Keep the synthetic probe and Cargo's cached compiler queries out of the workspace
-    // target directory.
+    // target directory. Mirror workspace package and target identities without copying
+    // dependencies or build scripts so wrappers observe the real compilation context.
     let target_dir = probe_dir.path().join("target");
     let manifest_path = probe_dir.path().join("Cargo.toml");
-    let source_path = probe_dir.path().join("lib.rs");
+    let mut members = Vec::new();
+    for (package_index, package) in metadata.workspace_packages().iter().enumerate() {
+        let targets = package
+            .targets
+            .iter()
+            .filter(|target| {
+                target.kind.contains(&TargetKind::Lib) || target.kind.contains(&TargetKind::Bin)
+            })
+            .collect::<Vec<_>>();
+        if targets.is_empty() {
+            continue;
+        }
+        let member = format!("package-{package_index}");
+        let package_dir = probe_dir.path().join(&member);
+        fs::create_dir(&package_dir).context("create Cargo rustc probe package directory")?;
+        let mut package_manifest = format!(
+            "[package]\nname = {:?}\nversion = {:?}\nedition = {:?}\n",
+            package.name.to_string(),
+            package.version.to_string(),
+            package.edition.to_string(),
+        );
+        for (target_index, target) in targets.into_iter().enumerate() {
+            let source_name = format!("target-{target_index}.rs");
+            let is_library = target.kind.contains(&TargetKind::Lib);
+            package_manifest.push_str(&format!(
+                "\n{}\nname = {:?}\npath = {:?}\n",
+                if is_library { "[lib]" } else { "[[bin]]" },
+                target.name,
+                source_name,
+            ));
+            fs::write(
+                package_dir.join(source_name),
+                if is_library { "" } else { "fn main() {}\n" },
+            )
+            .context("write Cargo rustc probe source")?;
+        }
+        fs::write(package_dir.join("Cargo.toml"), package_manifest)
+            .context("write Cargo rustc probe package manifest")?;
+        members.push(member);
+    }
     fs::write(
         &manifest_path,
-        "[package]\nname = \"hawk-rustc-probe\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[lib]\npath = \"lib.rs\"\n\n[workspace]\n",
+        format!("[workspace]\nresolver = \"2\"\nmembers = {members:?}\n"),
     )
-    .context("write Cargo rustc probe manifest")?;
-    fs::write(&source_path, "").context("write Cargo rustc probe source")?;
+    .context("write Cargo rustc probe workspace manifest")?;
     // A random marker name inside the private probe directory acts as a
     // capability. Inherited environment variables cannot identify a live
     // probe merely by pointing at an existing directory.
@@ -419,6 +463,7 @@ fn cargo_rustc(workspace_root: &Path, target: Option<&str>) -> Result<Vec<RustcP
         .arg("check")
         .arg("--manifest-path")
         .arg(&manifest_path)
+        .arg("--workspace")
         .arg("--target-dir")
         .arg(target_dir)
         .arg("--quiet")
@@ -431,6 +476,13 @@ fn cargo_rustc(workspace_root: &Path, target: Option<&str>) -> Result<Vec<RustcP
     let output = command
         .output()
         .context("query Cargo's selected compiler")?;
+    if !output.status.success() {
+        bail!(
+            "Cargo rustc probe failed with {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
     let probes = File::open(&output_path).with_context(|| {
         format!(
             "Cargo did not report its selected compiler: {}",
@@ -441,9 +493,13 @@ fn cargo_rustc(workspace_root: &Path, target: Option<&str>) -> Result<Vec<RustcP
     for line in std::io::BufRead::lines(BufReader::new(probes)) {
         let probe = serde_json::from_str::<RustcProbe>(&line?)
             .context("decode Cargo rustc probe result")?;
-        if let Some(existing) = configurations
+        if probe.crate_compilation {
+            if !configurations.contains(&probe) {
+                configurations.push(probe);
+            }
+        } else if let Some(existing) = configurations
             .iter_mut()
-            .find(|existing| existing.target == probe.target)
+            .find(|existing| !existing.crate_compilation && existing.target == probe.target)
         {
             *existing = probe;
         } else {
@@ -486,13 +542,9 @@ pub fn run_rustc_probe(args: &[String]) -> Option<ExitCode> {
     if marker != RUSTC_PROBE_MARKER {
         return None;
     }
-    let rustc = rustc_probe_compiler(args)?;
-    let rustc_arguments = args.get(2..)?;
-    if rustc_arguments
-        .first()
-        .is_some_and(|argument| argument == "-vV")
-    {
-        return Some(Command::new(rustc).args(rustc_arguments).status().map_or(
+    let (rustc, rustc_arguments) = rustc_probe_invocation(args)?;
+    if rustc_arguments.iter().any(|argument| argument == "-vV") {
+        return Some(Command::new(rustc).args(&rustc_arguments).status().map_or(
             ExitCode::FAILURE,
             |status| {
                 if status.success() {
@@ -504,12 +556,8 @@ pub fn run_rustc_probe(args: &[String]) -> Option<ExitCode> {
         ));
     }
 
-    let target_configuration = rustc_probe_configuration(rustc, rustc_arguments);
-    if target_configuration.is_none() && output_path.is_file() {
-        return Some(ExitCode::FAILURE);
-    }
-    let target_configuration = target_configuration?;
-    let status = Command::new(rustc).args(rustc_arguments).status();
+    let target_configuration = rustc_probe_configuration(rustc, &rustc_arguments)?;
+    let status = Command::new(rustc).args(&rustc_arguments).status();
     if !status.is_ok_and(|status| status.success()) {
         return Some(ExitCode::FAILURE);
     }
@@ -527,12 +575,17 @@ pub fn run_rustc_probe(args: &[String]) -> Option<ExitCode> {
             return Some(ExitCode::FAILURE);
         }
     };
-    let write_result = serde_json::to_writer(&mut output, &target_configuration)
+    let write_result = serde_json::to_vec(&target_configuration)
         .context("serialize Cargo rustc probe result")
-        .and_then(|()| {
-            output
-                .write_all(b"\n")
-                .context("terminate Cargo rustc probe result")
+        .and_then(|mut line| {
+            line.push(b'\n');
+            let written = output
+                .write(&line)
+                .context("write Cargo rustc probe result")?;
+            if written != line.len() {
+                bail!("Cargo rustc probe result was only partially written");
+            }
+            Ok(())
         })
         .and_then(|()| output.flush().context("flush Cargo rustc probe result"))
         .with_context(|| {
@@ -550,34 +603,52 @@ pub fn run_rustc_probe(args: &[String]) -> Option<ExitCode> {
     Some(ExitCode::SUCCESS)
 }
 
-fn rustc_probe_compiler(args: &[String]) -> Option<&str> {
-    let rustc = args
-        .get(1)
-        .filter(|rustc| !rustc.is_empty() && !rustc.starts_with('-'))?;
-    if !command_exists(rustc) {
-        return None;
-    }
-    let rustc_arguments = args.get(2..)?;
-    let version_query = rustc_arguments
-        .first()
-        .is_some_and(|argument| argument == "-vV");
+fn rustc_probe_invocation(args: &[String]) -> Option<(&str, Vec<String>)> {
+    let (rustc_index, rustc) = args.iter().enumerate().skip(1).find(|(_, argument)| {
+        !argument.is_empty() && !argument.starts_with('-') && protocol::command_exists(argument)
+    })?;
+    let rustc_arguments = args[1..rustc_index]
+        .iter()
+        .chain(&args[rustc_index + 1..])
+        .cloned()
+        .collect::<Vec<_>>();
+    let version_query = rustc_arguments.iter().any(|argument| argument == "-vV");
     let target_configuration = rustc_arguments
         .iter()
         .any(|argument| argument == "--print=cfg");
     let crate_compilation = rustc_arguments
         .windows(2)
         .any(|arguments| arguments[0] == "--crate-name" && !arguments[1].starts_with('-'));
-    (version_query || target_configuration || crate_compilation).then_some(rustc.as_str())
+    (version_query || target_configuration || crate_compilation)
+        .then_some((rustc.as_str(), rustc_arguments))
 }
 
 fn rustc_probe_configuration(rustc: &str, arguments: &[String]) -> Option<RustcProbe> {
-    arguments
-        .iter()
-        .any(|argument| argument == "--print=cfg")
-        .then_some(())?;
+    let target_configuration = arguments.iter().any(|argument| argument == "--print=cfg");
+    let crate_compilation = arguments
+        .windows(2)
+        .any(|arguments| arguments[0] == "--crate-name" && !arguments[1].starts_with('-'));
+    (target_configuration || crate_compilation).then_some(())?;
     let mut rustflags = Vec::new();
     let mut arguments = arguments.iter();
     while let Some(argument) = arguments.next() {
+        if !target_configuration {
+            if argument == "--cfg" || argument == "--target" {
+                rustflags.push(argument.clone());
+                rustflags.push(arguments.next()?.clone());
+            } else if argument.starts_with("--cfg=") || argument.starts_with("--target=") {
+                rustflags.push(argument.clone());
+            } else if argument == "-C" {
+                let value = arguments.next()?;
+                if cfg_codegen_option(value) {
+                    rustflags.push(argument.clone());
+                    rustflags.push(value.clone());
+                }
+            } else if argument.strip_prefix("-C").is_some_and(cfg_codegen_option) {
+                rustflags.push(argument.clone());
+            }
+            continue;
+        }
         if argument == "-"
             || argument.starts_with("--print=")
             || argument.starts_with("--crate-type=")
@@ -605,26 +676,14 @@ fn rustc_probe_configuration(rustc: &str, arguments: &[String]) -> Option<RustcP
         rustc: rustc.to_owned(),
         target,
         rustflags,
+        crate_compilation: !target_configuration,
     })
 }
 
-fn command_exists(command: &str) -> bool {
-    let path = Path::new(command);
-    if path.is_file() {
-        return true;
-    }
-    if path.components().count() != 1 {
-        return false;
-    }
-    env::var_os("PATH").is_some_and(|search_path| {
-        env::split_paths(&search_path).any(|directory| {
-            directory.join(command).is_file()
-                || (!env::consts::EXE_SUFFIX.is_empty()
-                    && directory
-                        .join(format!("{command}{}", env::consts::EXE_SUFFIX))
-                        .is_file())
-        })
-    })
+fn cfg_codegen_option(option: &str) -> bool {
+    option.starts_with("target-cpu=")
+        || option.starts_with("target-feature=")
+        || option.starts_with("panic=")
 }
 
 fn rustc_version_field<'a>(version: &'a str, field: &str) -> Result<&'a str> {
@@ -748,7 +807,7 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
             "--fix does not support multiple feature profiles; run analysis without --fix or configure a single `[[feature-profile]]`"
         );
     }
-    let toolchain = RustToolchain::discover(&workspace_root, args.target.as_deref())?;
+    let toolchain = RustToolchain::discover(&metadata, &workspace_root, args.target.as_deref())?;
     let analysis_targets = toolchain
         .probes()
         .iter()
@@ -1051,19 +1110,23 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
                 .expect("formatting diagnostics into a string cannot fail");
         }
     }
-    let compilation_target = match toolchain.probes() {
-        [RustcProbe { target: None, .. }] => "the host target".to_owned(),
-        [
-            RustcProbe {
-                target: Some(target),
-                ..
-            },
-        ] => format!("target `{target}`"),
-        probes => format!(
+    let compilation_targets = toolchain
+        .probes()
+        .iter()
+        .filter_map(|probe| probe.target.as_deref())
+        .collect::<BTreeSet<_>>();
+    let compilation_target = match compilation_targets.len() {
+        0 => "the host target".to_owned(),
+        1 => format!(
+            "target `{}`",
+            compilation_targets
+                .first()
+                .expect("one compilation target is present")
+        ),
+        _ => format!(
             "targets {}",
-            probes
+            compilation_targets
                 .iter()
-                .filter_map(|probe| probe.target.as_deref())
                 .map(|target| format!("`{target}`"))
                 .collect::<Vec<_>>()
                 .join(", ")

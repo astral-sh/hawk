@@ -1,3 +1,9 @@
+use std::env;
+use std::path::Path;
+
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -30,6 +36,38 @@ pub const ENVIRONMENT_VARIABLES: &[&str] = &[
     RUSTC_PROBE_TOKEN_ENV,
 ];
 
+pub fn command_exists(command: &str) -> bool {
+    let path = Path::new(command);
+    if path.components().count() != 1 {
+        return is_executable(path);
+    }
+    env::var_os("PATH").is_some_and(|search_path| {
+        env::split_paths(&search_path).any(|directory| {
+            is_executable(&directory.join(command))
+                || (!env::consts::EXE_SUFFIX.is_empty()
+                    && is_executable(
+                        &directory.join(format!("{command}{}", env::consts::EXE_SUFFIX)),
+                    ))
+        })
+    })
+}
+
+fn is_executable(path: &Path) -> bool {
+    let Ok(metadata) = path.metadata() else {
+        return false;
+    };
+    metadata.is_file() && {
+        #[cfg(unix)]
+        {
+            metadata.permissions().mode() & 0o111 != 0
+        }
+        #[cfg(not(unix))]
+        {
+            true
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ProtocolVersion;
 
@@ -60,7 +98,7 @@ impl<'de> Deserialize<'de> for ProtocolVersion {
 
 #[cfg(test)]
 mod tests {
-    use super::ProtocolVersion;
+    use super::{ProtocolVersion, command_exists};
 
     #[test]
     fn rejects_mismatched_serialized_version() {
@@ -71,5 +109,15 @@ mod tests {
             error.to_string(),
             "unsupported Hawk protocol version 1; expected 2"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_non_executable_source_file_as_a_command() {
+        let directory = tempfile::tempdir().expect("temporary command directory");
+        let source = directory.path().join("main.rs");
+        std::fs::write(&source, "fn main() {}\n").expect("write source file");
+
+        assert!(!command_exists(&source.display().to_string()));
     }
 }
