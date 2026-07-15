@@ -84,7 +84,7 @@ pub struct Definition {
     pub name: String,
     pub kind: DefinitionKind,
     pub span: Option<Span>,
-    pub expansion_span: Option<Span>,
+    pub expansion_span: Option<ExpansionSpan>,
     pub public_api: bool,
     pub restricted_visible_api: bool,
     pub crate_visible_api: bool,
@@ -138,6 +138,13 @@ pub struct Span {
     pub file: String,
     pub line: usize,
     pub column: usize,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExpansionSpan {
+    pub definition: Span,
+    pub callsite: Span,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -242,9 +249,8 @@ struct SourceDefinitionIdentity<'a> {
     crate_root: Option<&'a str>,
     name: Option<&'a str>,
     kind: DefinitionKind,
-    file: Option<&'a str>,
-    line: Option<usize>,
-    column: Option<usize>,
+    span: Option<&'a Span>,
+    expansion_span: Option<&'a ExpansionSpan>,
 }
 
 pub fn analyze<'a>(
@@ -928,16 +934,15 @@ fn equivalent_definitions<'a>(
 ) -> HashMap<&'a str, Vec<&'a str>> {
     let mut groups: HashMap<SourceDefinitionIdentity<'a>, Vec<(&'a str, usize)>> = HashMap::new();
     for definition in definitions.values() {
-        groups
-            .entry(source_definition_identity(
-                definition,
-                definition_fragments[definition.id.as_str()],
-            ))
-            .or_default()
-            .push((
-                definition.id.as_str(),
-                definition_compilation_ids[definition.id.as_str()],
-            ));
+        let Some(identity) =
+            source_definition_identity(definition, definition_fragments[definition.id.as_str()])
+        else {
+            continue;
+        };
+        groups.entry(identity).or_default().push((
+            definition.id.as_str(),
+            definition_compilation_ids[definition.id.as_str()],
+        ));
     }
 
     let mut equivalents: HashMap<&str, Vec<&str>> = HashMap::new();
@@ -974,12 +979,12 @@ fn definition_identity<'a>(definition: &'a Definition) -> DefinitionIdentity<'a>
 fn source_definition_identity<'a>(
     definition: &'a Definition,
     fragment: &'a Fragment,
-) -> SourceDefinitionIdentity<'a> {
-    let span = definition
-        .span
-        .as_ref()
-        .or(definition.expansion_span.as_ref());
-    SourceDefinitionIdentity {
+) -> Option<SourceDefinitionIdentity<'a>> {
+    if definition.span.is_none() && definition.expansion_span.is_none() {
+        return None;
+    }
+
+    Some(SourceDefinitionIdentity {
         package_name: definition
             .span
             .is_none()
@@ -998,10 +1003,9 @@ fn source_definition_identity<'a>(
             .is_none()
             .then_some(definition.name.as_str()),
         kind: definition.kind,
-        file: span.map(|span| span.file.as_str()),
-        line: span.map(|span| span.line),
-        column: span.map(|span| span.column),
-    }
+        span: definition.span.as_ref(),
+        expansion_span: definition.expansion_span.as_ref(),
+    })
 }
 
 fn reachable<'a>(
@@ -1023,8 +1027,9 @@ fn reachable<'a>(
 #[cfg(test)]
 mod tests {
     use super::{
-        Definition, DefinitionKind, Edge, EdgeKind, Finding, FindingKind, Fragment, RequiredScope,
-        Span, VisibilityReduction, analyze as analyze_with_tests, analyze_with_options,
+        Definition, DefinitionKind, Edge, EdgeKind, ExpansionSpan, Finding, FindingKind, Fragment,
+        RequiredScope, Span, VisibilityReduction, analyze as analyze_with_tests,
+        analyze_with_options,
     };
     use crate::protocol::ProtocolVersion;
     use std::collections::HashSet;
@@ -1159,6 +1164,30 @@ mod tests {
     fn field(mut definition: Definition) -> Definition {
         definition.kind = DefinitionKind::Field;
         definition
+    }
+
+    fn source(mut definition: Definition, line: usize) -> Definition {
+        definition.span = Some(Span {
+            file: "lib/src/lib.rs".into(),
+            line,
+            column: 1,
+        });
+        definition
+    }
+
+    fn expansion(definition_line: usize, callsite_line: usize) -> ExpansionSpan {
+        ExpansionSpan {
+            definition: Span {
+                file: "lib/src/lib.rs".into(),
+                line: definition_line,
+                column: 9,
+            },
+            callsite: Span {
+                file: "lib/src/lib.rs".into(),
+                line: callsite_line,
+                column: 1,
+            },
+        }
     }
 
     fn uniform_field(definition: Definition) -> Definition {
@@ -1469,7 +1498,7 @@ mod tests {
     fn test_requirement_preserves_uniform_production_field_visibility() {
         let mut production_input = fragments(
             vec![
-                uniform_field(node("production_required", "lib", true)),
+                uniform_field(source(node("production_required", "lib", true), 1)),
                 uniform_field(node("internal", "lib", true)),
                 node("entry", "lib", false),
             ],
@@ -1484,7 +1513,7 @@ mod tests {
             to: "entry".into(),
             kind: EdgeKind::Body,
         });
-        let mut test_required = uniform_field(node("test_required", "lib", true));
+        let mut test_required = uniform_field(source(node("test_required", "lib", true), 1));
         test_required.name = "production_required".into();
         let mut test_input = test_fragments(vec![test_required], vec![]);
         test_input[0].edges[0].to = "test_required".into();
@@ -1918,16 +1947,19 @@ mod tests {
     #[test]
     fn integration_test_api_is_public_while_its_helper_can_be_narrowed() {
         let input = fragments(
-            vec![node("entry", "lib", true), node("helper", "lib", true)],
+            vec![
+                source(node("entry", "lib", true), 1),
+                source(node("helper", "lib", true), 2),
+            ],
             vec![Edge {
                 from: "entry".into(),
                 to: "helper".into(),
                 kind: EdgeKind::Body,
             }],
         );
-        let mut test_entry = node("test_entry", "lib", true);
+        let mut test_entry = source(node("test_entry", "lib", true), 1);
         test_entry.name = "entry".into();
-        let mut test_helper = node("test_helper", "lib", true);
+        let mut test_helper = source(node("test_helper", "lib", true), 2);
         test_helper.name = "helper".into();
         let test_input = test_fragments(
             vec![test_entry, test_helper],
@@ -1952,8 +1984,8 @@ mod tests {
     fn production_reachability_does_not_follow_test_only_edges() {
         let mut production_input = fragments(
             vec![
-                node("production_entry", "lib", true),
-                node("production_helper", "lib", true),
+                source(node("production_entry", "lib", true), 1),
+                source(node("production_helper", "lib", true), 2),
             ],
             vec![],
         );
@@ -1963,9 +1995,9 @@ mod tests {
             kind: EdgeKind::Body,
         });
 
-        let mut test_entry = node("test_entry", "lib", true);
+        let mut test_entry = source(node("test_entry", "lib", true), 1);
         test_entry.name = "production_entry".into();
-        let mut test_helper = node("test_helper", "lib", true);
+        let mut test_helper = source(node("test_helper", "lib", true), 2);
         test_helper.name = "production_helper".into();
         let test_input = test_fragments(
             vec![test_entry, test_helper],
@@ -2278,11 +2310,7 @@ mod tests {
         input[1].definitions[0].name = "duplicate".into();
         input[1].definitions[1].name = "duplicate".into();
         for definition in &mut input[1].definitions {
-            definition.expansion_span = Some(Span {
-                file: "lib/src/lib.rs".into(),
-                line: 4,
-                column: 1,
-            });
+            definition.expansion_span = Some(expansion(4, 12));
         }
         let duplicate = input[1].definitions.pop().unwrap();
         input.push(Fragment {
@@ -2438,57 +2466,55 @@ mod tests {
     }
 
     #[test]
-    fn spanless_declarations_at_different_expansion_sites_do_not_share_liveness() {
-        let mut generated_production = node("generated_production", "lib", false);
-        generated_production.name = "generated".into();
-        generated_production.expansion_span = Some(Span {
-            file: "lib/src/lib.rs".into(),
-            line: 12,
-            column: 1,
-        });
-        let mut input = fragments(
-            vec![
-                generated_production,
-                node("unreachable_public", "lib", true),
-            ],
-            vec![Edge {
-                from: "generated_production".into(),
-                to: "unreachable_public".into(),
-                kind: EdgeKind::Body,
-            }],
-        );
+    fn distinct_or_unknown_spanless_declarations_do_not_share_liveness() {
+        for (production_expansion, test_expansion) in [
+            (Some(expansion(4, 12)), Some(expansion(8, 12))),
+            (Some(expansion(4, 12)), Some(expansion(4, 15))),
+            (None, None),
+        ] {
+            let mut generated_production = node("generated_production", "lib", false);
+            generated_production.name = "generated".into();
+            generated_production.expansion_span = production_expansion;
+            let mut input = fragments(
+                vec![
+                    generated_production,
+                    node("unreachable_public", "lib", true),
+                ],
+                vec![Edge {
+                    from: "generated_production".into(),
+                    to: "unreachable_public".into(),
+                    kind: EdgeKind::Body,
+                }],
+            );
 
-        let mut generated_test = node("generated_test", "lib", false);
-        generated_test.name = "generated".into();
-        generated_test.expansion_span = Some(Span {
-            file: "lib/src/lib.rs".into(),
-            line: 15,
-            column: 1,
-        });
-        input.push(Fragment {
-            protocol_version: ProtocolVersion,
-            package_name: "lib".into(),
-            crate_name: "lib".into(),
-            crate_id: "lib-test".into(),
-            crate_root: Some("lib/src/lib.rs".into()),
-            is_product_root: false,
-            test_surface: true,
-            definitions: vec![node("test", "lib", false), generated_test],
-            edges: vec![Edge {
-                from: "test".into(),
-                to: "generated_test".into(),
-                kind: EdgeKind::Body,
-            }],
-            roots: vec!["test".into()],
-            conservative_roots: vec![],
-            required_public_roots: vec![],
-        });
+            let mut generated_test = node("generated_test", "lib", false);
+            generated_test.name = "generated".into();
+            generated_test.expansion_span = test_expansion;
+            input.push(Fragment {
+                protocol_version: ProtocolVersion,
+                package_name: "lib".into(),
+                crate_name: "lib".into(),
+                crate_id: "lib-test".into(),
+                crate_root: Some("lib/src/lib.rs".into()),
+                is_product_root: false,
+                test_surface: true,
+                definitions: vec![node("test", "lib", false), generated_test],
+                edges: vec![Edge {
+                    from: "test".into(),
+                    to: "generated_test".into(),
+                    kind: EdgeKind::Body,
+                }],
+                roots: vec!["test".into()],
+                conservative_roots: vec![],
+                required_public_roots: vec![],
+            });
 
-        let findings = analyze(&input, &HashSet::new());
+            let findings = analyze(&input, &HashSet::new());
 
-        assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].definition.id, "unreachable_public");
-        assert_eq!(findings[0].kind, FindingKind::DeadPublic);
+            assert_eq!(findings.len(), 1);
+            assert_eq!(findings[0].definition.id, "unreachable_public");
+            assert_eq!(findings[0].kind, FindingKind::DeadPublic);
+        }
     }
 
     #[test]

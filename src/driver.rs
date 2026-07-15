@@ -30,8 +30,8 @@ use rustc_span::{BytePos, FileName, Pos};
 
 use crate::protocol;
 use cargo_hawk_internal::graph::{
-    CollectionOptions, Definition, DefinitionIdentity, DefinitionKind, Edge, EdgeKind, FindingKind,
-    FixPlan, FixTarget, Fragment, Span, VisibilityReduction,
+    CollectionOptions, Definition, DefinitionIdentity, DefinitionKind, Edge, EdgeKind,
+    ExpansionSpan, FindingKind, FixPlan, FixTarget, Fragment, Span, VisibilityReduction,
 };
 
 pub fn is_protocol_version_query(args: &[String]) -> bool {
@@ -1045,10 +1045,19 @@ fn span(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Option<Span> {
     Some(source_span(tcx, span))
 }
 
-fn expansion_span(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Option<Span> {
+fn expansion_span(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Option<ExpansionSpan> {
     let span = tcx.def_span(def_id);
-    span.from_expansion()
-        .then(|| source_span(tcx, span.source_callsite()))
+    if !span.from_expansion() || span.is_dummy() {
+        return None;
+    }
+    let callsite = span.source_callsite();
+    if callsite.is_dummy() {
+        return None;
+    }
+    Some(ExpansionSpan {
+        definition: source_span(tcx, span),
+        callsite: source_span(tcx, callsite),
+    })
 }
 
 fn source_span(tcx: TyCtxt<'_>, span: rustc_span::Span) -> Span {
@@ -1309,7 +1318,7 @@ mod tests {
 
         assert_eq!(
             error.to_string(),
-            "Hawk frontend uses compiler driver protocol 1, but this driver uses protocol 3; install `cargo-hawk` and `cargo-hawk-driver` from the same release"
+            "Hawk frontend uses compiler driver protocol 1, but this driver uses protocol 4; install `cargo-hawk` and `cargo-hawk-driver` from the same release"
         );
     }
 
