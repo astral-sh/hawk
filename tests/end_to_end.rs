@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
 #[cfg(unix)]
@@ -91,12 +91,15 @@ struct HawkTestContext {
 
 impl HawkTestContext {
     fn new(fixture: &str) -> Self {
-        let source = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures")
-            .join(fixture);
+        Self::new_in_checkout(fixture, Path::new(env!("CARGO_MANIFEST_DIR")))
+    }
+
+    fn new_in_checkout(fixture: &str, checkout: &Path) -> Self {
+        let source = checkout.join("tests/fixtures").join(fixture);
+        let workspace_parent = isolated_workspace_parent(checkout);
         let workspace = tempfile::Builder::new()
             .prefix(".hawk-test-")
-            .tempdir_in(env!("CARGO_MANIFEST_DIR"))
+            .tempdir_in(&workspace_parent)
             .expect("temporary fixture workspace");
         copy_directory(&source, workspace.path());
         Self {
@@ -213,6 +216,23 @@ impl HawkTestContext {
     }
 }
 
+fn isolated_workspace_parent(checkout: &Path) -> PathBuf {
+    let checkout = checkout
+        .canonicalize()
+        .expect("canonical fixture checkout path");
+    let mut workspace_parent = checkout.clone();
+    for ancestor in checkout.ancestors() {
+        let cargo = ancestor.join(".cargo");
+        if cargo.join("config.toml").is_file() || cargo.join("config").is_file() {
+            workspace_parent = ancestor
+                .parent()
+                .expect("cannot isolate from a filesystem-root Cargo config")
+                .to_path_buf();
+        }
+    }
+    workspace_parent
+}
+
 #[test]
 fn test_context_isolates_compiler_environment() {
     let context = HawkTestContext::new("basic");
@@ -230,7 +250,13 @@ fn test_context_isolates_compiler_environment() {
     assert!(environment.iter().any(|(name, value)| {
         *name == "RUSTC" && value.is_some_and(|value| value == env!("HAWK_RUSTC"))
     }));
-    assert!(context.workspace().starts_with(env!("CARGO_MANIFEST_DIR")));
+    assert!(
+        context
+            .workspace()
+            .starts_with(isolated_workspace_parent(Path::new(env!(
+                "CARGO_MANIFEST_DIR"
+            ))))
+    );
 }
 
 #[test]
@@ -269,28 +295,46 @@ fn test_context_ignores_inherited_compiler_environment() {
 
 #[test]
 fn test_context_ignores_ancestor_cargo_configuration() {
-    let temporary_root = tempfile::tempdir().expect("temporary root");
-    fs::create_dir(temporary_root.path().join(".cargo")).expect("temporary Cargo config");
-    fs::write(
-        temporary_root.path().join(".cargo/config.toml"),
-        "[build]\nrustflags = [\"--invalid-ancestor-rustc-flag\"]\n",
-    )
-    .expect("write temporary Cargo config");
-    let output = Command::new(std::env::current_exe().expect("current test executable"))
-        .arg("--exact")
-        .arg("benchmark_consumers_preserve_required_public_visibility")
-        .env("TMPDIR", temporary_root.path())
-        .env("RUSTC", env!("HAWK_RUSTC"))
-        .env_remove("RUSTUP_TOOLCHAIN")
-        .output()
-        .expect("run nested end-to-end test");
+    let source =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/non_production_targets");
+    let host = env!("HAWK_RUSTC_HOST");
 
-    assert!(
-        output.status.success(),
-        "ancestor Cargo configuration affected the nested test:\n{}\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+    for config_name in ["config.toml", "config"] {
+        let temporary_root = tempfile::tempdir().expect("temporary root");
+        let checkout = temporary_root.path().join("checkout");
+        let fixture = checkout.join("tests/fixtures/non_production_targets");
+        copy_directory(&source, &fixture);
+
+        let ancestor_cargo = temporary_root.path().join(".cargo");
+        fs::create_dir(&ancestor_cargo).expect("ancestor Cargo config directory");
+        fs::write(
+            ancestor_cargo.join(config_name),
+            format!(
+                "[build]\nrustflags = [\"--invalid-ancestor-rustc-flag\"]\ntarget = \"invalid-ancestor-target\"\n[target.{host:?}]\nlinker = \"invalid-ancestor-linker\"\n"
+            ),
+        )
+        .expect("write ancestor Cargo config");
+
+        let fixture_cargo = fixture.join(".cargo");
+        fs::create_dir(&fixture_cargo).expect("fixture Cargo config directory");
+        fs::write(
+            fixture_cargo.join("config.toml"),
+            "[build]\nrustflags = [\"--cfg=hawk_fixture_local\", \"--check-cfg=cfg(hawk_fixture_local)\"]\n",
+        )
+        .expect("write fixture-local Cargo config");
+        let binary = fixture.join("app/src/main.rs");
+        let mut source = fs::read_to_string(&binary).expect("read fixture binary");
+        source.push_str(
+            "\n#[cfg(not(hawk_fixture_local))]\ncompile_error!(\"fixture-local Cargo config was ignored\");\n",
+        );
+        fs::write(&binary, source).expect("write fixture binary");
+
+        assert!(fixture.starts_with(temporary_root.path()));
+        let context = HawkTestContext::new_in_checkout("non_production_targets", &checkout);
+        let output = context.run(&["-A", "warnings"]);
+        context.assert_success(&output);
+        assert!(!context.workspace().starts_with(temporary_root.path()));
+    }
 }
 
 #[test]
