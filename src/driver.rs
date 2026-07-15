@@ -663,15 +663,7 @@ fn collect_fragment(
         .filter(|definition| definition.kind == DefinitionKind::TypeAlias)
         .map(|definition| definition.id.as_str())
         .collect();
-    let mut interface_targets: HashMap<&str, Vec<&str>> = HashMap::new();
-    for edge in &edges {
-        if edge.kind == EdgeKind::Interface {
-            interface_targets
-                .entry(edge.from.as_str())
-                .or_default()
-                .push(edge.to.as_str());
-        }
-    }
+    let interface_targets = type_alias_interface_targets(&edges, &type_aliases);
     let mut pending_required_public_roots: Vec<&str> = edges
         .iter()
         .filter(|edge| {
@@ -936,6 +928,25 @@ fn source_item_at_or_after<T>(
     });
     let (file_start, _, item) = source_items.get(index)?;
     (*file_start == source_file).then_some(item)
+}
+
+fn type_alias_interface_targets<'a>(
+    edges: &'a [Edge],
+    type_aliases: &HashSet<&str>,
+) -> HashMap<&'a str, Vec<&'a str>> {
+    let mut targets = HashMap::new();
+    if type_aliases.is_empty() {
+        return targets;
+    }
+    for edge in edges {
+        if edge.kind == EdgeKind::Interface && type_aliases.contains(edge.from.as_str()) {
+            targets
+                .entry(edge.from.as_str())
+                .or_insert_with(Vec::new)
+                .push(edge.to.as_str());
+        }
+    }
+    targets
 }
 
 fn is_public_variant(tcx: TyCtxt<'_>, def_id: LocalDefId, test_surface: bool) -> bool {
@@ -1298,16 +1309,17 @@ impl<'tcx> Visitor<'tcx> for ReferenceVisitor<'tcx> {
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
+    use std::collections::HashSet;
     use std::ffi::OsStr;
     use std::io::{self, Write};
     use std::path::Path;
 
     use super::{
         compact_visibility_modifier, normalize_source_path, parse_collection_options,
-        source_item_at_or_after, uniform_field_group, validate_frontend_protocol_version,
-        write_fragment,
+        source_item_at_or_after, type_alias_interface_targets, uniform_field_group,
+        validate_frontend_protocol_version, write_fragment,
     };
-    use cargo_hawk_internal::graph::{CollectionOptions, Fragment};
+    use cargo_hawk_internal::graph::{CollectionOptions, Edge, EdgeKind, Fragment};
 
     struct FailingWriter;
 
@@ -1413,6 +1425,32 @@ mod tests {
         assert_eq!(source_item_at_or_after(&items, 20, 1), None);
         assert_eq!(source_item_at_or_after(&items, 50, 60), Some(&"third"));
         assert_eq!(source_item_at_or_after(&items, 50, 61), None);
+    }
+
+    #[test]
+    fn interface_target_index_only_contains_type_alias_sources() {
+        let edges = [
+            Edge {
+                from: "alias".into(),
+                to: "target".into(),
+                kind: EdgeKind::Interface,
+            },
+            Edge {
+                from: "function".into(),
+                to: "argument".into(),
+                kind: EdgeKind::Interface,
+            },
+            Edge {
+                from: "alias".into(),
+                to: "body_target".into(),
+                kind: EdgeKind::Body,
+            },
+        ];
+
+        let targets = type_alias_interface_targets(&edges, &["alias"].into_iter().collect());
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets.get("alias"), Some(&vec!["target"]));
+        assert!(type_alias_interface_targets(&edges, &HashSet::new()).is_empty());
     }
 
     #[test]
