@@ -1278,6 +1278,99 @@ fn path_modules_preserve_visibility_required_by_other_targets() {
 }
 
 #[test]
+fn repeated_path_modules_only_apply_shared_safe_visibility_fixes() {
+    let source_workspace =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/path_module_fixes");
+    let workspace = tempfile::tempdir().expect("temporary fixture workspace");
+    copy_directory(&source_workspace, workspace.path());
+    fs::create_dir_all(workspace.path().join("library/src/first_parent"))
+        .expect("create first module directory");
+    fs::create_dir_all(workspace.path().join("library/src/second_parent"))
+        .expect("create second module directory");
+    fs::write(
+        workspace.path().join("hawk.toml"),
+        r#"preserve-uniform-field-visibility = true
+
+[[production]]
+package = "app"
+bin = "app"
+reason = "shipped application binary"
+"#,
+    )
+    .expect("write Hawk configuration");
+    fs::write(
+        workspace.path().join("library/src/lib.rs"),
+        r#"mod first_parent {
+    #[path = "../shared.rs"]
+    pub(crate) mod first;
+
+    pub(crate) fn call_second() {
+        crate::second_parent::second::cross_helper();
+        let value: crate::second_parent::second::Shared = unsafe { std::mem::zeroed() };
+        let _ = value.value;
+    }
+}
+mod second_parent {
+    #[path = "../shared.rs"]
+    pub(crate) mod second;
+}
+
+pub fn entry() {
+    first_parent::first::exercise();
+    second_parent::second::exercise();
+    first_parent::call_second();
+}
+"#,
+    )
+    .expect("write library source");
+    fs::write(
+        workspace.path().join("library/src/shared.rs"),
+        r#"pub struct Shared {
+    pub(crate) value: u8,
+    pub(crate) spare: u8,
+}
+
+pub(crate) fn exercise() {
+    local_helper();
+}
+
+pub(crate) fn local_helper() {}
+
+pub(crate) fn cross_helper() {}
+"#,
+    )
+    .expect("write shared source");
+    fs::write(workspace.path().join("library/tests/shared.rs"), "")
+        .expect("clear unrelated integration test");
+    let target_dir = tempfile::tempdir().expect("temporary target directory");
+    let output = Command::new(env!("CARGO_BIN_EXE_cargo-hawk"))
+        .arg("--manifest-path")
+        .arg(workspace.path().join("Cargo.toml"))
+        .arg("--fix")
+        .arg("--allow-no-vcs")
+        .arg("--target-dir")
+        .arg(target_dir.path())
+        .arg("--color=never")
+        .arg("-W")
+        .arg("hawk::unnecessary_crate_visibility")
+        .output()
+        .expect("run cargo-hawk with fixes");
+
+    assert!(
+        output.status.success(),
+        "cargo-hawk fix failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let shared = fs::read_to_string(workspace.path().join("library/src/shared.rs"))
+        .expect("read fixed source");
+    assert!(shared.contains("    pub(crate) value: u8,"));
+    assert!(shared.contains("    pub(crate) spare: u8,"));
+    assert!(shared.contains("fn local_helper() {}"));
+    assert!(shared.contains("pub(crate) fn cross_helper() {}"));
+}
+
+#[test]
 fn narrows_crate_visibility_to_the_required_module_scope_when_enabled() {
     let source_workspace =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/crate_visibility_fixes");

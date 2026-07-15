@@ -218,20 +218,21 @@ fn emit_fixes(tcx: TyCtxt<'_>, fix_plan: &FixPlan) {
         }
     }
 
-    let mut emitted_spans = Vec::new();
-    for (span, kind) in &visibility_fixes {
-        let Some(kind) = kind else {
-            continue;
-        };
-        if emitted_spans.contains(span)
-            || visibility_fixes
-                .iter()
-                .any(|(other_span, kind)| other_span == span && kind.is_none())
-        {
-            continue;
+    let mut grouped_fixes = HashMap::new();
+    for (span, kind) in visibility_fixes {
+        grouped_fixes
+            .entry((source_span(tcx, span), span.hi() - span.lo()))
+            .and_modify(|(_, planned)| {
+                if *planned != kind {
+                    *planned = None;
+                }
+            })
+            .or_insert((span, kind));
+    }
+    for (_, (span, kind)) in grouped_fixes {
+        if let Some(kind) = kind {
+            emit_fix(tcx, span, kind);
         }
-        emit_fix(tcx, *span, *kind);
-        emitted_spans.push(*span);
     }
 }
 
@@ -1040,8 +1041,12 @@ fn span(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Option<Span> {
     if span.from_expansion() {
         return None;
     }
+    Some(source_span(tcx, span))
+}
+
+fn source_span(tcx: TyCtxt<'_>, span: rustc_span::Span) -> Span {
     let location = tcx.sess.source_map().lookup_char_pos(span.lo());
-    Some(Span {
+    Span {
         file: normalize_source_path(
             location
                 .file
@@ -1051,7 +1056,7 @@ fn span(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Option<Span> {
         ),
         line: location.line,
         column: location.col.to_usize() + 1,
-    })
+    }
 }
 
 fn normalize_source_path(path: String) -> String {

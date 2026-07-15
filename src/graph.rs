@@ -242,7 +242,27 @@ struct SourceDefinitionIdentity<'a> {
     column: Option<usize>,
 }
 
-type EquivalenceMap<'a> = HashMap<&'a str, Vec<&'a str>>;
+#[derive(Default)]
+struct EquivalenceGroups<'a> {
+    groups: Vec<Vec<&'a str>>,
+    group_by_id: HashMap<&'a str, usize>,
+}
+
+impl<'a> EquivalenceGroups<'a> {
+    fn group(&self, id: &str) -> &[&'a str] {
+        self.group_by_id
+            .get(id)
+            .map_or(&[], |group| &self.groups[*group])
+    }
+
+    fn push(&mut self, group: Vec<&'a str>) {
+        let group_id = self.groups.len();
+        for id in &group {
+            self.group_by_id.insert(id, group_id);
+        }
+        self.groups.push(group);
+    }
+}
 
 pub fn analyze<'a>(
     production_fragments: &'a [Fragment],
@@ -315,7 +335,9 @@ pub fn analyze_with_options<'a>(
     // of them and must account for every use.
     let (equivalents, visibility_equivalents) =
         equivalent_definitions(&definitions, &definition_compilation_ids);
-    let required_scopes = required_scopes(&definitions, &edges, &visibility_equivalents);
+    let required_scopes = required_scopes(&definitions, &edges, &equivalents);
+    let visibility_finding_kinds =
+        visibility_finding_kinds(&definitions, &required_scopes, &visibility_equivalents);
     let production_definition_ids: HashSet<&str> = production_fragments
         .iter()
         .flat_map(|fragment| &fragment.definitions)
@@ -498,6 +520,7 @@ pub fn analyze_with_options<'a>(
             definition,
             &required_scopes,
             &visibility_equivalents,
+            &visibility_finding_kinds,
         ) else {
             continue;
         };
@@ -520,6 +543,7 @@ pub fn analyze_with_options<'a>(
             &required_public_visibility,
             &required_scopes,
             &visibility_equivalents,
+            &visibility_finding_kinds,
         );
     }
 
@@ -538,21 +562,19 @@ pub fn analyze_with_options<'a>(
     findings
 }
 
-fn field_group_identity(definition: &Definition) -> Option<(&str, &Span)> {
-    Some((
-        definition.crate_name.as_str(),
-        definition.uniform_field_group.as_ref()?,
-    ))
+fn field_group_identity(definition: &Definition) -> Option<&Span> {
+    definition.uniform_field_group.as_ref()
 }
 
 fn suppress_uniform_field_visibility_findings<'a>(
     findings: &mut Vec<Finding<'a>>,
-    definitions: &[&'a Definition],
+    observed_definitions: &[&'a Definition],
     required_public_visibility: &HashSet<&str>,
     required_scopes: &HashMap<&str, RequiredScope>,
-    equivalents: &HashMap<&str, Vec<&str>>,
+    equivalents: &EquivalenceGroups<'_>,
+    visibility_finding_kinds: &[Option<FindingKind>],
 ) {
-    let protected_groups: HashSet<_> = definitions
+    let protected_groups: HashSet<_> = observed_definitions
         .iter()
         .filter_map(|definition| {
             let identity = field_group_identity(definition)?;
@@ -563,6 +585,7 @@ fn suppress_uniform_field_visibility_findings<'a>(
                     definition,
                     required_scopes,
                     equivalents,
+                    visibility_finding_kinds,
                 )
             } else {
                 false
@@ -583,19 +606,63 @@ fn suppress_uniform_field_visibility_findings<'a>(
 fn has_known_restricted_visibility_requirement(
     definition: &Definition,
     required_scopes: &HashMap<&str, RequiredScope>,
-    equivalents: &HashMap<&str, Vec<&str>>,
+    equivalents: &EquivalenceGroups<'_>,
+    visibility_finding_kinds: &[Option<FindingKind>],
 ) -> bool {
-    let required_scope = merged_required_scope(definition, required_scopes, equivalents);
+    let required_scope = required_scopes.get(definition.id.as_str());
     matches!(
-        &required_scope,
-        RequiredScope::Known { crate_name, .. } if crate_name == &definition.crate_name
-    ) && restricted_visibility_finding_kind(definition, required_scopes, equivalents).is_none()
+        required_scope,
+        Some(RequiredScope::Known { crate_name, .. }) if crate_name == &definition.crate_name
+    ) && restricted_visibility_finding_kind(
+        definition,
+        required_scopes,
+        equivalents,
+        visibility_finding_kinds,
+    )
+    .is_none()
 }
 
 fn restricted_visibility_finding_kind(
     definition: &Definition,
     required_scopes: &HashMap<&str, RequiredScope>,
-    equivalents: &HashMap<&str, Vec<&str>>,
+    equivalents: &EquivalenceGroups<'_>,
+    visibility_finding_kinds: &[Option<FindingKind>],
+) -> Option<FindingKind> {
+    equivalents
+        .group_by_id
+        .get(definition.id.as_str())
+        .map_or_else(
+            || restricted_visibility_finding_kind_for_instance(definition, required_scopes),
+            |group| visibility_finding_kinds[*group],
+        )
+}
+
+fn visibility_finding_kinds(
+    definitions: &HashMap<&str, &Definition>,
+    required_scopes: &HashMap<&str, RequiredScope>,
+    equivalents: &EquivalenceGroups<'_>,
+) -> Vec<Option<FindingKind>> {
+    equivalents
+        .groups
+        .iter()
+        .map(|group| {
+            let mut result = FindingKind::UnnecessaryRestrictedVisibility;
+            for id in group {
+                let definition = definitions.get(id)?;
+                let kind =
+                    restricted_visibility_finding_kind_for_instance(definition, required_scopes)?;
+                if kind == FindingKind::UnnecessaryCrateVisibility {
+                    result = kind;
+                }
+            }
+            Some(result)
+        })
+        .collect()
+}
+
+fn restricted_visibility_finding_kind_for_instance(
+    definition: &Definition,
+    required_scopes: &HashMap<&str, RequiredScope>,
 ) -> Option<FindingKind> {
     if matches!(
         definition.kind,
@@ -604,14 +671,14 @@ fn restricted_visibility_finding_kind(
         return None;
     }
 
-    match merged_required_scope(definition, required_scopes, equivalents) {
-        RequiredScope::Bottom => Some(FindingKind::UnnecessaryRestrictedVisibility),
-        RequiredScope::Unknown => None,
-        RequiredScope::Known {
+    match required_scopes.get(definition.id.as_str()) {
+        None | Some(RequiredScope::Bottom) => Some(FindingKind::UnnecessaryRestrictedVisibility),
+        Some(RequiredScope::Unknown) => None,
+        Some(RequiredScope::Known {
             crate_name,
             module_scope,
-        } => {
-            if crate_name != definition.crate_name {
+        }) => {
+            if crate_name != &definition.crate_name {
                 return None;
             }
             if module_scope.starts_with(&definition.module_scope) {
@@ -626,26 +693,6 @@ fn restricted_visibility_finding_kind(
             None
         }
     }
-}
-
-fn merged_required_scope(
-    definition: &Definition,
-    required_scopes: &HashMap<&str, RequiredScope>,
-    equivalents: &HashMap<&str, Vec<&str>>,
-) -> RequiredScope {
-    let mut required_scope = RequiredScope::default();
-    for id in std::iter::once(definition.id.as_str()).chain(
-        equivalents
-            .get(definition.id.as_str())
-            .into_iter()
-            .flatten()
-            .copied(),
-    ) {
-        if let Some(scope) = required_scopes.get(id) {
-            required_scope.merge(scope);
-        }
-    }
-    required_scope
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -719,7 +766,7 @@ impl RequiredScope {
 fn required_scopes<'a>(
     definitions: &HashMap<&'a str, &'a Definition>,
     edges: &[&'a Edge],
-    equivalents: &HashMap<&'a str, Vec<&'a str>>,
+    equivalents: &EquivalenceGroups<'a>,
 ) -> HashMap<&'a str, RequiredScope> {
     let mut required_scopes: HashMap<&str, RequiredScope> = HashMap::new();
     let mut propagation: HashMap<&str, Vec<&str>> = HashMap::new();
@@ -753,12 +800,7 @@ fn required_scopes<'a>(
                 .push(edge.to.as_str());
         }
     }
-    for (source, targets) in equivalents {
-        propagation
-            .entry(source)
-            .or_default()
-            .extend(targets.iter().copied());
-    }
+    extend_equivalence_edges(&mut propagation, equivalents, None);
     while let Some(source) = pending.pop_front() {
         let Some(required_scope) = required_scopes.get(source).cloned() else {
             continue;
@@ -790,13 +832,9 @@ fn is_live(
     definition: &Definition,
     edges: &[&Edge],
     reachable: &HashSet<&str>,
-    equivalents: &HashMap<&str, Vec<&str>>,
+    equivalents: &EquivalenceGroups<'_>,
 ) -> bool {
-    let equivalent_ids = equivalents
-        .get(definition.id.as_str())
-        .into_iter()
-        .flatten()
-        .copied();
+    let equivalent_ids = equivalents.group(definition.id.as_str()).iter().copied();
     let ids = std::iter::once(definition.id.as_str()).chain(equivalent_ids);
     if definition.kind == DefinitionKind::Reexport {
         ids.flat_map(|id| reexport_targets(id, edges))
@@ -810,7 +848,7 @@ fn required_public_visibility<'a>(
     definitions: &HashMap<&'a str, &'a Definition>,
     definition_crate_ids: &HashMap<&'a str, &'a str>,
     edges: &[&'a Edge],
-    equivalents: &HashMap<&'a str, Vec<&'a str>>,
+    equivalents: &EquivalenceGroups<'a>,
     explicitly_required: &HashSet<&'a str>,
 ) -> HashSet<&'a str> {
     let mut required = explicitly_required.clone();
@@ -833,12 +871,7 @@ fn required_public_visibility<'a>(
                 .push(edge.to.as_str());
         }
     }
-    for (source, targets) in equivalents {
-        interface_edges
-            .entry(source)
-            .or_default()
-            .extend(targets.iter().copied());
-    }
+    extend_equivalence_edges(&mut interface_edges, equivalents, None);
 
     let mut pending: Vec<&str> = required.iter().copied().collect();
     while let Some(from) = pending.pop() {
@@ -883,8 +916,8 @@ fn is_analyzable_reexport(targets: &[&str], definitions: &HashMap<&str, &Definit
 }
 
 fn adjacency<'a>(
-    edges: &'a [&Edge],
-    equivalents: &HashMap<&'a str, Vec<&'a str>>,
+    edges: &[&'a Edge],
+    equivalents: &EquivalenceGroups<'a>,
     definition_ids: &HashSet<&str>,
 ) -> HashMap<&'a str, Vec<&'a str>> {
     let mut adjacency: HashMap<&str, Vec<&str>> = HashMap::new();
@@ -897,23 +930,14 @@ fn adjacency<'a>(
             .or_default()
             .push(edge.to.as_str());
     }
-    for (source, targets) in equivalents {
-        if definition_ids.contains(source) {
-            adjacency.entry(source).or_default().extend(
-                targets
-                    .iter()
-                    .copied()
-                    .filter(|target| definition_ids.contains(target)),
-            );
-        }
-    }
+    extend_equivalence_edges(&mut adjacency, equivalents, Some(definition_ids));
     adjacency
 }
 
 fn equivalent_definitions<'a>(
     definitions: &HashMap<&'a str, &'a Definition>,
     definition_compilation_ids: &HashMap<&'a str, usize>,
-) -> (EquivalenceMap<'a>, EquivalenceMap<'a>) {
+) -> (EquivalenceGroups<'a>, EquivalenceGroups<'a>) {
     let mut groups: HashMap<SourceDefinitionIdentity<'a>, Vec<(&'a str, usize)>> = HashMap::new();
     for definition in definitions.values() {
         groups
@@ -925,28 +949,42 @@ fn equivalent_definitions<'a>(
             ));
     }
 
-    let mut equivalents: HashMap<&str, Vec<&str>> = HashMap::new();
-    let mut visibility_equivalents: HashMap<&str, Vec<&str>> = HashMap::new();
-    for group in groups.values().filter(|group| group.len() > 1) {
+    let mut equivalents = EquivalenceGroups::default();
+    let mut visibility_equivalents = EquivalenceGroups::default();
+    for group in groups.into_values().filter(|group| group.len() > 1) {
+        let mut compilation_ids = HashSet::new();
         let share_liveness = group
             .iter()
-            .map(|(_, compilation_id)| compilation_id)
-            .collect::<HashSet<_>>()
-            .len()
-            == group.len();
-        for source in group {
-            let targets = group
-                .iter()
-                .map(|target| target.0)
-                .filter(|target| target != &source.0)
-                .collect::<Vec<_>>();
-            if share_liveness {
-                equivalents.insert(source.0, targets.clone());
-            }
-            visibility_equivalents.insert(source.0, targets);
+            .all(|(_, compilation_id)| compilation_ids.insert(*compilation_id));
+        let group = group.into_iter().map(|(id, _)| id).collect::<Vec<_>>();
+        if share_liveness {
+            equivalents.push(group.clone());
         }
+        visibility_equivalents.push(group);
     }
     (equivalents, visibility_equivalents)
+}
+
+fn extend_equivalence_edges<'a>(
+    adjacency: &mut HashMap<&'a str, Vec<&'a str>>,
+    equivalents: &EquivalenceGroups<'a>,
+    definition_ids: Option<&HashSet<&str>>,
+) {
+    for group in &equivalents.groups {
+        let mut ids = group
+            .iter()
+            .copied()
+            .filter(|id| definition_ids.is_none_or(|definition_ids| definition_ids.contains(id)));
+        let Some(source) = ids.next() else {
+            continue;
+        };
+        // A bidirectional star preserves reachability while keeping each
+        // physical-source group linear.
+        for target in ids {
+            adjacency.entry(source).or_default().push(target);
+            adjacency.entry(target).or_default().push(source);
+        }
+    }
 }
 
 fn definition_identity<'a>(definition: &'a Definition) -> DefinitionIdentity<'a> {
@@ -992,9 +1030,10 @@ mod tests {
     use super::{
         Definition, DefinitionKind, Edge, EdgeKind, Finding, FindingKind, Fragment, RequiredScope,
         Span, VisibilityReduction, analyze as analyze_with_tests, analyze_with_options,
+        equivalent_definitions, extend_equivalence_edges,
     };
     use crate::protocol::ProtocolVersion;
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
 
     fn analyze<'a>(
         fragments: &'a [Fragment],
@@ -2296,6 +2335,197 @@ mod tests {
         assert_eq!(findings[0].kind, FindingKind::UnnecessaryPublic);
         assert_eq!(findings[1].definition.id, "second");
         assert_eq!(findings[1].kind, FindingKind::DeadPublic);
+    }
+
+    #[test]
+    fn repeated_source_local_helpers_can_be_private() {
+        let mut left = crate_visible_node("left::helper", &["left"]);
+        let mut right = crate_visible_node("right::helper", &["right"]);
+        for definition in [&mut left, &mut right] {
+            definition.span = Some(Span {
+                file: "shared.rs".into(),
+                line: 1,
+                column: 1,
+            });
+        }
+        let input = fragments(
+            vec![
+                left,
+                right,
+                scoped_node("left::caller", &["left"]),
+                scoped_node("right::caller", &["right"]),
+            ],
+            vec![
+                Edge {
+                    from: "left::caller".into(),
+                    to: "left::helper".into(),
+                    kind: EdgeKind::Body,
+                },
+                Edge {
+                    from: "right::caller".into(),
+                    to: "right::helper".into(),
+                    kind: EdgeKind::Body,
+                },
+            ],
+        );
+
+        let findings = analyze(&input, &HashSet::new());
+
+        assert_eq!(findings.len(), 2);
+        assert!(
+            findings
+                .iter()
+                .all(|finding| finding.kind == FindingKind::UnnecessaryRestrictedVisibility)
+        );
+    }
+
+    #[test]
+    fn repeated_source_cross_parent_use_preserves_crate_visibility() {
+        let mut first =
+            crate_visible_node("first_parent::first::helper", &["first_parent", "first"]);
+        let mut second = crate_visible_node(
+            "second_parent::second::helper",
+            &["second_parent", "second"],
+        );
+        for definition in [&mut first, &mut second] {
+            definition.span = Some(Span {
+                file: "shared.rs".into(),
+                line: 1,
+                column: 1,
+            });
+        }
+        let input = fragments(
+            vec![
+                first,
+                second,
+                scoped_node("first_parent::caller", &["first_parent"]),
+            ],
+            vec![Edge {
+                from: "first_parent::caller".into(),
+                to: "second_parent::second::helper".into(),
+                kind: EdgeKind::Body,
+            }],
+        );
+
+        assert!(analyze(&input, &HashSet::new()).is_empty());
+    }
+
+    #[test]
+    fn repeated_source_preserves_uniform_field_visibility() {
+        let mut first_value = uniform_field(crate_visible_node(
+            "first_parent::first::value",
+            &["first_parent", "first"],
+        ));
+        let mut second_value = uniform_field(crate_visible_node(
+            "second_parent::second::value",
+            &["second_parent", "second"],
+        ));
+        let mut first_spare = uniform_field(crate_visible_node(
+            "first_parent::first::spare",
+            &["first_parent", "first"],
+        ));
+        let mut second_spare = uniform_field(crate_visible_node(
+            "second_parent::second::spare",
+            &["second_parent", "second"],
+        ));
+        for definition in [&mut first_value, &mut second_value] {
+            definition.span = Some(Span {
+                file: "shared.rs".into(),
+                line: 2,
+                column: 5,
+            });
+        }
+        for definition in [&mut first_spare, &mut second_spare] {
+            definition.span = Some(Span {
+                file: "shared.rs".into(),
+                line: 3,
+                column: 5,
+            });
+        }
+        let input = fragments(
+            vec![
+                first_value,
+                second_value,
+                first_spare,
+                second_spare,
+                scoped_node("first_parent::caller", &["first_parent"]),
+            ],
+            vec![Edge {
+                from: "first_parent::caller".into(),
+                to: "second_parent::second::value".into(),
+                kind: EdgeKind::Body,
+            }],
+        );
+
+        assert!(analyze_preserving_uniform_fields(&input).is_empty());
+    }
+
+    #[test]
+    fn repeated_source_equivalence_edges_are_linear() {
+        const DEFINITIONS: usize = 256;
+
+        let definitions = (0..DEFINITIONS)
+            .map(|index| {
+                let mut definition = node(&format!("path_{index}::helper"), "lib", false);
+                definition.span = Some(Span {
+                    file: "shared.rs".into(),
+                    line: 1,
+                    column: 1,
+                });
+                definition
+            })
+            .collect::<Vec<_>>();
+        let definitions_by_id = definitions
+            .iter()
+            .map(|definition| (definition.id.as_str(), definition))
+            .collect();
+        let compilation_ids = definitions
+            .iter()
+            .map(|definition| (definition.id.as_str(), 0))
+            .collect();
+        let (liveness, visibility) = equivalent_definitions(&definitions_by_id, &compilation_ids);
+
+        assert!(liveness.groups.is_empty());
+        assert_eq!(visibility.groups.len(), 1);
+        assert_eq!(visibility.groups[0].len(), DEFINITIONS);
+        assert_eq!(visibility.group_by_id.len(), DEFINITIONS);
+
+        let mut adjacency = HashMap::new();
+        extend_equivalence_edges(&mut adjacency, &visibility, None);
+        assert_eq!(
+            adjacency.values().map(Vec::len).sum::<usize>(),
+            2 * (DEFINITIONS - 1)
+        );
+    }
+
+    #[test]
+    fn large_repeated_source_group_is_analyzed_once() {
+        const DEFINITIONS: usize = 20_000;
+
+        let mut definitions = Vec::with_capacity(2 * DEFINITIONS);
+        let mut edges = Vec::with_capacity(DEFINITIONS);
+        for index in 0..DEFINITIONS {
+            let module = format!("path_{index}");
+            let helper = format!("{module}::helper");
+            let caller = format!("{module}::caller");
+            let mut definition = uniform_field(crate_visible_node(&helper, &[&module]));
+            definition.span = Some(Span {
+                file: "shared.rs".into(),
+                line: 1,
+                column: 1,
+            });
+            definitions.push(definition);
+            definitions.push(scoped_node(&caller, &[&module]));
+            edges.push(Edge {
+                from: caller,
+                to: helper,
+                kind: EdgeKind::Body,
+            });
+        }
+        let input = fragments(definitions, edges);
+        let findings = analyze_preserving_uniform_fields(&input);
+
+        assert_eq!(findings.len(), DEFINITIONS);
     }
 
     #[test]
