@@ -694,10 +694,13 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
                 .collect::<Result<Vec<_>>>()
         })
         .transpose()?;
-    let target_dir = args
-        .target_dir
-        .clone()
-        .unwrap_or_else(|| default_target_dir(&workspace_root));
+    let target_dir = args.target_dir.as_ref().map_or_else(
+        || Ok(default_target_dir(&workspace_root)),
+        |target_dir| {
+            std::path::absolute(target_dir)
+                .with_context(|| format!("resolve target directory {}", target_dir.display()))
+        },
+    )?;
     fs::create_dir_all(&target_dir)
         .with_context(|| format!("create target directory {}", target_dir.display()))?;
 

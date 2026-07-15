@@ -231,6 +231,27 @@ fn repeated_runs_do_not_reuse_a_failed_rustc_probe() {
 }
 
 #[test]
+fn resolves_relative_target_directory_from_the_launch_directory() {
+    let context = HawkTestContext::new("basic");
+    let launch_directory = tempfile::tempdir().expect("temporary launch directory");
+    let output = Command::new(env!("CARGO_BIN_EXE_cargo-hawk"))
+        .current_dir(launch_directory.path())
+        .arg("--manifest-path")
+        .arg(context.workspace().join("Cargo.toml"))
+        .arg("--target-dir")
+        .arg("target")
+        .arg("-A")
+        .arg("warnings")
+        .arg("--color=never")
+        .output()
+        .expect("run cargo-hawk from a separate directory");
+
+    context.assert_success(&output);
+    assert!(launch_directory.path().join("target/debug").is_dir());
+    assert!(!context.workspace().join("target").exists());
+}
+
+#[test]
 fn ignores_stale_fix_plan_during_analysis() {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/basic/Cargo.toml");
     let target_dir = tempfile::tempdir().expect("temporary target directory");
