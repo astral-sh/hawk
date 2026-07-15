@@ -235,6 +235,7 @@ impl<'a> DefinitionIdentity<'a> {
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct SourceDefinitionIdentity<'a> {
+    crate_name: Option<&'a str>,
     name: Option<&'a str>,
     kind: DefinitionKind,
     file: Option<&'a str>,
@@ -950,6 +951,10 @@ fn definition_identity<'a>(definition: &'a Definition) -> DefinitionIdentity<'a>
 
 fn source_definition_identity<'a>(definition: &'a Definition) -> SourceDefinitionIdentity<'a> {
     SourceDefinitionIdentity {
+        crate_name: definition
+            .span
+            .is_none()
+            .then_some(definition.crate_name.as_str()),
         name: definition
             .span
             .is_none()
@@ -2250,6 +2255,80 @@ mod tests {
         });
 
         assert!(analyze(&input, &HashSet::new()).is_empty());
+    }
+
+    #[test]
+    fn spanless_declarations_in_different_crates_do_not_share_liveness() {
+        let mut input = fragments(vec![node("generated_live", "lib", true)], vec![]);
+        input[1].definitions[0].name = "generated".into();
+        let mut generated_dead = node("generated_dead", "test_support", true);
+        generated_dead.name = "generated".into();
+        input.push(Fragment {
+            protocol_version: ProtocolVersion,
+            package_name: "test_support".into(),
+            crate_name: "test_support".into(),
+            crate_id: "test_support".into(),
+            is_product_root: false,
+            test_surface: false,
+            definitions: vec![generated_dead],
+            edges: vec![],
+            roots: vec![],
+            conservative_roots: vec![],
+            required_public_roots: vec![],
+        });
+        input[0].edges.push(Edge {
+            from: "main".into(),
+            to: "generated_live".into(),
+            kind: EdgeKind::Body,
+        });
+
+        let findings = analyze(&input, &HashSet::new());
+
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].definition.id, "generated_dead");
+        assert_eq!(findings[0].kind, FindingKind::DeadPublic);
+    }
+
+    #[test]
+    fn spanless_declarations_in_different_crates_do_not_share_interface_requirements() {
+        let mut input = fragments(
+            vec![
+                node("factory", "lib", true),
+                node("generated_live", "lib", true),
+            ],
+            vec![Edge {
+                from: "factory".into(),
+                to: "generated_live".into(),
+                kind: EdgeKind::Interface,
+            }],
+        );
+        input[1].definitions[1].name = "generated".into();
+        let mut generated_dead = node("generated_dead", "test_support", true);
+        generated_dead.name = "generated".into();
+        input.push(Fragment {
+            protocol_version: ProtocolVersion,
+            package_name: "test_support".into(),
+            crate_name: "test_support".into(),
+            crate_id: "test_support".into(),
+            is_product_root: false,
+            test_surface: false,
+            definitions: vec![generated_dead],
+            edges: vec![],
+            roots: vec![],
+            conservative_roots: vec![],
+            required_public_roots: vec![],
+        });
+        input[0].edges.push(Edge {
+            from: "main".into(),
+            to: "factory".into(),
+            kind: EdgeKind::Body,
+        });
+
+        let findings = analyze(&input, &HashSet::new());
+
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].definition.id, "generated_dead");
+        assert_eq!(findings[0].kind, FindingKind::DeadPublic);
     }
 
     #[test]
