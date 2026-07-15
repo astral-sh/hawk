@@ -939,7 +939,7 @@ fn equivalent_definitions<'a>(
     equivalents
 }
 
-fn definition_identity<'a>(definition: &'a Definition) -> DefinitionIdentity<'a> {
+fn definition_identity(definition: &Definition) -> DefinitionIdentity<'_> {
     DefinitionIdentity::new(
         &definition.crate_name,
         &definition.name,
@@ -948,7 +948,7 @@ fn definition_identity<'a>(definition: &'a Definition) -> DefinitionIdentity<'a>
     )
 }
 
-fn source_definition_identity<'a>(definition: &'a Definition) -> SourceDefinitionIdentity<'a> {
+fn source_definition_identity(definition: &Definition) -> SourceDefinitionIdentity<'_> {
     SourceDefinitionIdentity {
         name: definition
             .span
@@ -993,7 +993,7 @@ mod tests {
         analyze_with_tests(fragments, &[], &candidate_crates(), excluded_crates)
     }
 
-    fn analyze_preserving_uniform_fields<'a>(fragments: &'a [Fragment]) -> Vec<Finding<'a>> {
+    fn analyze_preserving_uniform_fields(fragments: &[Fragment]) -> Vec<Finding<'_>> {
         analyze_with_options(fragments, &[], &candidate_crates(), &HashSet::new(), true)
     }
 

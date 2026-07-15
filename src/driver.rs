@@ -34,24 +34,24 @@ use cargo_hawk_internal::graph::{
     FixPlan, FixTarget, Fragment, Span, VisibilityReduction,
 };
 
-pub fn is_protocol_version_query(args: &[String]) -> bool {
+pub(crate) fn is_protocol_version_query(args: &[String]) -> bool {
     args.get(1)
         .is_some_and(|argument| argument == protocol::VERSION_ARGUMENT)
         && args.len() == 2
 }
 
-pub fn print_protocol_version() -> ExitCode {
+pub(crate) fn print_protocol_version() -> ExitCode {
     println!("{}", protocol::VERSION);
     ExitCode::SUCCESS
 }
 
-pub fn is_wrapper_invocation(args: &[String]) -> bool {
+pub(crate) fn is_wrapper_invocation(args: &[String]) -> bool {
     env::var_os(protocol::OUTPUT_DIR_ENV).is_some()
         && env::var_os(protocol::ROOT_CRATE_ENV).is_some()
         && args.get(1).is_some()
 }
 
-pub fn run_wrapper(mut args: Vec<String>) -> ExitCode {
+pub(crate) fn run_wrapper(mut args: Vec<String>) -> ExitCode {
     if let Err(error) = validate_frontend_protocol() {
         eprintln!("hawk: {error:#}");
         return ExitCode::FAILURE;
@@ -144,11 +144,7 @@ impl Callbacks for HawkCallbacks {
         }));
     }
 
-    fn after_analysis<'tcx>(
-        &mut self,
-        _compiler: &interface::Compiler,
-        tcx: TyCtxt<'tcx>,
-    ) -> Compilation {
+    fn after_analysis(&mut self, _compiler: &interface::Compiler, tcx: TyCtxt<'_>) -> Compilation {
         if let Some(fix_plan) = &self.fix_plan {
             emit_fixes(tcx, fix_plan);
         } else if let Err(error) = emit_fragment(
@@ -348,7 +344,7 @@ fn emit_fragment(
     };
     let suffix: String = crate_id
         .chars()
-        .filter(|character| character.is_ascii_alphanumeric())
+        .filter(char::is_ascii_alphanumeric)
         .collect();
     let fragment = collect_fragment(
         tcx,
@@ -447,7 +443,9 @@ fn collect_fragment(
                         DefinitionKind::Field,
                         is_public_candidate(tcx, field.def_id, test_surface),
                     );
-                    field_definition.uniform_field_group = uniform_field_group.clone();
+                    field_definition
+                        .uniform_field_group
+                        .clone_from(&uniform_field_group);
                     definitions.push(field_definition);
                     defined.insert(field.def_id);
                     adt_members.push((field.def_id, item.owner_id.def_id));
@@ -562,9 +560,9 @@ fn collect_fragment(
     }
     for item_id in crate_items.free_items() {
         let item = tcx.hir_item(item_id);
-        let data = match item.kind {
-            hir::ItemKind::Struct(_, _, data) | hir::ItemKind::Union(_, _, data) => data,
-            _ => continue,
+        let (hir::ItemKind::Struct(_, _, data) | hir::ItemKind::Union(_, _, data)) = item.kind
+        else {
+            continue;
         };
         for field in data.fields() {
             let mut visitor = ReferenceVisitor::new(
@@ -1043,7 +1041,7 @@ fn span(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Option<Span> {
     let location = tcx.sess.source_map().lookup_char_pos(span.lo());
     Some(Span {
         file: normalize_source_path(
-            location
+            &location
                 .file
                 .name
                 .prefer_local_unconditionally()
@@ -1054,7 +1052,7 @@ fn span(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Option<Span> {
     })
 }
 
-fn normalize_source_path(path: String) -> String {
+fn normalize_source_path(path: &str) -> String {
     let mut normalized = PathBuf::new();
     for component in Path::new(&path).components() {
         match component {
@@ -1387,9 +1385,9 @@ mod tests {
     #[test]
     fn source_paths_are_lexically_normalized() {
         assert_eq!(
-            normalize_source_path("library/tests/../src/shared.rs".into()),
+            normalize_source_path("library/tests/../src/shared.rs"),
             "library/src/shared.rs"
         );
-        assert_eq!(normalize_source_path("../shared.rs".into()), "../shared.rs");
+        assert_eq!(normalize_source_path("../shared.rs"), "../shared.rs");
     }
 }

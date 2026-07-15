@@ -412,7 +412,7 @@ fn cargo_rustc(workspace_root: &Path, manifest_path: &Path) -> Result<OsString> 
     Ok(OsString::from(rustc.trim()))
 }
 
-pub fn run_rustc_probe(args: &[String]) -> Option<ExitCode> {
+pub(crate) fn run_rustc_probe(args: &[String]) -> Option<ExitCode> {
     let output_path = PathBuf::from(env::var_os(protocol::RUSTC_PROBE_ENV)?);
     let token = PathBuf::from(env::var_os(protocol::RUSTC_PROBE_TOKEN_ENV)?);
     let probe_dir = output_path.parent()?;
@@ -595,7 +595,7 @@ fn clear_protocol_environment(command: &mut Command) {
     }
 }
 
-pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
+pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
     if raw_args.get(1).is_some_and(|argument| argument == "hawk") {
         raw_args.remove(1);
     }
@@ -604,7 +604,7 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
         Err(error) => {
             let exit_code = error.exit_code();
             error.print().context("print command-line help")?;
-            return Ok(ExitCode::from(exit_code as u8));
+            return Ok(ExitCode::from(u8::try_from(exit_code).unwrap_or(1)));
         }
     };
     let lint_levels = LintLevels::from_matches(&matches)?;
@@ -946,7 +946,7 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
     })
 }
 
-pub fn write_error(raw_args: &[String], error: &anyhow::Error) -> Result<()> {
+pub(crate) fn write_error(raw_args: &[String], error: &anyhow::Error) -> Result<()> {
     let mut output = String::new();
     writeln!(
         output,
