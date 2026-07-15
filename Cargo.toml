@@ -24,6 +24,11 @@ name = "cargo-hawk-driver"
 path = "src/bin/cargo-hawk-driver.rs"
 required-features = ["driver"]
 
+[[test]]
+name = "end_to_end"
+path = "tests/end_to_end.rs"
+required-features = ["frontend", "driver"]
+
 [features]
 default = ["frontend", "driver"]
 frontend = [
