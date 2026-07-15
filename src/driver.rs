@@ -52,10 +52,13 @@ pub(crate) fn is_wrapper_invocation(args: &[String]) -> bool {
 }
 
 pub(crate) fn run_wrapper(mut args: Vec<String>) -> ExitCode {
-    if let Err(error) = validate_frontend_protocol() {
-        eprintln!("hawk: {error:#}");
-        return ExitCode::FAILURE;
-    }
+    let (consumer_mode, run_id) = match validate_frontend_protocol() {
+        Ok(protocol) => protocol,
+        Err(error) => {
+            eprintln!("hawk: {error:#}");
+            return ExitCode::FAILURE;
+        }
+    };
     args.remove(1);
     let output_dir = PathBuf::from(
         env::var_os(protocol::OUTPUT_DIR_ENV).expect("HAWK_OUTPUT_DIR checked before dispatch"),
@@ -92,6 +95,8 @@ pub(crate) fn run_wrapper(mut args: Vec<String>) -> ExitCode {
     let mut callbacks = HawkCallbacks {
         output_dir,
         root_crate,
+        consumer_mode,
+        run_id,
         collection_options,
         fix_plan,
     };
@@ -101,10 +106,13 @@ pub(crate) fn run_wrapper(mut args: Vec<String>) -> ExitCode {
     })
 }
 
-fn validate_frontend_protocol() -> Result<()> {
+fn validate_frontend_protocol() -> Result<(protocol::ConsumerMode, String)> {
     let version = env::var(protocol::VERSION_ENV)
         .context("Hawk frontend did not provide a compiler driver protocol version")?;
-    validate_frontend_protocol_version(&version)
+    validate_frontend_protocol_version(&version)?;
+    let consumer_mode = parse_consumer_mode(env::var_os(protocol::CONSUMER_MODE_ENV).as_deref())?;
+    let run_id = parse_run_id(env::var_os(protocol::RUN_ID_ENV).as_deref())?;
+    Ok((consumer_mode, run_id))
 }
 
 fn validate_frontend_protocol_version(version: &str) -> Result<()> {
@@ -123,19 +131,21 @@ fn validate_frontend_protocol_version(version: &str) -> Result<()> {
 struct HawkCallbacks {
     output_dir: PathBuf,
     root_crate: String,
+    consumer_mode: protocol::ConsumerMode,
+    run_id: String,
     collection_options: CollectionOptions,
     fix_plan: Option<FixPlan>,
 }
 
 impl Callbacks for HawkCallbacks {
     fn config(&mut self, config: &mut interface::Config) {
-        let run_id = env::var(protocol::RUN_ID_ENV).ok();
+        let run_id = self.run_id.clone();
         let collection_options = self.collection_options.as_env_value();
         config.track_state = Some(Box::new(move |session| {
             let mut env_depinfo = session.env_depinfo.borrow_mut();
             env_depinfo.insert((
                 Symbol::intern(protocol::RUN_ID_ENV),
-                run_id.as_deref().map(Symbol::intern),
+                Some(Symbol::intern(&run_id)),
             ));
             env_depinfo.insert((
                 Symbol::intern(protocol::COLLECTION_OPTIONS_ENV),
@@ -151,6 +161,7 @@ impl Callbacks for HawkCallbacks {
             tcx,
             &self.root_crate,
             &self.output_dir,
+            self.consumer_mode,
             self.collection_options,
         ) {
             tcx.dcx()
@@ -158,6 +169,36 @@ impl Callbacks for HawkCallbacks {
         }
         Compilation::Continue
     }
+}
+
+fn parse_consumer_mode(value: Option<&OsStr>) -> Result<protocol::ConsumerMode> {
+    let value = value.with_context(|| {
+        format!(
+            "Hawk frontend did not provide {}",
+            protocol::CONSUMER_MODE_ENV
+        )
+    })?;
+    let value = value
+        .to_str()
+        .with_context(|| format!("{} must be valid UTF-8", protocol::CONSUMER_MODE_ENV))?;
+    protocol::ConsumerMode::from_env_value(value).with_context(|| {
+        format!(
+            "unsupported {} value `{value}`",
+            protocol::CONSUMER_MODE_ENV
+        )
+    })
+}
+
+fn parse_run_id(value: Option<&OsStr>) -> Result<String> {
+    let value =
+        value.with_context(|| format!("Hawk frontend did not provide {}", protocol::RUN_ID_ENV))?;
+    let value = value
+        .to_str()
+        .with_context(|| format!("{} must be valid UTF-8", protocol::RUN_ID_ENV))?;
+    if value.is_empty() {
+        bail!("{} must not be empty", protocol::RUN_ID_ENV);
+    }
+    Ok(value.to_owned())
 }
 
 fn parse_collection_options(value: Option<&OsStr>) -> Result<CollectionOptions> {
@@ -330,13 +371,13 @@ fn emit_fragment(
     tcx: TyCtxt<'_>,
     root_crate: &str,
     output_dir: &Path,
+    consumer_mode: protocol::ConsumerMode,
     collection_options: CollectionOptions,
 ) -> Result<()> {
     let package_name = env::var("CARGO_PKG_NAME").context("read Cargo package name")?;
     let crate_name = tcx.crate_name(LOCAL_CRATE).to_string();
     let crate_id = id(tcx, CRATE_DEF_ID.to_def_id());
-    let is_non_production =
-        env::var(protocol::CONSUMER_MODE_ENV).as_deref() == Ok("non-production");
+    let is_non_production = consumer_mode == protocol::ConsumerMode::NonProduction;
     let test_surface = is_non_production && tcx.sess.opts.test;
     let is_product_root = if is_non_production {
         // Non-production executables, including custom tests and benchmarks,
@@ -1339,8 +1380,8 @@ mod tests {
 
     use super::{
         compact_visibility_modifier, normalize_source_path, parse_collection_options,
-        source_item_at_or_after, type_alias_interface_targets, uniform_field_group,
-        validate_frontend_protocol_version, write_fragment,
+        parse_consumer_mode, parse_run_id, source_item_at_or_after, type_alias_interface_targets,
+        uniform_field_group, validate_frontend_protocol_version, write_fragment,
     };
     use cargo_hawk_internal::graph::{CollectionOptions, Edge, EdgeKind, Fragment};
 
@@ -1408,6 +1449,47 @@ mod tests {
                 .expect_err("unknown collection option")
                 .to_string(),
             @"unsupported HAWK_COLLECTION_OPTIONS value `unknown`"
+        );
+    }
+
+    #[test]
+    fn frontend_protocol_fields_are_validated() {
+        assert_eq!(
+            parse_consumer_mode(Some(OsStr::new("production"))).expect("production mode"),
+            crate::protocol::ConsumerMode::Production
+        );
+        assert_eq!(
+            parse_consumer_mode(Some(OsStr::new("non-production"))).expect("non-production mode"),
+            crate::protocol::ConsumerMode::NonProduction
+        );
+        assert_eq!(
+            parse_consumer_mode(None)
+                .expect_err("missing consumer mode should fail")
+                .to_string(),
+            "Hawk frontend did not provide HAWK_CONSUMER_MODE"
+        );
+        assert_eq!(
+            parse_consumer_mode(Some(OsStr::new("invalid")))
+                .expect_err("invalid consumer mode should fail")
+                .to_string(),
+            "unsupported HAWK_CONSUMER_MODE value `invalid`"
+        );
+
+        assert_eq!(
+            parse_run_id(Some(OsStr::new("run-123"))).expect("run ID"),
+            "run-123"
+        );
+        assert_eq!(
+            parse_run_id(None)
+                .expect_err("missing run ID should fail")
+                .to_string(),
+            "Hawk frontend did not provide HAWK_RUN_ID"
+        );
+        assert_eq!(
+            parse_run_id(Some(OsStr::new("")))
+                .expect_err("empty run ID should fail")
+                .to_string(),
+            "HAWK_RUN_ID must not be empty"
         );
     }
 

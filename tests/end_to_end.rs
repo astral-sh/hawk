@@ -199,6 +199,55 @@ fn rejects_non_utf8_arguments_without_panicking() {
     }
 }
 
+#[test]
+fn rejects_incomplete_driver_protocol_environment() {
+    let output_dir = tempfile::tempdir().expect("temporary graph directory");
+    for (consumer_mode, run_id, expected) in [
+        (
+            None,
+            Some("run"),
+            "Hawk frontend did not provide HAWK_CONSUMER_MODE",
+        ),
+        (
+            Some("invalid"),
+            Some("run"),
+            "unsupported HAWK_CONSUMER_MODE value `invalid`",
+        ),
+        (
+            Some("production"),
+            None,
+            "Hawk frontend did not provide HAWK_RUN_ID",
+        ),
+        (
+            Some("production"),
+            Some(""),
+            "HAWK_RUN_ID must not be empty",
+        ),
+    ] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_cargo-hawk-driver"));
+        command
+            .arg("rustc")
+            .env(
+                "HAWK_PROTOCOL_VERSION",
+                cargo_hawk_internal::protocol::VERSION.to_string(),
+            )
+            .env("HAWK_OUTPUT_DIR", output_dir.path())
+            .env("HAWK_ROOT_CRATE", "app")
+            .env_remove("HAWK_CONSUMER_MODE")
+            .env_remove("HAWK_RUN_ID");
+        if let Some(consumer_mode) = consumer_mode {
+            command.env("HAWK_CONSUMER_MODE", consumer_mode);
+        }
+        if let Some(run_id) = run_id {
+            command.env("HAWK_RUN_ID", run_id);
+        }
+        let output = command.output().expect("run Hawk compiler driver");
+
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains(expected));
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn exits_successfully_when_diagnostic_output_is_closed() {

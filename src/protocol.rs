@@ -31,6 +31,29 @@ pub const ENVIRONMENT_VARIABLES: &[&str] = &[
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ConsumerMode {
+    Production,
+    NonProduction,
+}
+
+impl ConsumerMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Production => "production",
+            Self::NonProduction => "non-production",
+        }
+    }
+
+    pub fn from_env_value(value: &str) -> Option<Self> {
+        match value {
+            "production" => Some(Self::Production),
+            "non-production" => Some(Self::NonProduction),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ProtocolVersion;
 
 impl Serialize for ProtocolVersion {
@@ -60,7 +83,16 @@ impl<'de> Deserialize<'de> for ProtocolVersion {
 
 #[cfg(test)]
 mod tests {
-    use super::ProtocolVersion;
+    use super::{ConsumerMode, ProtocolVersion};
+
+    #[test]
+    fn consumer_modes_round_trip() {
+        for mode in [ConsumerMode::Production, ConsumerMode::NonProduction] {
+            assert_eq!(ConsumerMode::from_env_value(mode.as_str()), Some(mode));
+        }
+        assert_eq!(ConsumerMode::from_env_value(""), None);
+        assert_eq!(ConsumerMode::from_env_value("invalid"), None);
+    }
 
     #[test]
     fn rejects_mismatched_serialized_version() {

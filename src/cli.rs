@@ -995,21 +995,6 @@ struct FeatureProfileGraph<'a> {
     non_production_dir: PathBuf,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ConsumerMode {
-    Production,
-    NonProduction,
-}
-
-impl ConsumerMode {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Production => "production",
-            Self::NonProduction => "non-production",
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug)]
 enum CargoInvocation<'a> {
     CheckProduction(ProductionSelection<'a>),
@@ -1032,7 +1017,7 @@ enum CargoInvocation<'a> {
 struct CargoInvocationSpec<'a> {
     subcommand: &'static str,
     selection_arguments: Vec<OsString>,
-    consumer_mode: ConsumerMode,
+    consumer_mode: protocol::ConsumerMode,
     root_crate: String,
     fix: Option<FixOptions<'a>>,
     doctests: bool,
@@ -1066,7 +1051,7 @@ impl<'a> CargoInvocation<'a> {
                     "--bin".into(),
                     product.binary.into(),
                 ],
-                consumer_mode: ConsumerMode::Production,
+                consumer_mode: protocol::ConsumerMode::Production,
                 root_crate: product.binary.replace('-', "_"),
                 fix: None,
                 doctests: false,
@@ -1074,7 +1059,7 @@ impl<'a> CargoInvocation<'a> {
             Self::CheckNonProduction => CargoInvocationSpec {
                 subcommand: "check",
                 selection_arguments: vec!["--workspace".into(), "--all-targets".into()],
-                consumer_mode: ConsumerMode::NonProduction,
+                consumer_mode: protocol::ConsumerMode::NonProduction,
                 root_crate: String::new(),
                 fix: None,
                 doctests: false,
@@ -1085,7 +1070,7 @@ impl<'a> CargoInvocation<'a> {
                     || vec!["--workspace".into(), "--doc".into()],
                     |packages| package_arguments(packages, "--doc"),
                 ),
-                consumer_mode: ConsumerMode::NonProduction,
+                consumer_mode: protocol::ConsumerMode::NonProduction,
                 root_crate: String::new(),
                 fix: None,
                 doctests: true,
@@ -1097,7 +1082,7 @@ impl<'a> CargoInvocation<'a> {
             } => CargoInvocationSpec {
                 subcommand: "fix",
                 selection_arguments: package_arguments(packages, "--lib"),
-                consumer_mode: ConsumerMode::Production,
+                consumer_mode: protocol::ConsumerMode::Production,
                 root_crate: String::new(),
                 fix: Some(FixOptions { plan, allow_dirty }),
                 doctests: false,
@@ -1109,7 +1094,7 @@ impl<'a> CargoInvocation<'a> {
             } => CargoInvocationSpec {
                 subcommand: "fix",
                 selection_arguments: package_arguments(packages, "--all-targets"),
-                consumer_mode: ConsumerMode::NonProduction,
+                consumer_mode: protocol::ConsumerMode::NonProduction,
                 root_crate: String::new(),
                 fix: Some(FixOptions { plan, allow_dirty }),
                 doctests: false,
@@ -2082,6 +2067,7 @@ mod tests {
     use clap::CommandFactory;
 
     use crate::config::ConfigDiagnosticKind;
+    use crate::protocol::ConsumerMode;
     use cargo_hawk_internal::graph::{
         Definition, DefinitionId, DefinitionKind, Finding, FindingKind, FixPlan, FixTarget, Span,
         VisibilityReduction,
@@ -2095,9 +2081,8 @@ mod tests {
     }
 
     use super::{
-        Args, CargoInvocation, ConsumerMode, DEFAULT_TARGET_DIR_COMPONENT_MAX_BYTES,
-        DiagnosticRenderer, LintLevel, LintLevels, ProductionSelection, default_target_dir,
-        fix_plan_signature,
+        Args, CargoInvocation, DEFAULT_TARGET_DIR_COMPONENT_MAX_BYTES, DiagnosticRenderer,
+        LintLevel, LintLevels, ProductionSelection, default_target_dir, fix_plan_signature,
     };
 
     fn render_diagnostic(finding: &Finding<'_>) -> String {
