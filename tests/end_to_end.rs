@@ -8,6 +8,35 @@ use std::os::unix::fs::{PermissionsExt, symlink};
 #[cfg(unix)]
 use std::os::unix::ffi::OsStringExt;
 
+const ISOLATED_ENVIRONMENT: &[&str] = &[
+    "CARGO_BUILD_RUSTC",
+    "CARGO_BUILD_RUSTC_WRAPPER",
+    "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER",
+    "CARGO_BUILD_RUSTDOC",
+    "CARGO_BUILD_RUSTDOCFLAGS",
+    "CARGO_BUILD_RUSTFLAGS",
+    "CARGO_BUILD_TARGET",
+    "CARGO_BUILD_TARGET_DIR",
+    "CARGO_ENCODED_RUSTDOCFLAGS",
+    "CARGO_ENCODED_RUSTFLAGS",
+    "CARGO_TARGET_DIR",
+    "RUSTC",
+    "RUSTC_WRAPPER",
+    "RUSTC_WORKSPACE_WRAPPER",
+    "RUSTDOC",
+    "RUSTDOCFLAGS",
+    "RUSTFLAGS",
+    "HAWK_COLLECTION_OPTIONS",
+    "HAWK_CONSUMER_MODE",
+    "HAWK_FIX_PLAN",
+    "HAWK_OUTPUT_DIR",
+    "HAWK_PROTOCOL_VERSION",
+    "HAWK_ROOT_CRATE",
+    "HAWK_RUN_ID",
+    "HAWK_RUSTC_PROBE",
+    "HAWK_RUSTC_PROBE_TOKEN",
+];
+
 fn copy_directory(source: &Path, destination: &Path) {
     fs::create_dir_all(destination).expect("create fixture copy directory");
     for entry in fs::read_dir(source).expect("read fixture directory") {
@@ -58,6 +87,7 @@ fn initialize_git_repository(path: &Path) {
 struct HawkTestContext {
     workspace: tempfile::TempDir,
     target_dir: tempfile::TempDir,
+    cargo_home: tempfile::TempDir,
 }
 
 impl HawkTestContext {
@@ -70,6 +100,7 @@ impl HawkTestContext {
         Self {
             workspace,
             target_dir: tempfile::tempdir().expect("temporary target directory"),
+            cargo_home: tempfile::tempdir().expect("temporary Cargo home"),
         }
     }
 
@@ -77,16 +108,39 @@ impl HawkTestContext {
         self.workspace.path()
     }
 
+    fn target_dir(&self) -> &Path {
+        self.target_dir.path()
+    }
+
     fn command(&self) -> Command {
+        self.command_with_color("never")
+    }
+
+    fn command_with_color(&self, color: &str) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_cargo-hawk"));
         command
             .current_dir(self.workspace())
             .arg("--manifest-path")
             .arg(self.workspace().join("Cargo.toml"))
             .arg("--target-dir")
-            .arg(self.target_dir.path())
-            .arg("--color=never");
+            .arg(self.target_dir())
+            .arg(format!("--color={color}"));
+        self.isolate(&mut command);
         command
+    }
+
+    fn cargo(&self) -> Command {
+        let mut command = Command::new("cargo");
+        command.current_dir(self.workspace());
+        self.isolate(&mut command);
+        command
+    }
+
+    fn isolate(&self, command: &mut Command) {
+        command.env("CARGO_HOME", self.cargo_home.path());
+        for variable in ISOLATED_ENVIRONMENT {
+            command.env_remove(variable);
+        }
     }
 
     fn run(&self, args: &[&str]) -> Output {
@@ -136,15 +190,73 @@ impl HawkTestContext {
             .replace("\r\n", "\n");
         for (path, replacement) in [
             (self.workspace(), "[WORKSPACE]"),
-            (self.target_dir.path(), "[TARGET_DIR]"),
+            (self.target_dir(), "[TARGET_DIR]"),
         ] {
-            output = output.replace(&path.display().to_string(), replacement);
             if let Ok(path) = path.canonicalize() {
                 output = output.replace(&path.display().to_string(), replacement);
             }
+            output = output.replace(&path.display().to_string(), replacement);
         }
         output
     }
+}
+
+#[test]
+fn test_context_isolates_compiler_environment() {
+    let context = HawkTestContext::new("basic");
+    let command = context.command();
+    let environment = command.get_envs().collect::<Vec<_>>();
+
+    for variable in ISOLATED_ENVIRONMENT {
+        assert!(
+            environment
+                .iter()
+                .any(|(name, value)| *name == *variable && value.is_none()),
+            "{variable} was not cleared"
+        );
+    }
+}
+
+#[test]
+fn test_context_ignores_inherited_compiler_environment() {
+    let output = Command::new(std::env::current_exe().expect("current test executable"))
+        .arg("--exact")
+        .arg("benchmark_consumers_preserve_required_public_visibility")
+        .env("CARGO_BUILD_RUSTC_WRAPPER", "invalid-cargo-rustc-wrapper")
+        .env("CARGO_BUILD_RUSTFLAGS", "--invalid-cargo-rustc-flag")
+        .env("CARGO_BUILD_TARGET", "invalid-target")
+        .env("RUSTC", "invalid-rustc")
+        .env("RUSTC_WRAPPER", "invalid-rustc-wrapper")
+        .env("RUSTDOCFLAGS", "--invalid-rustdoc-flag")
+        .env("RUSTFLAGS", "--invalid-rustc-flag")
+        .output()
+        .expect("run nested end-to-end test");
+
+    assert!(
+        output.status.success(),
+        "inherited compiler environment affected the nested test:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_context_normalizes_canonical_paths() {
+    let context = HawkTestContext::new("basic");
+    let workspace = context
+        .workspace()
+        .canonicalize()
+        .expect("canonical workspace path");
+    let target_dir = context
+        .target_dir()
+        .canonicalize()
+        .expect("canonical target path");
+    let output = format!("{}\n{}\n", workspace.display(), target_dir.display());
+
+    assert_eq!(
+        context.normalize(output.as_bytes()),
+        "[WORKSPACE]\n[TARGET_DIR]\n"
+    );
 }
 
 #[cfg(unix)]
@@ -169,13 +281,9 @@ fn rejects_non_utf8_arguments_without_panicking() {
 #[cfg(unix)]
 #[test]
 fn exits_successfully_when_diagnostic_output_is_closed() {
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/basic/Cargo.toml");
-    let target_dir = tempfile::tempdir().expect("temporary target directory");
-    let mut child = Command::new(env!("CARGO_BIN_EXE_cargo-hawk"))
-        .arg("--manifest-path")
-        .arg(manifest)
-        .arg("--target-dir")
-        .arg(target_dir.path())
+    let context = HawkTestContext::new("basic");
+    let mut child = context
+        .command()
         .arg("-A")
         .arg("warnings")
         .stdout(Stdio::piped())
@@ -232,35 +340,25 @@ fn repeated_runs_do_not_reuse_a_failed_rustc_probe() {
 
 #[test]
 fn ignores_stale_fix_plan_during_analysis() {
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/basic/Cargo.toml");
-    let target_dir = tempfile::tempdir().expect("temporary target directory");
-    let output = Command::new(env!("CARGO_BIN_EXE_cargo-hawk"))
-        .arg("--manifest-path")
-        .arg(manifest)
-        .arg("--target-dir")
-        .arg(target_dir.path())
+    let context = HawkTestContext::new("basic");
+    let output = context
+        .command()
         .arg("-A")
         .arg("warnings")
         .env(
             "HAWK_FIX_PLAN",
-            target_dir.path().join("stale-fix-plan.json"),
+            context.target_dir().join("stale-fix-plan.json"),
         )
         .output()
         .expect("run cargo-hawk with a stale fix plan");
 
-    assert!(
-        output.status.success(),
-        "cargo-hawk failed:\n{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    context.assert_success(&output);
 }
 
 #[cfg(unix)]
 #[test]
 fn honors_cargo_configured_compiler() {
-    let source_workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/basic");
-    let workspace = tempfile::tempdir().expect("temporary fixture workspace");
-    copy_directory(&source_workspace, workspace.path());
+    let context = HawkTestContext::new("basic");
 
     let rustc_sysroot = Command::new("rustc")
         .arg("--print=sysroot")
@@ -274,10 +372,10 @@ fn honors_cargo_configured_compiler() {
     )
     .join("bin")
     .join(format!("rustc{}", std::env::consts::EXE_SUFFIX));
-    let configured_compiler = workspace.path().join("custom-compiler");
+    let configured_compiler = context.workspace().join("custom-compiler");
     symlink(rustc, &configured_compiler).expect("create renamed compiler symlink");
 
-    let cargo_config = workspace.path().join(".cargo");
+    let cargo_config = context.workspace().join(".cargo");
     fs::create_dir(&cargo_config).expect("create Cargo config directory");
     fs::write(
         cargo_config.join("config.toml"),
@@ -309,12 +407,8 @@ fn honors_cargo_configured_compiler() {
         std::env::split_paths(&std::env::var_os("PATH").expect("PATH is set")),
     ))
     .expect("construct PATH");
-    let target_dir = tempfile::tempdir().expect("temporary target directory");
-    let output = Command::new(env!("CARGO_BIN_EXE_cargo-hawk"))
-        .arg("--manifest-path")
-        .arg(workspace.path().join("Cargo.toml"))
-        .arg("--target-dir")
-        .arg(target_dir.path())
+    let output = context
+        .command()
         .arg("-A")
         .arg("warnings")
         .env("PATH", path)
@@ -324,11 +418,7 @@ fn honors_cargo_configured_compiler() {
         .output()
         .expect("run cargo-hawk");
 
-    assert!(
-        output.status.success(),
-        "cargo-hawk failed:\n{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    context.assert_success(&output);
 }
 
 #[test]
@@ -343,32 +433,22 @@ fn diagnoses_public_surface_of_a_binary_product() {
         .lines()
         .find_map(|line| line.strip_prefix("host: "))
         .expect("Rust compiler host target");
-    let manifest =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/basic/Cargo.toml");
-    let target_dir = tempfile::tempdir().expect("temporary target directory");
+    let context = HawkTestContext::new("basic");
     let graph_dir = tempfile::tempdir().expect("temporary graph directory");
     let unrelated_json = graph_dir.path().join("unrelated.json");
     std::fs::write(&unrelated_json, "{}").expect("write unrelated JSON file");
-    let output = Command::new(env!("CARGO_BIN_EXE_cargo-hawk"))
-        .arg("--manifest-path")
-        .arg(manifest)
+    let output = context
+        .command()
         .arg("--target")
         .arg(host_target)
-        .arg("--target-dir")
-        .arg(target_dir.path())
         .arg("--graph-dir")
         .arg(graph_dir.path())
         .output()
         .expect("run cargo-hawk");
 
-    assert!(
-        output.status.success(),
-        "cargo-hawk failed:\n{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    context.assert_success(&output);
     assert!(unrelated_json.exists());
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stdout = anstream::adapter::strip_str(&stdout).to_string();
+    let stdout = context.normalized_stdout(&output);
     let summary = format!(
         "hawk: 42 finding(s) for `app --bin app --all-features` and workspace non-production targets on target `{host_target}`\n"
     );
@@ -689,26 +769,17 @@ fn production_binary_named_like_a_library_does_not_suppress_its_findings() {
 
 #[test]
 fn production_products_reuse_shared_dependency_compilations() {
-    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/production_consumers/Cargo.toml");
-    let target_dir = tempfile::tempdir().expect("temporary target directory");
-    let output = Command::new(env!("CARGO_BIN_EXE_cargo-hawk"))
-        .arg("--manifest-path")
-        .arg(manifest)
-        .arg("--target-dir")
-        .arg(target_dir.path())
+    let context = HawkTestContext::new("production_consumers");
+    let output = context
+        .command()
         .arg("-A")
         .arg("warnings")
         .env("CARGO_TERM_COLOR", "never")
         .output()
         .expect("run cargo-hawk");
 
-    assert!(
-        output.status.success(),
-        "cargo-hawk failed:\n{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    context.assert_success(&output);
+    let stderr = context.normalized_stderr(&output);
     assert_eq!(
         stderr
             .lines()
@@ -721,17 +792,11 @@ fn production_products_reuse_shared_dependency_compilations() {
 
 #[test]
 fn rejects_duplicate_workspace_library_crate_names() {
-    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/duplicate_library_names/Cargo.toml");
-    let output = Command::new(env!("CARGO_BIN_EXE_cargo-hawk"))
-        .arg("--manifest-path")
-        .arg(manifest)
-        .arg("--color=never")
-        .output()
-        .expect("run cargo-hawk");
+    let context = HawkTestContext::new("duplicate_library_names");
+    let output = context.run(&[]);
 
     assert!(!output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = context.normalized_stderr(&output);
     assert!(stderr.contains(
         "conflicting names: `shared` (`library-a`, `library-b`). Hawk identifies graph definitions and fix targets by crate name"
     ));
@@ -740,27 +805,17 @@ fn rejects_duplicate_workspace_library_crate_names() {
 
 #[test]
 fn feature_profiles_union_reachability_across_configurations() {
-    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/feature_profiles/Cargo.toml");
-    let target_dir = tempfile::tempdir().expect("temporary target directory");
+    let context = HawkTestContext::new("feature_profiles");
     let graph_dir = tempfile::tempdir().expect("temporary graph directory");
-    let output = Command::new(env!("CARGO_BIN_EXE_cargo-hawk"))
-        .arg("--manifest-path")
-        .arg(manifest)
-        .arg("--target-dir")
-        .arg(target_dir.path())
+    let output = context
+        .command()
         .arg("--graph-dir")
         .arg(graph_dir.path())
-        .arg("--color=never")
         .output()
         .expect("run cargo-hawk");
 
-    assert!(
-        output.status.success(),
-        "cargo-hawk failed:\n{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    context.assert_success(&output);
+    let stdout = context.normalized_stdout(&output);
     assert!(
         !stdout.contains("`fallback_api` is public"),
         "API used by the default-disabled profile was diagnosed:\n{stdout}"
@@ -794,41 +849,25 @@ fn feature_profiles_union_reachability_across_configurations() {
 
 #[test]
 fn rejects_fixes_with_multiple_feature_profiles() {
-    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/feature_profiles/Cargo.toml");
-    let target_dir = tempfile::tempdir().expect("temporary target directory");
-    let output = Command::new(env!("CARGO_BIN_EXE_cargo-hawk"))
-        .arg("--manifest-path")
-        .arg(manifest)
-        .arg("--target-dir")
-        .arg(target_dir.path())
-        .arg("--fix")
-        .arg("--allow-no-vcs")
-        .arg("--color=never")
-        .output()
-        .expect("run cargo-hawk with fixes");
+    let context = HawkTestContext::new("feature_profiles");
+    let output = context.run(&["--fix", "--allow-no-vcs"]);
 
     assert!(!output.status.success());
     assert!(
-        String::from_utf8_lossy(&output.stderr)
+        context
+            .normalized_stderr(&output)
             .contains("--fix does not support multiple feature profiles")
     );
 }
 
 #[test]
 fn requires_a_configured_production_binary() {
-    let manifest =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/basic/Cargo.toml");
+    let context = HawkTestContext::new("basic");
     let configuration = tempfile::NamedTempFile::new().expect("temporary empty configuration");
-    let target_dir = tempfile::tempdir().expect("temporary target directory");
-    let output = Command::new(env!("CARGO_BIN_EXE_cargo-hawk"))
-        .arg("--manifest-path")
-        .arg(manifest)
+    let output = context
+        .command_with_color("always")
         .arg("--config")
         .arg(configuration.path())
-        .arg("--target-dir")
-        .arg(target_dir.path())
-        .arg("--color=always")
         .output()
         .expect("run cargo-hawk");
 
@@ -841,30 +880,22 @@ fn requires_a_configured_production_binary() {
 
 #[test]
 fn ordered_lint_levels_control_severity_and_exit_status() {
-    let manifest =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/basic/Cargo.toml");
-    let target_dir = tempfile::tempdir().expect("temporary target directory");
-    let output = Command::new(env!("CARGO_BIN_EXE_cargo-hawk"))
-        .arg("--manifest-path")
-        .arg(manifest)
-        .arg("-D")
-        .arg("warnings")
-        .arg("-W")
-        .arg("hawk::unnecessary_public")
-        .arg("-A")
-        .arg("hawk::unknown_item")
-        .arg("--target-dir")
-        .arg(target_dir.path())
-        .output()
-        .expect("run cargo-hawk");
+    let context = HawkTestContext::new("basic");
+    let output = context.run(&[
+        "-D",
+        "warnings",
+        "-W",
+        "hawk::unnecessary_public",
+        "-A",
+        "hawk::unknown_item",
+    ]);
 
     assert!(
         !output.status.success(),
         "denied diagnostic did not fail:\n{}",
-        String::from_utf8_lossy(&output.stdout)
+        context.normalized_stdout(&output)
     );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stdout = anstream::adapter::strip_str(&stdout).to_string();
+    let stdout = context.normalized_stdout(&output);
     assert!(stdout.contains("error[hawk::dead_public]"));
     assert!(stdout.contains("warning[hawk::unnecessary_public]"));
     assert!(stdout.contains("error[hawk::unfulfilled_expectation]"));
@@ -874,33 +905,17 @@ fn ordered_lint_levels_control_severity_and_exit_status() {
 
 #[test]
 fn applies_visibility_fixes_through_cargo_fix() {
-    let source_workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/basic");
-    let workspace = tempfile::tempdir().expect("temporary fixture workspace");
-    copy_directory(&source_workspace, workspace.path());
-    let target_dir = tempfile::tempdir().expect("temporary target directory");
-    let output = Command::new(env!("CARGO_BIN_EXE_cargo-hawk"))
-        .arg("--manifest-path")
-        .arg(workspace.path().join("Cargo.toml"))
-        .arg("--fix")
-        .arg("--allow-no-vcs")
-        .arg("--target-dir")
-        .arg(target_dir.path())
-        .arg("--color=never")
-        .output()
-        .expect("run cargo-hawk with fixes");
+    let context = HawkTestContext::new("basic");
+    let output = context.run(&["--fix", "--allow-no-vcs"]);
 
-    assert!(
-        output.status.success(),
-        "cargo-hawk fix failed:\n{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    context.assert_success(&output);
+    let stdout = context.normalized_stdout(&output);
     assert!(stdout.contains("`dead_entry` is public"));
     assert!(stdout.contains("`ProductEnum::Unused`"));
     assert!(!stdout.contains("`internal_helper`"));
 
-    let library =
-        fs::read_to_string(workspace.path().join("library/src/lib.rs")).expect("read fixed source");
+    let library = fs::read_to_string(context.workspace().join("library/src/lib.rs"))
+        .expect("read fixed source");
     assert!(library.contains("fn internal_helper() {}"));
     assert!(library.contains("pub(crate) use exported::ReexportedValue;"));
     assert!(library.contains("pub const DEAD_VALUE: u8 = 2;"));
@@ -913,13 +928,13 @@ fn applies_visibility_fixes_through_cargo_fix() {
     assert!(library.contains("fn test_only_helper() {}"));
     assert!(library.contains("use std::fmt::Debug;"));
 
-    let test_support = fs::read_to_string(workspace.path().join("test_support/src/lib.rs"))
+    let test_support = fs::read_to_string(context.workspace().join("test_support/src/lib.rs"))
         .expect("read fixed test-support source");
     assert!(test_support.contains("pub fn entry() {"));
     assert!(test_support.contains("fn helper() {}"));
     assert!(test_support.contains("pub fn dead_test_surface() {}"));
 
-    let unit_support = fs::read_to_string(workspace.path().join("unit_support/src/lib.rs"))
+    let unit_support = fs::read_to_string(context.workspace().join("unit_support/src/lib.rs"))
         .expect("read fixed unit-test source");
     assert!(unit_support.contains("pub fn product_entry() {}"));
     assert!(unit_support.contains("pub fn not_exported() {}"));
@@ -929,79 +944,34 @@ fn applies_visibility_fixes_through_cargo_fix() {
 
 #[test]
 fn applies_multiple_fix_passes_in_a_clean_git_repository() {
-    let source_workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/basic");
-    let workspace = tempfile::tempdir().expect("temporary fixture workspace");
-    copy_directory(&source_workspace, workspace.path());
-    initialize_git_repository(workspace.path());
-    let target_dir = tempfile::tempdir().expect("temporary target directory");
-    let output = Command::new(env!("CARGO_BIN_EXE_cargo-hawk"))
-        .arg("--manifest-path")
-        .arg(workspace.path().join("Cargo.toml"))
-        .arg("--fix")
-        .arg("--target-dir")
-        .arg(target_dir.path())
-        .arg("--color=never")
-        .output()
-        .expect("run cargo-hawk with fixes");
+    let context = HawkTestContext::new("basic");
+    context.initialize_git();
+    let output = context.run(&["--fix"]);
 
-    assert!(
-        output.status.success(),
-        "cargo-hawk fix failed:\n{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    context.assert_success(&output);
 }
 
 #[test]
 fn dead_public_findings_are_not_fixed_into_dead_code_errors() {
-    let source_workspace =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/dead_public_fixes");
-    let workspace = tempfile::tempdir().expect("temporary fixture workspace");
-    copy_directory(&source_workspace, workspace.path());
-    let target_dir = tempfile::tempdir().expect("temporary target directory");
-    let output = Command::new(env!("CARGO_BIN_EXE_cargo-hawk"))
-        .arg("--manifest-path")
-        .arg(workspace.path().join("Cargo.toml"))
-        .arg("--fix")
-        .arg("--allow-no-vcs")
-        .arg("--target-dir")
-        .arg(target_dir.path())
-        .arg("--color=never")
-        .output()
-        .expect("run cargo-hawk with fixes");
+    let context = HawkTestContext::new("dead_public_fixes");
+    let output = context.run(&["--fix", "--allow-no-vcs"]);
 
-    assert!(
-        output.status.success(),
-        "cargo-hawk fix failed:\n{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    context.assert_success(&output);
+    let stdout = context.normalized_stdout(&output);
     assert!(stdout.contains("`dead_api` is public"));
 
     let library =
-        fs::read_to_string(workspace.path().join("library/src/lib.rs")).expect("read source");
+        fs::read_to_string(context.workspace().join("library/src/lib.rs")).expect("read source");
     assert!(library.contains("pub fn dead_api() {}"));
 }
 
 #[test]
 fn benchmark_consumers_preserve_required_public_visibility() {
-    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/non_production_targets/Cargo.toml");
-    let target_dir = tempfile::tempdir().expect("temporary target directory");
-    let output = Command::new(env!("CARGO_BIN_EXE_cargo-hawk"))
-        .arg("--manifest-path")
-        .arg(manifest)
-        .arg("--target-dir")
-        .arg(target_dir.path())
-        .arg("--color=never")
-        .output()
-        .expect("run cargo-hawk");
+    let context = HawkTestContext::new("non_production_targets");
+    let output = context.run(&[]);
 
-    assert!(
-        output.status.success(),
-        "cargo-hawk failed:\n{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    context.assert_success(&output);
+    let stdout = context.normalized_stdout(&output);
     assert!(!stdout.contains("`bench_api` is public"));
     assert!(
         !stdout.contains("`BenchMode::OnlyBench`"),
@@ -1012,24 +982,11 @@ fn benchmark_consumers_preserve_required_public_visibility() {
 
 #[test]
 fn exported_symbols_are_treated_as_external_roots() {
-    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/exported_symbols/Cargo.toml");
-    let target_dir = tempfile::tempdir().expect("temporary target directory");
-    let output = Command::new(env!("CARGO_BIN_EXE_cargo-hawk"))
-        .arg("--manifest-path")
-        .arg(manifest)
-        .arg("--target-dir")
-        .arg(target_dir.path())
-        .arg("--color=never")
-        .output()
-        .expect("run cargo-hawk");
+    let context = HawkTestContext::new("exported_symbols");
+    let output = context.run(&[]);
 
-    assert!(
-        output.status.success(),
-        "cargo-hawk failed:\n{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    context.assert_success(&output);
+    let stdout = context.normalized_stdout(&output);
     assert!(!stdout.contains("warning[hawk::dead_public]: `exported_callback` is public"));
     assert!(!stdout.contains("warning[hawk::dead_public]: `renamed_callback` is public"));
     assert!(stdout.contains("warning[hawk::unnecessary_public]: `exported_callback` is public"));
@@ -1038,39 +995,27 @@ fn exported_symbols_are_treated_as_external_roots() {
 
 #[test]
 fn doctest_consumers_preserve_required_public_visibility_during_fixes() {
-    let source_workspace =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/doctest_consumers");
-    let workspace = tempfile::tempdir().expect("temporary fixture workspace");
-    copy_directory(&source_workspace, workspace.path());
-    let target_dir = tempfile::tempdir().expect("temporary target directory");
-    let output = Command::new(env!("CARGO_BIN_EXE_cargo-hawk"))
-        .arg("--manifest-path")
-        .arg(workspace.path().join("Cargo.toml"))
-        .arg("--fix")
-        .arg("--allow-no-vcs")
-        .arg("--target-dir")
-        .arg(target_dir.path())
-        .arg("--color=never")
-        .output()
-        .expect("run cargo-hawk with fixes");
+    let context = HawkTestContext::new("doctest_consumers");
+    let output = context.run(&["--fix", "--allow-no-vcs"]);
 
+    context.assert_success(&output);
     assert!(
-        output.status.success(),
-        "cargo-hawk fix failed:\n{}",
-        String::from_utf8_lossy(&output.stderr)
+        context
+            .normalized_stdout(&output)
+            .contains("`unused` is public")
     );
-    assert!(String::from_utf8_lossy(&output.stdout).contains("`unused` is public"));
 
-    let doctest = Command::new("cargo")
+    let doctest = context
+        .cargo()
         .arg("test")
         .arg("--doc")
         .arg("--manifest-path")
-        .arg(workspace.path().join("Cargo.toml"))
+        .arg(context.workspace().join("Cargo.toml"))
         .arg("--package")
         .arg("library")
         .arg("--locked")
         .arg("--target-dir")
-        .arg(target_dir.path())
+        .arg(context.target_dir())
         .output()
         .expect("run doctests after fixes");
     assert!(
@@ -1079,40 +1024,23 @@ fn doctest_consumers_preserve_required_public_visibility_during_fixes() {
         String::from_utf8_lossy(&doctest.stderr)
     );
 
-    let library =
-        fs::read_to_string(workspace.path().join("library/src/lib.rs")).expect("read fixed source");
+    let library = fs::read_to_string(context.workspace().join("library/src/lib.rs"))
+        .expect("read fixed source");
     assert!(library.contains("pub fn doc_api() {}"));
     assert!(library.contains("pub fn unused() {}"));
 }
 
 #[test]
 fn fixes_grouped_public_reexports_only_when_all_aliases_are_safe() {
-    let source_workspace =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/grouped_reexport_fixes");
-    let workspace = tempfile::tempdir().expect("temporary fixture workspace");
-    copy_directory(&source_workspace, workspace.path());
-    let target_dir = tempfile::tempdir().expect("temporary target directory");
-    let output = Command::new(env!("CARGO_BIN_EXE_cargo-hawk"))
-        .arg("--manifest-path")
-        .arg(workspace.path().join("Cargo.toml"))
-        .arg("--fix")
-        .arg("--allow-no-vcs")
-        .arg("--target-dir")
-        .arg(target_dir.path())
-        .arg("--color=never")
-        .output()
-        .expect("run cargo-hawk with fixes");
+    let context = HawkTestContext::new("grouped_reexport_fixes");
+    let output = context.run(&["--fix", "--allow-no-vcs"]);
 
-    assert!(
-        output.status.success(),
-        "cargo-hawk fix failed:\n{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    context.assert_success(&output);
+    let stdout = context.normalized_stdout(&output);
     assert!(stdout.contains("public re-export `Narrow`"));
 
-    let library =
-        fs::read_to_string(workspace.path().join("library/src/lib.rs")).expect("read fixed source");
+    let library = fs::read_to_string(context.workspace().join("library/src/lib.rs"))
+        .expect("read fixed source");
     assert!(library.contains("pub use exported::{Kept, Narrow};"));
     assert!(library.contains("pub(crate) use split_consumers::{ProductionOnly, TestOnly};"));
 }
@@ -1133,8 +1061,7 @@ fn fixes_only_the_matching_cfg_alternative_declaration() {
 
 #[test]
 fn expectation_matches_cfg_alternatives_as_one_logical_item() {
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/cfg_alternative_fixes/Cargo.toml");
+    let context = HawkTestContext::new("cfg_alternative_fixes");
     let configuration = tempfile::NamedTempFile::new().expect("temporary configuration");
     fs::write(
         configuration.path(),
@@ -1153,24 +1080,15 @@ reason = "test-only alternative remains intentionally public"
 "#,
     )
     .expect("write temporary configuration");
-    let target_dir = tempfile::tempdir().expect("temporary target directory");
-    let output = Command::new(env!("CARGO_BIN_EXE_cargo-hawk"))
-        .arg("--manifest-path")
-        .arg(manifest)
+    let output = context
+        .command()
         .arg("--config")
         .arg(configuration.path())
-        .arg("--target-dir")
-        .arg(target_dir.path())
-        .arg("--color=never")
         .output()
         .expect("run cargo-hawk");
 
-    assert!(
-        output.status.success(),
-        "cargo-hawk failed:\n{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    context.assert_success(&output);
+    let stdout = context.normalized_stdout(&output);
     assert!(!stdout.contains("hawk::ambiguous_item"));
     assert!(!stdout.contains("hawk::unfulfilled_expectation"));
     assert!(!stdout.contains("hawk::unnecessary_public"));
@@ -1179,24 +1097,11 @@ reason = "test-only alternative remains intentionally public"
 
 #[test]
 fn override_does_not_suppress_a_same_named_item_in_another_crate() {
-    let manifest =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ambiguous_packages/Cargo.toml");
-    let target_dir = tempfile::tempdir().expect("temporary target directory");
-    let output = Command::new(env!("CARGO_BIN_EXE_cargo-hawk"))
-        .arg("--manifest-path")
-        .arg(manifest)
-        .arg("--target-dir")
-        .arg(target_dir.path())
-        .arg("--color=never")
-        .output()
-        .expect("run cargo-hawk");
+    let context = HawkTestContext::new("ambiguous_packages");
+    let output = context.run(&[]);
 
-    assert!(
-        output.status.success(),
-        "cargo-hawk failed:\n{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    context.assert_success(&output);
+    let stdout = context.normalized_stdout(&output);
     assert_eq!(
         stdout
             .matches("warning[hawk::dead_public]: `duplicate`")
@@ -1213,30 +1118,13 @@ fn override_does_not_suppress_a_same_named_item_in_another_crate() {
 
 #[test]
 fn removes_unnecessary_restricted_visibility_by_default() {
-    let source_workspace =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/crate_visibility_fixes");
-    let workspace = tempfile::tempdir().expect("temporary fixture workspace");
-    copy_directory(&source_workspace, workspace.path());
-    let target_dir = tempfile::tempdir().expect("temporary target directory");
-    let output = Command::new(env!("CARGO_BIN_EXE_cargo-hawk"))
-        .arg("--manifest-path")
-        .arg(workspace.path().join("Cargo.toml"))
-        .arg("--fix")
-        .arg("--allow-no-vcs")
-        .arg("--target-dir")
-        .arg(target_dir.path())
-        .arg("--color=never")
-        .output()
-        .expect("run cargo-hawk with fixes");
+    let context = HawkTestContext::new("crate_visibility_fixes");
+    let output = context.run(&["--fix", "--allow-no-vcs"]);
 
-    assert!(
-        output.status.success(),
-        "cargo-hawk fix failed:\n{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    context.assert_success(&output);
 
-    let library =
-        fs::read_to_string(workspace.path().join("library/src/lib.rs")).expect("read fixed source");
+    let library = fs::read_to_string(context.workspace().join("library/src/lib.rs"))
+        .expect("read fixed source");
     assert!(library.contains("pub(crate) fn run() {"));
     assert!(library.contains("    fn private_helper() {}"));
     assert!(library.contains("    fn private_parent_visible_helper() {}"));
@@ -1249,29 +1137,12 @@ fn removes_unnecessary_restricted_visibility_by_default() {
 
 #[test]
 fn path_modules_preserve_visibility_required_by_other_targets() {
-    let source_workspace =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/path_module_fixes");
-    let workspace = tempfile::tempdir().expect("temporary fixture workspace");
-    copy_directory(&source_workspace, workspace.path());
-    let target_dir = tempfile::tempdir().expect("temporary target directory");
-    let output = Command::new(env!("CARGO_BIN_EXE_cargo-hawk"))
-        .arg("--manifest-path")
-        .arg(workspace.path().join("Cargo.toml"))
-        .arg("--fix")
-        .arg("--allow-no-vcs")
-        .arg("--target-dir")
-        .arg(target_dir.path())
-        .arg("--color=never")
-        .output()
-        .expect("run cargo-hawk with fixes");
+    let context = HawkTestContext::new("path_module_fixes");
+    let output = context.run(&["--fix", "--allow-no-vcs"]);
 
-    assert!(
-        output.status.success(),
-        "cargo-hawk fix failed:\n{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    context.assert_success(&output);
 
-    let shared = fs::read_to_string(workspace.path().join("library/src/shared.rs"))
+    let shared = fs::read_to_string(context.workspace().join("library/src/shared.rs"))
         .expect("read fixed source");
     assert!(shared.contains("pub struct Shared"));
     assert!(shared.contains("    pub(crate) value: u8,"));
@@ -1279,32 +1150,18 @@ fn path_modules_preserve_visibility_required_by_other_targets() {
 
 #[test]
 fn narrows_crate_visibility_to_the_required_module_scope_when_enabled() {
-    let source_workspace =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/crate_visibility_fixes");
-    let workspace = tempfile::tempdir().expect("temporary fixture workspace");
-    copy_directory(&source_workspace, workspace.path());
-    let target_dir = tempfile::tempdir().expect("temporary target directory");
-    let output = Command::new(env!("CARGO_BIN_EXE_cargo-hawk"))
-        .arg("--manifest-path")
-        .arg(workspace.path().join("Cargo.toml"))
-        .arg("--fix")
-        .arg("--allow-no-vcs")
-        .arg("--target-dir")
-        .arg(target_dir.path())
-        .arg("--color=never")
-        .arg("-W")
-        .arg("hawk::unnecessary_crate_visibility")
-        .output()
-        .expect("run cargo-hawk with fixes");
+    let context = HawkTestContext::new("crate_visibility_fixes");
+    let output = context.run(&[
+        "--fix",
+        "--allow-no-vcs",
+        "-W",
+        "hawk::unnecessary_crate_visibility",
+    ]);
 
-    assert!(
-        output.status.success(),
-        "cargo-hawk fix failed:\n{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    context.assert_success(&output);
 
-    let library =
-        fs::read_to_string(workspace.path().join("library/src/lib.rs")).expect("read fixed source");
+    let library = fs::read_to_string(context.workspace().join("library/src/lib.rs"))
+        .expect("read fixed source");
     assert!(library.contains("pub(super) fn run() {"));
     assert!(library.contains("    fn private_helper() {}"));
     assert!(library.contains("    fn private_parent_visible_helper() {}"));
