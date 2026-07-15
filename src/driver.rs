@@ -31,27 +31,27 @@ use rustc_span::{BytePos, FileName, Pos};
 use crate::protocol;
 use cargo_hawk_internal::graph::{
     CollectionOptions, Definition, DefinitionId, DefinitionIdentity, DefinitionKind, Edge,
-    EdgeKind, FindingKind, FixPlan, FixTarget, Fragment, Span, VisibilityReduction,
+    EdgeKind, ExpansionSpan, FindingKind, FixPlan, FixTarget, Fragment, Span, VisibilityReduction,
 };
 
-pub fn is_protocol_version_query(args: &[String]) -> bool {
+pub(crate) fn is_protocol_version_query(args: &[String]) -> bool {
     args.get(1)
         .is_some_and(|argument| argument == protocol::VERSION_ARGUMENT)
         && args.len() == 2
 }
 
-pub fn print_protocol_version() -> ExitCode {
+pub(crate) fn print_protocol_version() -> ExitCode {
     println!("{}", protocol::VERSION);
     ExitCode::SUCCESS
 }
 
-pub fn is_wrapper_invocation(args: &[String]) -> bool {
+pub(crate) fn is_wrapper_invocation(args: &[String]) -> bool {
     env::var_os(protocol::OUTPUT_DIR_ENV).is_some()
         && env::var_os(protocol::ROOT_CRATE_ENV).is_some()
         && args.get(1).is_some()
 }
 
-pub fn run_wrapper(mut args: Vec<String>) -> ExitCode {
+pub(crate) fn run_wrapper(mut args: Vec<String>) -> ExitCode {
     if let Err(error) = validate_frontend_protocol() {
         eprintln!("hawk: {error:#}");
         return ExitCode::FAILURE;
@@ -144,11 +144,7 @@ impl Callbacks for HawkCallbacks {
         }));
     }
 
-    fn after_analysis<'tcx>(
-        &mut self,
-        _compiler: &interface::Compiler,
-        tcx: TyCtxt<'tcx>,
-    ) -> Compilation {
+    fn after_analysis(&mut self, _compiler: &interface::Compiler, tcx: TyCtxt<'_>) -> Compilation {
         if let Some(fix_plan) = &self.fix_plan {
             emit_fixes(tcx, fix_plan);
         } else if let Err(error) = emit_fragment(
@@ -218,20 +214,21 @@ fn emit_fixes(tcx: TyCtxt<'_>, fix_plan: &FixPlan) {
         }
     }
 
-    let mut emitted_spans = Vec::new();
-    for (span, kind) in &visibility_fixes {
-        let Some(kind) = kind else {
-            continue;
-        };
-        if emitted_spans.contains(span)
-            || visibility_fixes
-                .iter()
-                .any(|(other_span, kind)| other_span == span && kind.is_none())
-        {
-            continue;
+    let mut grouped_fixes = HashMap::new();
+    for (span, kind) in visibility_fixes {
+        grouped_fixes
+            .entry((source_span(tcx, span), span.hi() - span.lo()))
+            .and_modify(|(_, planned)| {
+                if *planned != kind {
+                    *planned = None;
+                }
+            })
+            .or_insert((span, kind));
+    }
+    for (_, (span, kind)) in grouped_fixes {
+        if let Some(kind) = kind {
+            emit_fix(tcx, span, kind);
         }
-        emit_fix(tcx, *span, *kind);
-        emitted_spans.push(*span);
     }
 }
 
@@ -266,11 +263,12 @@ impl<'a> FixPlanIndex<'a> {
         }
     }
 
-    fn get(&self, id: DefinitionId, identity: &DefinitionIdentity<'_>) -> Option<&'a FixTarget> {
-        self.by_id
-            .get(&id)
-            .or_else(|| self.by_identity.get(identity))
-            .copied()
+    fn get_by_id(&self, id: DefinitionId) -> Option<&'a FixTarget> {
+        self.by_id.get(&id).copied()
+    }
+
+    fn get_by_identity(&self, identity: &DefinitionIdentity<'_>) -> Option<&'a FixTarget> {
+        self.by_identity.get(identity).copied()
     }
 }
 
@@ -281,19 +279,20 @@ fn planned_fix(
     fix_plan: &FixPlanIndex<'_>,
 ) -> Option<(FindingKind, VisibilityReduction)> {
     let id = id(tcx, def_id.to_def_id());
+    if let Some(target) = fix_plan.get_by_id(id) {
+        return Some((target.kind, target.replacement));
+    }
+
     let crate_name = tcx.crate_name(LOCAL_CRATE).to_string();
     let name = definition_name(tcx, def_id, definition_kind);
     let definition_span = span(tcx, def_id);
     fix_plan
-        .get(
-            id,
-            &DefinitionIdentity::new(
-                &crate_name,
-                &name,
-                definition_kind,
-                definition_span.as_ref(),
-            ),
-        )
+        .get_by_identity(&DefinitionIdentity::new(
+            &crate_name,
+            &name,
+            definition_kind,
+            definition_span.as_ref(),
+        ))
         .map(|target| (target.kind, target.replacement))
 }
 
@@ -390,21 +389,34 @@ fn collect_fragment(
     let mut adt_members = Vec::new();
     let mut source_item_fields = Vec::new();
     let mut generated_fields = Vec::new();
+    let mut public_reexports = Vec::new();
     let crate_items = tcx.hir_crate_items(());
     let is_proc_macro_crate = tcx.crate_types().contains(&CrateType::ProcMacro);
 
     for owner in crate_items.owners() {
         let def_id = owner.def_id;
         let kind = diagnostic_kind(tcx, def_id);
+        let visibility = visibility_modifier(tcx, def_id);
+        let public_candidate = kind.is_some()
+            && is_public_candidate_with_visibility(
+                tcx,
+                def_id,
+                test_surface,
+                visibility.as_deref(),
+            );
         let public_api = kind
             .is_some_and(|kind| kind != DefinitionKind::Reexport || is_named_reexport(tcx, def_id))
-            && is_public_candidate(tcx, def_id, test_surface);
+            && public_candidate;
+        if kind == Some(DefinitionKind::Reexport) && public_candidate {
+            public_reexports.push(def_id);
+        }
         definitions.push(definition(
             tcx,
             def_id,
             &crate_name,
             kind.unwrap_or(DefinitionKind::Other),
             public_api,
+            visibility.as_deref(),
         ));
         defined.insert(def_id);
     }
@@ -427,8 +439,15 @@ fn collect_fragment(
                 );
                 for field in data.fields() {
                     let field_span = tcx.def_span(field.def_id);
+                    let visibility = visibility_modifier(tcx, field.def_id);
+                    let public_api = is_public_candidate_with_visibility(
+                        tcx,
+                        field.def_id,
+                        test_surface,
+                        visibility.as_deref(),
+                    );
                     if let Some(index) = source_item_index
-                        && is_public_candidate(tcx, field.def_id, test_surface)
+                        && public_api
                     {
                         source_item_fields[index]
                             .2
@@ -442,9 +461,12 @@ fn collect_fragment(
                         field.def_id,
                         &crate_name,
                         DefinitionKind::Field,
-                        is_public_candidate(tcx, field.def_id, test_surface),
+                        public_api,
+                        visibility.as_deref(),
                     );
-                    field_definition.uniform_field_group = uniform_field_group.clone();
+                    field_definition
+                        .uniform_field_group
+                        .clone_from(&uniform_field_group);
                     definitions.push(field_definition);
                     defined.insert(field.def_id);
                     adt_members.push((field.def_id, item.owner_id.def_id));
@@ -458,6 +480,7 @@ fn collect_fragment(
                         &crate_name,
                         DefinitionKind::EnumVariant,
                         is_public_variant(tcx, variant.def_id, test_surface),
+                        visibility_modifier(tcx, variant.def_id).as_deref(),
                     ));
                     defined.insert(variant.def_id);
                     adt_members.push((variant.def_id, item.owner_id.def_id));
@@ -475,6 +498,7 @@ fn collect_fragment(
                 &crate_name,
                 DefinitionKind::Other,
                 false,
+                visibility_modifier(tcx, def_id).as_deref(),
             ));
         }
     }
@@ -559,9 +583,9 @@ fn collect_fragment(
     }
     for item_id in crate_items.free_items() {
         let item = tcx.hir_item(item_id);
-        let data = match item.kind {
-            hir::ItemKind::Struct(_, _, data) | hir::ItemKind::Union(_, _, data) => data,
-            _ => continue,
+        let (hir::ItemKind::Struct(_, _, data) | hir::ItemKind::Union(_, _, data)) = item.kind
+        else {
+            continue;
         };
         for field in data.fields() {
             let mut visitor = ReferenceVisitor::new(
@@ -597,12 +621,7 @@ fn collect_fragment(
         let source_file = source_file_start(tcx, source_callsite);
         let source_position = source_callsite.hi().to_u32();
         let name = tcx.item_name(field.to_def_id());
-        source_item_fields
-            .iter()
-            .find(|(file_start, item_start, _)| {
-                *file_start == source_file && *item_start >= source_position
-            })?
-            .2
+        source_item_at_or_after(&source_item_fields, source_file, source_position)?
             .iter()
             .find(|(source_name, _)| *source_name == name)
             .map(|(_, source_field)| Edge {
@@ -641,6 +660,7 @@ fn collect_fragment(
         .filter(|definition| definition.kind == DefinitionKind::TypeAlias)
         .map(|definition| definition.id)
         .collect();
+    let interface_targets = type_alias_interface_targets(&edges, &type_aliases);
     let mut pending_required_public_roots: Vec<DefinitionId> = edges
         .iter()
         .filter(|edge| {
@@ -656,10 +676,11 @@ fn collect_fragment(
         }
         if type_aliases.contains(&target) {
             pending_required_public_roots.extend(
-                edges
-                    .iter()
-                    .filter(|edge| edge.kind == EdgeKind::Interface && edge.from == target)
-                    .map(|edge| edge.to),
+                interface_targets
+                    .get(&target)
+                    .into_iter()
+                    .flatten()
+                    .copied(),
             );
         } else {
             required_public_roots.push(target);
@@ -667,13 +688,6 @@ fn collect_fragment(
     }
     // Lowering the local target of a public reexport fails with E0365 while
     // the reexport remains part of the crate interface.
-    let public_reexports: Vec<LocalDefId> = crate_items
-        .owners()
-        .map(|owner| owner.def_id)
-        .filter(|def_id| {
-            tcx.def_kind(*def_id) == DefKind::Use && is_public_candidate(tcx, *def_id, test_surface)
-        })
-        .collect();
     let public_reexport_sources: HashSet<DefinitionId> = public_reexports
         .iter()
         .map(|def_id| id(tcx, def_id.to_def_id()))
@@ -754,6 +768,7 @@ fn collect_fragment(
         package_name,
         crate_name,
         crate_id,
+        crate_root: span(tcx, CRATE_DEF_ID).map(|span| span.file),
         is_product_root,
         test_surface,
         definitions,
@@ -764,15 +779,16 @@ fn collect_fragment(
     }
 }
 
-fn is_public_candidate(tcx: TyCtxt<'_>, def_id: LocalDefId, test_surface: bool) -> bool {
+fn is_public_candidate_with_visibility(
+    tcx: TyCtxt<'_>,
+    def_id: LocalDefId,
+    test_surface: bool,
+    visibility: Option<&str>,
+) -> bool {
     !tcx.def_span(def_id).from_expansion()
-        && has_visibility_modifier(tcx, def_id, "pub")
+        && visibility == Some("pub")
         && tcx.local_visibility(def_id).is_public()
         && (test_surface || tcx.effective_visibilities(()).is_exported(def_id))
-}
-
-fn has_visibility_modifier(tcx: TyCtxt<'_>, def_id: LocalDefId, expected: &str) -> bool {
-    visibility_modifier(tcx, def_id).as_deref() == Some(expected)
 }
 
 fn visibility_modifier(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Option<String> {
@@ -905,6 +921,37 @@ fn source_file_start(tcx: TyCtxt<'_>, span: rustc_span::Span) -> u32 {
         .to_u32()
 }
 
+fn source_item_at_or_after<T>(
+    source_items: &[(u32, u32, T)],
+    source_file: u32,
+    source_position: u32,
+) -> Option<&T> {
+    let index = source_items.partition_point(|(file_start, item_start, _)| {
+        (*file_start, *item_start) < (source_file, source_position)
+    });
+    let (file_start, _, item) = source_items.get(index)?;
+    (*file_start == source_file).then_some(item)
+}
+
+fn type_alias_interface_targets(
+    edges: &[Edge],
+    type_aliases: &HashSet<DefinitionId>,
+) -> HashMap<DefinitionId, Vec<DefinitionId>> {
+    let mut targets = HashMap::new();
+    if type_aliases.is_empty() {
+        return targets;
+    }
+    for edge in edges {
+        if edge.kind == EdgeKind::Interface && type_aliases.contains(&edge.from) {
+            targets
+                .entry(edge.from)
+                .or_insert_with(Vec::new)
+                .push(edge.to);
+        }
+    }
+    targets
+}
+
 fn is_public_variant(tcx: TyCtxt<'_>, def_id: LocalDefId, test_surface: bool) -> bool {
     !tcx.def_span(def_id).from_expansion()
         && (tcx.effective_visibilities(()).is_exported(def_id)
@@ -924,11 +971,10 @@ fn definition(
     crate_name: &str,
     kind: DefinitionKind,
     public_api: bool,
+    visibility: Option<&str>,
 ) -> Definition {
-    let visibility = visibility_modifier(tcx, def_id);
-    let has_explicit_visibility = visibility
-        .as_deref()
-        .is_some_and(|visibility| visibility.starts_with("pub"));
+    let has_explicit_visibility =
+        visibility.is_some_and(|visibility| visibility.starts_with("pub"));
     let restricted_visibility = (kind != DefinitionKind::Reexport
         && !tcx.def_span(def_id).from_expansion()
         && has_explicit_visibility)
@@ -941,10 +987,11 @@ fn definition(
         name: definition_name(tcx, def_id, kind),
         kind,
         span: span(tcx, def_id),
+        expansion_span: expansion_span(tcx, def_id),
         public_api,
         restricted_visible_api,
         crate_visible_api: restricted_visible_api
-            && visibility.as_deref() == Some("pub(crate)")
+            && visibility == Some("pub(crate)")
             && restricted_visibility == Some(ty::Visibility::Restricted(CRATE_DEF_ID)),
         visible_reexport_api: kind == DefinitionKind::Reexport && has_explicit_visibility,
         module_scope: module_scope(tcx, def_id),
@@ -1038,10 +1085,29 @@ fn span(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Option<Span> {
     if span.from_expansion() {
         return None;
     }
+    Some(source_span(tcx, span))
+}
+
+fn expansion_span(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Option<ExpansionSpan> {
+    let span = tcx.def_span(def_id);
+    if !span.from_expansion() || span.is_dummy() {
+        return None;
+    }
+    let callsite = span.source_callsite();
+    if callsite.is_dummy() {
+        return None;
+    }
+    Some(ExpansionSpan {
+        definition: source_span(tcx, span),
+        callsite: source_span(tcx, callsite),
+    })
+}
+
+fn source_span(tcx: TyCtxt<'_>, span: rustc_span::Span) -> Span {
     let location = tcx.sess.source_map().lookup_char_pos(span.lo());
-    Some(Span {
+    Span {
         file: normalize_source_path(
-            location
+            &location
                 .file
                 .name
                 .prefer_local_unconditionally()
@@ -1049,10 +1115,10 @@ fn span(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Option<Span> {
         ),
         line: location.line,
         column: location.col.to_usize() + 1,
-    })
+    }
 }
 
-fn normalize_source_path(path: String) -> String {
+fn normalize_source_path(path: &str) -> String {
     let mut normalized = PathBuf::new();
     for component in Path::new(&path).components() {
         match component {
@@ -1266,15 +1332,17 @@ impl<'tcx> Visitor<'tcx> for ReferenceVisitor<'tcx> {
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
+    use std::collections::HashSet;
     use std::ffi::OsStr;
     use std::io::{self, Write};
     use std::path::Path;
 
     use super::{
         compact_visibility_modifier, normalize_source_path, parse_collection_options,
-        uniform_field_group, validate_frontend_protocol_version, write_fragment,
+        source_item_at_or_after, type_alias_interface_targets, uniform_field_group,
+        validate_frontend_protocol_version, write_fragment,
     };
-    use cargo_hawk_internal::graph::{CollectionOptions, Fragment};
+    use cargo_hawk_internal::graph::{CollectionOptions, Edge, EdgeKind, Fragment};
 
     struct FailingWriter;
 
@@ -1295,7 +1363,7 @@ mod tests {
 
         assert_eq!(
             error.to_string(),
-            "Hawk frontend uses compiler driver protocol 1, but this driver uses protocol 3; install `cargo-hawk` and `cargo-hawk-driver` from the same release"
+            "Hawk frontend uses compiler driver protocol 1, but this driver uses protocol 5; install `cargo-hawk` and `cargo-hawk-driver` from the same release"
         );
     }
 
@@ -1306,6 +1374,7 @@ mod tests {
             package_name: "library".into(),
             crate_name: "library".into(),
             crate_id: cargo_hawk_internal::graph::DefinitionId::new(0, 1),
+            crate_root: Some("library/src/lib.rs".into()),
             is_product_root: false,
             test_surface: false,
             definitions: vec![],
@@ -1370,6 +1439,50 @@ mod tests {
     }
 
     #[test]
+    fn source_item_lookup_stays_within_the_matching_file() {
+        let items = [(10, 20, "first"), (10, 40, "second"), (50, 60, "third")];
+
+        assert_eq!(source_item_at_or_after(&items, 10, 1), Some(&"first"));
+        assert_eq!(source_item_at_or_after(&items, 10, 20), Some(&"first"));
+        assert_eq!(source_item_at_or_after(&items, 10, 21), Some(&"second"));
+        assert_eq!(source_item_at_or_after(&items, 10, 41), None);
+        assert_eq!(source_item_at_or_after(&items, 20, 1), None);
+        assert_eq!(source_item_at_or_after(&items, 50, 60), Some(&"third"));
+        assert_eq!(source_item_at_or_after(&items, 50, 61), None);
+    }
+
+    #[test]
+    fn interface_target_index_only_contains_type_alias_sources() {
+        let alias = cargo_hawk_internal::graph::DefinitionId::new(0, 1);
+        let target = cargo_hawk_internal::graph::DefinitionId::new(0, 2);
+        let function = cargo_hawk_internal::graph::DefinitionId::new(0, 3);
+        let argument = cargo_hawk_internal::graph::DefinitionId::new(0, 4);
+        let body_target = cargo_hawk_internal::graph::DefinitionId::new(0, 5);
+        let edges = [
+            Edge {
+                from: alias,
+                to: target,
+                kind: EdgeKind::Interface,
+            },
+            Edge {
+                from: function,
+                to: argument,
+                kind: EdgeKind::Interface,
+            },
+            Edge {
+                from: alias,
+                to: body_target,
+                kind: EdgeKind::Body,
+            },
+        ];
+
+        let targets = type_alias_interface_targets(&edges, &[alias].into_iter().collect());
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets.get(&alias), Some(&vec![target]));
+        assert!(type_alias_interface_targets(&edges, &HashSet::new()).is_empty());
+    }
+
+    #[test]
     fn visibility_modifier_compaction_ignores_whitespace_and_comments() {
         assert_eq!(
             compact_visibility_modifier("pub /* outer /* nested */ comment */ ( crate )"),
@@ -1385,9 +1498,9 @@ mod tests {
     #[test]
     fn source_paths_are_lexically_normalized() {
         assert_eq!(
-            normalize_source_path("library/tests/../src/shared.rs".into()),
+            normalize_source_path("library/tests/../src/shared.rs"),
             "library/src/shared.rs"
         );
-        assert_eq!(normalize_source_path("../shared.rs".into()), "../shared.rs");
+        assert_eq!(normalize_source_path("../shared.rs"), "../shared.rs");
     }
 }

@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::fmt::{self, Display, Formatter};
 
-use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 
 use crate::protocol::ProtocolVersion;
@@ -49,6 +49,7 @@ pub struct Fragment {
     pub package_name: String,
     pub crate_name: String,
     pub crate_id: DefinitionId,
+    pub crate_root: Option<String>,
     pub is_product_root: bool,
     pub test_surface: bool,
     pub definitions: Vec<Definition>,
@@ -85,6 +86,7 @@ pub struct Definition {
     pub name: String,
     pub kind: DefinitionKind,
     pub span: Option<Span>,
+    pub expansion_span: Option<ExpansionSpan>,
     pub public_api: bool,
     pub restricted_visible_api: bool,
     pub crate_visible_api: bool,
@@ -155,6 +157,13 @@ pub struct Span {
     pub file: String,
     pub line: usize,
     pub column: usize,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExpansionSpan {
+    pub definition: Span,
+    pub callsite: Span,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -254,11 +263,35 @@ impl<'a> DefinitionIdentity<'a> {
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct SourceDefinitionIdentity<'a> {
+    package_name: Option<&'a str>,
+    crate_name: Option<&'a str>,
+    crate_root: Option<&'a str>,
     name: Option<&'a str>,
     kind: DefinitionKind,
-    file: Option<&'a str>,
-    line: Option<usize>,
-    column: Option<usize>,
+    span: Option<&'a Span>,
+    expansion_span: Option<&'a ExpansionSpan>,
+}
+
+#[derive(Default)]
+struct EquivalenceGroups {
+    groups: Vec<Vec<DefinitionId>>,
+    group_by_id: FxHashMap<DefinitionId, usize>,
+}
+
+impl EquivalenceGroups {
+    fn group(&self, id: DefinitionId) -> &[DefinitionId] {
+        self.group_by_id
+            .get(&id)
+            .map_or(&[], |group| &self.groups[*group])
+    }
+
+    fn push(&mut self, group: Vec<DefinitionId>) {
+        let group_id = self.groups.len();
+        for id in &group {
+            self.group_by_id.insert(*id, group_id);
+        }
+        self.groups.push(group);
+    }
 }
 
 pub fn analyze<'a>(
@@ -288,12 +321,12 @@ pub fn analyze_with_options<'a>(
         .chain(test_fragments)
         .flat_map(|fragment| &fragment.definitions)
         .collect();
-    let definitions: HashMap<DefinitionId, &Definition> = observed_definitions
+    let definitions: FxHashMap<DefinitionId, &Definition> = observed_definitions
         .iter()
         .copied()
         .map(|definition| (definition.id, definition))
         .collect();
-    let definition_crate_ids: HashMap<DefinitionId, DefinitionId> = production_fragments
+    let definition_crate_ids: FxHashMap<DefinitionId, DefinitionId> = production_fragments
         .iter()
         .chain(test_fragments)
         .flat_map(|fragment| {
@@ -303,7 +336,7 @@ pub fn analyze_with_options<'a>(
                 .map(|definition| (definition.id, fragment.crate_id))
         })
         .collect();
-    let definition_compilation_ids: HashMap<DefinitionId, usize> = production_fragments
+    let definition_compilation_ids: FxHashMap<DefinitionId, usize> = production_fragments
         .iter()
         .chain(test_fragments)
         .enumerate()
@@ -312,6 +345,16 @@ pub fn analyze_with_options<'a>(
                 .definitions
                 .iter()
                 .map(move |definition| (definition.id, compilation_id))
+        })
+        .collect();
+    let definition_fragments: FxHashMap<DefinitionId, &Fragment> = production_fragments
+        .iter()
+        .chain(test_fragments)
+        .flat_map(|fragment| {
+            fragment
+                .definitions
+                .iter()
+                .map(move |definition| (definition.id, fragment))
         })
         .collect();
     let production_edges: Vec<&Edge> = production_fragments
@@ -327,14 +370,26 @@ pub fn analyze_with_options<'a>(
         .chain(&test_edges)
         .copied()
         .collect();
-    let equivalents = equivalent_definitions(&definitions, &definition_compilation_ids);
+    let reexport_targets = reexport_index(&edges);
+    let production_reexport_targets = reexport_index(&production_edges);
+    let test_reexport_targets = reexport_index(&test_edges);
+    // Repeated `#[path]` modules compile independent definitions from the same
+    // source. They must not share liveness, but any visibility edit affects all
+    // of them and must account for every use.
+    let (equivalents, visibility_equivalents) = equivalent_definitions(
+        &definitions,
+        &definition_compilation_ids,
+        &definition_fragments,
+    );
     let required_scopes = required_scopes(&definitions, &edges, &equivalents);
-    let production_definition_ids: HashSet<DefinitionId> = production_fragments
+    let visibility_finding_kinds =
+        visibility_finding_kinds(&definitions, &required_scopes, &visibility_equivalents);
+    let production_definition_ids: FxHashSet<DefinitionId> = production_fragments
         .iter()
         .flat_map(|fragment| &fragment.definitions)
         .map(|definition| definition.id)
         .collect();
-    let test_definition_ids: HashSet<DefinitionId> = test_fragments
+    let test_definition_ids: FxHashSet<DefinitionId> = test_fragments
         .iter()
         .flat_map(|fragment| &fragment.definitions)
         .map(|definition| definition.id)
@@ -364,25 +419,27 @@ pub fn analyze_with_options<'a>(
         );
     let tests = reachable(test_roots, &test_adjacency);
 
-    let mut explicitly_required: HashSet<DefinitionId> = production_fragments
+    let mut explicitly_required: FxHashSet<DefinitionId> = production_fragments
         .iter()
         .chain(test_fragments)
         .flat_map(|fragment| fragment.required_public_roots.iter().copied())
         .collect();
-    let no_explicitly_required = HashSet::default();
+    let no_explicitly_required = FxHashSet::default();
+    let interface_adjacency = interface_adjacency(&definitions, &edges, &visibility_equivalents);
     let externally_required_visibility = required_public_visibility(
-        &definitions,
         &definition_crate_ids,
         &edges,
-        &equivalents,
+        &interface_adjacency,
         &no_explicitly_required,
     );
     for definition in definitions
         .values()
         .filter(|definition| definition.public_api && definition.kind == DefinitionKind::Reexport)
     {
-        let targets = reexport_targets(definition.id, &edges);
-        if !is_analyzable_reexport(&targets, &definitions)
+        let targets = reexport_targets
+            .get(&definition.id)
+            .map_or(&[][..], Vec::as_slice);
+        if !is_analyzable_reexport(targets, &definitions)
             || targets
                 .iter()
                 .any(|target| externally_required_visibility.contains(target))
@@ -391,39 +448,38 @@ pub fn analyze_with_options<'a>(
         }
     }
     let required_public_visibility = required_public_visibility(
-        &definitions,
         &definition_crate_ids,
         &edges,
-        &equivalents,
+        &interface_adjacency,
         &explicitly_required,
     );
 
     let mut findings = Vec::new();
-    let mut reported = HashSet::default();
-    let production_definitions: HashSet<_> = production_fragments
+    let mut reported = FxHashSet::default();
+    let production_definitions: FxHashSet<_> = production_fragments
         .iter()
         .flat_map(|fragment| &fragment.definitions)
         .map(definition_identity)
         .collect();
-    let production_candidates: HashSet<_> = production_fragments
+    let production_candidates: FxHashSet<_> = production_fragments
         .iter()
         .flat_map(|fragment| &fragment.definitions)
         .filter(|definition| definition.public_api)
         .map(definition_identity)
         .collect();
-    let production_restricted_visible_candidates: HashSet<_> = production_fragments
+    let production_restricted_visible_candidates: FxHashSet<_> = production_fragments
         .iter()
         .flat_map(|fragment| &fragment.definitions)
         .filter(|definition| definition.restricted_visible_api)
         .map(definition_identity)
         .collect();
-    let production_root_definitions: HashSet<_> = production_fragments
+    let production_root_definitions: FxHashSet<_> = production_fragments
         .iter()
         .filter(|fragment| fragment.is_product_root)
         .flat_map(|fragment| &fragment.definitions)
         .map(definition_identity)
         .collect();
-    let non_production_root_definitions: HashSet<_> = test_fragments
+    let non_production_root_definitions: FxHashSet<_> = test_fragments
         .iter()
         .filter(|fragment| fragment.is_product_root && !fragment.test_surface)
         .flat_map(|fragment| &fragment.definitions)
@@ -459,8 +515,13 @@ pub fn analyze_with_options<'a>(
         }
 
         let test_compiled_only = !production_definitions.contains(&identity);
-        let is_production_live = is_live(definition, &production_edges, &production, &equivalents);
-        let is_test_live = is_live(definition, &test_edges, &tests, &equivalents);
+        let is_production_live = is_live(
+            definition,
+            &production_reexport_targets,
+            &production,
+            &equivalents,
+        );
+        let is_test_live = is_live(definition, &test_reexport_targets, &tests, &equivalents);
         if !is_production_live && !is_test_live {
             findings.push(Finding {
                 kind: FindingKind::DeadPublic,
@@ -507,15 +568,23 @@ pub fn analyze_with_options<'a>(
             continue;
         }
 
-        let Some(kind) =
-            restricted_visibility_finding_kind(definition, &required_scopes, &equivalents)
-        else {
+        let Some(kind) = restricted_visibility_finding_kind(
+            definition,
+            &required_scopes,
+            &visibility_equivalents,
+            &visibility_finding_kinds,
+        ) else {
             continue;
         };
         reported.insert(identity);
         let test_compiled_only = !production_definitions.contains(&identity);
-        let is_production_live = is_live(definition, &production_edges, &production, &equivalents);
-        let is_test_live = is_live(definition, &test_edges, &tests, &equivalents);
+        let is_production_live = is_live(
+            definition,
+            &production_reexport_targets,
+            &production,
+            &equivalents,
+        );
+        let is_test_live = is_live(definition, &test_reexport_targets, &tests, &equivalents);
         findings.push(Finding {
             kind,
             definition,
@@ -530,7 +599,8 @@ pub fn analyze_with_options<'a>(
             &observed_definitions,
             &required_public_visibility,
             &required_scopes,
-            &equivalents,
+            &visibility_equivalents,
+            &visibility_finding_kinds,
         );
     }
 
@@ -549,21 +619,19 @@ pub fn analyze_with_options<'a>(
     findings
 }
 
-fn field_group_identity(definition: &Definition) -> Option<(&str, &Span)> {
-    Some((
-        definition.crate_name.as_str(),
-        definition.uniform_field_group.as_ref()?,
-    ))
+fn field_group_identity(definition: &Definition) -> Option<&Span> {
+    definition.uniform_field_group.as_ref()
 }
 
 fn suppress_uniform_field_visibility_findings<'a>(
     findings: &mut Vec<Finding<'a>>,
-    definitions: &[&'a Definition],
-    required_public_visibility: &HashSet<DefinitionId>,
-    required_scopes: &HashMap<DefinitionId, RequiredScope>,
-    equivalents: &HashMap<DefinitionId, Vec<DefinitionId>>,
+    observed_definitions: &[&'a Definition],
+    required_public_visibility: &FxHashSet<DefinitionId>,
+    required_scopes: &FxHashMap<DefinitionId, RequiredScope>,
+    equivalents: &EquivalenceGroups,
+    visibility_finding_kinds: &[Option<FindingKind>],
 ) {
-    let protected_groups: HashSet<_> = definitions
+    let protected_groups: FxHashSet<_> = observed_definitions
         .iter()
         .filter_map(|definition| {
             let identity = field_group_identity(definition)?;
@@ -574,6 +642,7 @@ fn suppress_uniform_field_visibility_findings<'a>(
                     definition,
                     required_scopes,
                     equivalents,
+                    visibility_finding_kinds,
                 )
             } else {
                 false
@@ -593,20 +662,61 @@ fn suppress_uniform_field_visibility_findings<'a>(
 
 fn has_known_restricted_visibility_requirement(
     definition: &Definition,
-    required_scopes: &HashMap<DefinitionId, RequiredScope>,
-    equivalents: &HashMap<DefinitionId, Vec<DefinitionId>>,
+    required_scopes: &FxHashMap<DefinitionId, RequiredScope>,
+    equivalents: &EquivalenceGroups,
+    visibility_finding_kinds: &[Option<FindingKind>],
 ) -> bool {
-    let required_scope = merged_required_scope(definition, required_scopes, equivalents);
+    let required_scope = required_scopes.get(&definition.id);
     matches!(
-        &required_scope,
-        RequiredScope::Known { crate_name, .. } if crate_name == &definition.crate_name
-    ) && restricted_visibility_finding_kind(definition, required_scopes, equivalents).is_none()
+        required_scope,
+        Some(RequiredScope::Known { crate_name, .. }) if crate_name == &definition.crate_name
+    ) && restricted_visibility_finding_kind(
+        definition,
+        required_scopes,
+        equivalents,
+        visibility_finding_kinds,
+    )
+    .is_none()
 }
 
 fn restricted_visibility_finding_kind(
     definition: &Definition,
-    required_scopes: &HashMap<DefinitionId, RequiredScope>,
-    equivalents: &HashMap<DefinitionId, Vec<DefinitionId>>,
+    required_scopes: &FxHashMap<DefinitionId, RequiredScope>,
+    equivalents: &EquivalenceGroups,
+    visibility_finding_kinds: &[Option<FindingKind>],
+) -> Option<FindingKind> {
+    equivalents.group_by_id.get(&definition.id).map_or_else(
+        || restricted_visibility_finding_kind_for_instance(definition, required_scopes),
+        |group| visibility_finding_kinds[*group],
+    )
+}
+
+fn visibility_finding_kinds(
+    definitions: &FxHashMap<DefinitionId, &Definition>,
+    required_scopes: &FxHashMap<DefinitionId, RequiredScope>,
+    equivalents: &EquivalenceGroups,
+) -> Vec<Option<FindingKind>> {
+    equivalents
+        .groups
+        .iter()
+        .map(|group| {
+            let mut result = FindingKind::UnnecessaryRestrictedVisibility;
+            for id in group {
+                let definition = definitions.get(id)?;
+                let kind =
+                    restricted_visibility_finding_kind_for_instance(definition, required_scopes)?;
+                if kind == FindingKind::UnnecessaryCrateVisibility {
+                    result = kind;
+                }
+            }
+            Some(result)
+        })
+        .collect()
+}
+
+fn restricted_visibility_finding_kind_for_instance(
+    definition: &Definition,
+    required_scopes: &FxHashMap<DefinitionId, RequiredScope>,
 ) -> Option<FindingKind> {
     if matches!(
         definition.kind,
@@ -615,14 +725,14 @@ fn restricted_visibility_finding_kind(
         return None;
     }
 
-    match merged_required_scope(definition, required_scopes, equivalents) {
-        RequiredScope::Bottom => Some(FindingKind::UnnecessaryRestrictedVisibility),
-        RequiredScope::Unknown => None,
-        RequiredScope::Known {
+    match required_scopes.get(&definition.id) {
+        None | Some(RequiredScope::Bottom) => Some(FindingKind::UnnecessaryRestrictedVisibility),
+        Some(RequiredScope::Unknown) => None,
+        Some(RequiredScope::Known {
             crate_name,
             module_scope,
-        } => {
-            if crate_name != definition.crate_name {
+        }) => {
+            if crate_name != &definition.crate_name {
                 return None;
             }
             if module_scope.starts_with(&definition.module_scope) {
@@ -637,26 +747,6 @@ fn restricted_visibility_finding_kind(
             None
         }
     }
-}
-
-fn merged_required_scope(
-    definition: &Definition,
-    required_scopes: &HashMap<DefinitionId, RequiredScope>,
-    equivalents: &HashMap<DefinitionId, Vec<DefinitionId>>,
-) -> RequiredScope {
-    let mut required_scope = RequiredScope::default();
-    for id in std::iter::once(definition.id).chain(
-        equivalents
-            .get(&definition.id)
-            .into_iter()
-            .flatten()
-            .copied(),
-    ) {
-        if let Some(scope) = required_scopes.get(&id) {
-            required_scope.merge(scope);
-        }
-    }
-    required_scope
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -728,12 +818,12 @@ impl RequiredScope {
 }
 
 fn required_scopes(
-    definitions: &HashMap<DefinitionId, &Definition>,
+    definitions: &FxHashMap<DefinitionId, &Definition>,
     edges: &[&Edge],
-    equivalents: &HashMap<DefinitionId, Vec<DefinitionId>>,
-) -> HashMap<DefinitionId, RequiredScope> {
-    let mut required_scopes: HashMap<DefinitionId, RequiredScope> = HashMap::default();
-    let mut propagation: HashMap<DefinitionId, Vec<DefinitionId>> = HashMap::default();
+    equivalents: &EquivalenceGroups,
+) -> FxHashMap<DefinitionId, RequiredScope> {
+    let mut required_scopes: FxHashMap<DefinitionId, RequiredScope> = FxHashMap::default();
+    let mut propagation: FxHashMap<DefinitionId, Vec<DefinitionId>> = FxHashMap::default();
     let mut pending = VecDeque::new();
     for edge in edges {
         if edge.from == edge.to || !definitions.contains_key(&edge.to) {
@@ -761,12 +851,7 @@ fn required_scopes(
             propagation.entry(edge.from).or_default().push(edge.to);
         }
     }
-    for (source, targets) in equivalents {
-        propagation
-            .entry(*source)
-            .or_default()
-            .extend(targets.iter().copied());
-    }
+    extend_equivalence_edges(&mut propagation, equivalents, None);
     while let Some(source) = pending.pop_front() {
         let Some(required_scope) = required_scopes.get(&source).cloned() else {
             continue;
@@ -796,18 +881,14 @@ fn propagates_visibility_requirement(kind: EdgeKind) -> bool {
 
 fn is_live(
     definition: &Definition,
-    edges: &[&Edge],
-    reachable: &HashSet<DefinitionId>,
-    equivalents: &HashMap<DefinitionId, Vec<DefinitionId>>,
+    reexport_targets: &FxHashMap<DefinitionId, Vec<DefinitionId>>,
+    reachable: &FxHashSet<DefinitionId>,
+    equivalents: &EquivalenceGroups,
 ) -> bool {
-    let equivalent_ids = equivalents
-        .get(&definition.id)
-        .into_iter()
-        .flatten()
-        .copied();
+    let equivalent_ids = equivalents.group(definition.id).iter().copied();
     let ids = std::iter::once(definition.id).chain(equivalent_ids);
     if definition.kind == DefinitionKind::Reexport {
-        ids.flat_map(|id| reexport_targets(id, edges))
+        ids.flat_map(|id| reexport_targets.get(&id).into_iter().flatten().copied())
             .any(|target| reachable.contains(&target))
     } else {
         ids.into_iter().any(|id| reachable.contains(&id))
@@ -815,59 +896,51 @@ fn is_live(
 }
 
 fn required_public_visibility(
-    definitions: &HashMap<DefinitionId, &Definition>,
-    definition_crate_ids: &HashMap<DefinitionId, DefinitionId>,
+    definition_crate_ids: &FxHashMap<DefinitionId, DefinitionId>,
     edges: &[&Edge],
-    equivalents: &HashMap<DefinitionId, Vec<DefinitionId>>,
-    explicitly_required: &HashSet<DefinitionId>,
-) -> HashSet<DefinitionId> {
-    let mut required = explicitly_required.clone();
+    interface_adjacency: &FxHashMap<DefinitionId, Vec<DefinitionId>>,
+    explicitly_required: &FxHashSet<DefinitionId>,
+) -> FxHashSet<DefinitionId> {
     // Rust privacy-checks every compiled item, including items outside the
     // selected product's runtime reachability graph.
-    required.extend(edges.iter().filter_map(|edge| {
-        let from = definition_crate_ids.get(&edge.from)?;
-        let to = definition_crate_ids.get(&edge.to)?;
-        (from != to).then_some(edge.to)
-    }));
+    let roots = explicitly_required
+        .iter()
+        .copied()
+        .chain(edges.iter().filter_map(|edge| {
+            let from = definition_crate_ids.get(&edge.from)?;
+            let to = definition_crate_ids.get(&edge.to)?;
+            (from != to).then_some(edge.to)
+        }));
 
-    let mut interface_edges: HashMap<DefinitionId, Vec<DefinitionId>> = HashMap::default();
-    for edge in edges {
-        if propagates_visibility_requirement(edge.kind) && definitions.contains_key(&edge.to) {
-            interface_edges.entry(edge.from).or_default().push(edge.to);
-        }
-    }
-    for (source, targets) in equivalents {
-        interface_edges
-            .entry(*source)
-            .or_default()
-            .extend(targets.iter().copied());
-    }
-
-    let mut pending: Vec<DefinitionId> = required.iter().copied().collect();
-    while let Some(from) = pending.pop() {
-        if let Some(targets) = interface_edges.get(&from) {
-            for target in targets {
-                if required.insert(*target) {
-                    pending.push(*target);
-                }
-            }
-        }
-    }
-
-    required
+    reachable(roots, interface_adjacency)
 }
 
-fn reexport_targets(source: DefinitionId, edges: &[&Edge]) -> Vec<DefinitionId> {
-    edges
-        .iter()
-        .filter(|edge| edge.kind == EdgeKind::Reexport && edge.from == source)
-        .map(|edge| edge.to)
-        .collect()
+fn interface_adjacency(
+    definitions: &FxHashMap<DefinitionId, &Definition>,
+    edges: &[&Edge],
+    equivalents: &EquivalenceGroups,
+) -> FxHashMap<DefinitionId, Vec<DefinitionId>> {
+    let mut adjacency: FxHashMap<DefinitionId, Vec<DefinitionId>> = FxHashMap::default();
+    for edge in edges {
+        if propagates_visibility_requirement(edge.kind) && definitions.contains_key(&edge.to) {
+            adjacency.entry(edge.from).or_default().push(edge.to);
+        }
+    }
+    extend_equivalence_edges(&mut adjacency, equivalents, None);
+    adjacency
+}
+
+fn reexport_index(edges: &[&Edge]) -> FxHashMap<DefinitionId, Vec<DefinitionId>> {
+    let mut reexports: FxHashMap<DefinitionId, Vec<DefinitionId>> = FxHashMap::default();
+    for edge in edges.iter().filter(|edge| edge.kind == EdgeKind::Reexport) {
+        reexports.entry(edge.from).or_default().push(edge.to);
+    }
+    reexports
 }
 
 fn is_analyzable_reexport(
     targets: &[DefinitionId],
-    definitions: &HashMap<DefinitionId, &Definition>,
+    definitions: &FxHashMap<DefinitionId, &Definition>,
 ) -> bool {
     !targets.is_empty()
         && targets.iter().all(|target| {
@@ -890,65 +963,78 @@ fn is_analyzable_reexport(
 
 fn adjacency(
     edges: &[&Edge],
-    equivalents: &HashMap<DefinitionId, Vec<DefinitionId>>,
-    definition_ids: &HashSet<DefinitionId>,
-) -> HashMap<DefinitionId, Vec<DefinitionId>> {
-    let mut adjacency: HashMap<DefinitionId, Vec<DefinitionId>> = HashMap::default();
+    equivalents: &EquivalenceGroups,
+    definition_ids: &FxHashSet<DefinitionId>,
+) -> FxHashMap<DefinitionId, Vec<DefinitionId>> {
+    let mut adjacency: FxHashMap<DefinitionId, Vec<DefinitionId>> = FxHashMap::default();
     for edge in edges {
         if edge.kind == EdgeKind::VisibilityRequirement {
             continue;
         }
         adjacency.entry(edge.from).or_default().push(edge.to);
     }
-    for (source, targets) in equivalents {
-        if definition_ids.contains(source) {
-            adjacency.entry(*source).or_default().extend(
-                targets
-                    .iter()
-                    .copied()
-                    .filter(|target| definition_ids.contains(target)),
-            );
-        }
-    }
+    extend_equivalence_edges(&mut adjacency, equivalents, Some(definition_ids));
     adjacency
 }
 
 fn equivalent_definitions<'a>(
-    definitions: &HashMap<DefinitionId, &'a Definition>,
-    definition_compilation_ids: &HashMap<DefinitionId, usize>,
-) -> HashMap<DefinitionId, Vec<DefinitionId>> {
-    let mut groups: HashMap<SourceDefinitionIdentity<'a>, Vec<(DefinitionId, usize)>> =
-        HashMap::default();
+    definitions: &FxHashMap<DefinitionId, &'a Definition>,
+    definition_compilation_ids: &FxHashMap<DefinitionId, usize>,
+    definition_fragments: &FxHashMap<DefinitionId, &'a Fragment>,
+) -> (EquivalenceGroups, EquivalenceGroups) {
+    let mut groups: FxHashMap<SourceDefinitionIdentity<'a>, Vec<(DefinitionId, usize)>> =
+        FxHashMap::default();
     for definition in definitions.values() {
+        let Some(identity) =
+            source_definition_identity(definition, definition_fragments[&definition.id])
+        else {
+            continue;
+        };
         groups
-            .entry(source_definition_identity(definition))
+            .entry(identity)
             .or_default()
             .push((definition.id, definition_compilation_ids[&definition.id]));
     }
 
-    let mut equivalents: HashMap<DefinitionId, Vec<DefinitionId>> = HashMap::default();
-    for group in groups.values().filter(|group| {
-        group.len() > 1
-            && group
-                .iter()
-                .map(|(_, compilation_id)| compilation_id)
-                .collect::<HashSet<_>>()
-                .len()
-                == group.len()
-    }) {
-        for source in group {
-            equivalents.entry(source.0).or_default().extend(
-                group
-                    .iter()
-                    .map(|target| target.0)
-                    .filter(|target| target != &source.0),
-            );
+    let mut equivalents = EquivalenceGroups::default();
+    let mut visibility_equivalents = EquivalenceGroups::default();
+    for group in groups.into_values().filter(|group| group.len() > 1) {
+        let mut compilation_ids = FxHashSet::default();
+        let share_liveness = group
+            .iter()
+            .all(|(_, compilation_id)| compilation_ids.insert(*compilation_id));
+        let group = group.into_iter().map(|(id, _)| id).collect::<Vec<_>>();
+        if share_liveness {
+            equivalents.push(group.clone());
         }
+        visibility_equivalents.push(group);
     }
-    equivalents
+    (equivalents, visibility_equivalents)
 }
 
-fn definition_identity<'a>(definition: &'a Definition) -> DefinitionIdentity<'a> {
+fn extend_equivalence_edges(
+    adjacency: &mut FxHashMap<DefinitionId, Vec<DefinitionId>>,
+    equivalents: &EquivalenceGroups,
+    definition_ids: Option<&FxHashSet<DefinitionId>>,
+) {
+    for group in &equivalents.groups {
+        let mut ids = group
+            .iter()
+            .copied()
+            .filter(|id| definition_ids.is_none_or(|definition_ids| definition_ids.contains(id)));
+        let Some(source) = ids.next() else {
+            continue;
+        };
+        // A bidirectional star preserves reachability while keeping each
+        // physical-source group linear.
+        for target in ids {
+            adjacency.entry(source).or_default().push(target);
+            adjacency.entry(target).or_default().push(source);
+        }
+    }
+}
+
+fn definition_identity(definition: &Definition) -> DefinitionIdentity<'_> {
     DefinitionIdentity::new(
         &definition.crate_name,
         &definition.name,
@@ -957,24 +1043,43 @@ fn definition_identity<'a>(definition: &'a Definition) -> DefinitionIdentity<'a>
     )
 }
 
-fn source_definition_identity<'a>(definition: &'a Definition) -> SourceDefinitionIdentity<'a> {
-    SourceDefinitionIdentity {
+fn source_definition_identity<'a>(
+    definition: &'a Definition,
+    fragment: &'a Fragment,
+) -> Option<SourceDefinitionIdentity<'a>> {
+    if definition.span.is_none() && definition.expansion_span.is_none() {
+        return None;
+    }
+
+    Some(SourceDefinitionIdentity {
+        package_name: definition
+            .span
+            .is_none()
+            .then_some(fragment.package_name.as_str()),
+        crate_name: definition
+            .span
+            .is_none()
+            .then_some(definition.crate_name.as_str()),
+        crate_root: definition
+            .span
+            .is_none()
+            .then_some(fragment.crate_root.as_deref())
+            .flatten(),
         name: definition
             .span
             .is_none()
             .then_some(definition.name.as_str()),
         kind: definition.kind,
-        file: definition.span.as_ref().map(|span| span.file.as_str()),
-        line: definition.span.as_ref().map(|span| span.line),
-        column: definition.span.as_ref().map(|span| span.column),
-    }
+        span: definition.span.as_ref(),
+        expansion_span: definition.expansion_span.as_ref(),
+    })
 }
 
 fn reachable(
     roots: impl IntoIterator<Item = DefinitionId>,
-    adjacency: &HashMap<DefinitionId, Vec<DefinitionId>>,
-) -> HashSet<DefinitionId> {
-    let mut live = HashSet::default();
+    adjacency: &FxHashMap<DefinitionId, Vec<DefinitionId>>,
+) -> FxHashSet<DefinitionId> {
+    let mut live = FxHashSet::default();
     let mut pending: Vec<DefinitionId> = roots.into_iter().collect();
     while let Some(id) = pending.pop() {
         if live.insert(id)
@@ -989,16 +1094,18 @@ fn reachable(
 #[cfg(test)]
 mod tests {
     use super::{
-        Definition, DefinitionId, DefinitionKind, Edge, EdgeKind, Finding, FindingKind, Fragment,
-        RequiredScope, Span, VisibilityReduction, analyze as analyze_with_tests,
-        analyze_with_options,
+        Definition, DefinitionId, DefinitionKind, Edge, EdgeKind, ExpansionSpan, Finding,
+        FindingKind, Fragment, RequiredScope, Span, VisibilityReduction, adjacency,
+        analyze as analyze_with_tests, analyze_with_options, equivalent_definitions,
+        extend_equivalence_edges, reachable, reexport_index,
     };
     use crate::protocol::ProtocolVersion;
+    use rustc_hash::{FxHashMap, FxHashSet};
     use std::collections::HashSet;
 
     fn test_id(value: &str) -> DefinitionId {
-        let hash = value.bytes().fold(0xcbf29ce484222325_u64, |hash, byte| {
-            (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
+        let hash = value.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
         });
         DefinitionId::new(0, hash)
     }
@@ -1010,7 +1117,7 @@ mod tests {
         analyze_with_tests(fragments, &[], &candidate_crates(), excluded_crates)
     }
 
-    fn analyze_preserving_uniform_fields<'a>(fragments: &'a [Fragment]) -> Vec<Finding<'a>> {
+    fn analyze_preserving_uniform_fields(fragments: &[Fragment]) -> Vec<Finding<'_>> {
         analyze_with_options(fragments, &[], &candidate_crates(), &HashSet::new(), true)
     }
 
@@ -1107,6 +1214,7 @@ mod tests {
             name: id.into(),
             kind: DefinitionKind::Function,
             span: None,
+            expansion_span: None,
             public_api,
             restricted_visible_api: false,
             crate_visible_api: false,
@@ -1152,6 +1260,30 @@ mod tests {
         definition
     }
 
+    fn source(mut definition: Definition, line: usize) -> Definition {
+        definition.span = Some(Span {
+            file: "lib/src/lib.rs".into(),
+            line,
+            column: 1,
+        });
+        definition
+    }
+
+    fn expansion(definition_line: usize, callsite_line: usize) -> ExpansionSpan {
+        ExpansionSpan {
+            definition: Span {
+                file: "lib/src/lib.rs".into(),
+                line: definition_line,
+                column: 9,
+            },
+            callsite: Span {
+                file: "lib/src/lib.rs".into(),
+                line: callsite_line,
+                column: 1,
+            },
+        }
+    }
+
     fn uniform_field(definition: Definition) -> Definition {
         uniform_field_at(definition, 1)
     }
@@ -1173,6 +1305,7 @@ mod tests {
                 package_name: "app".into(),
                 crate_name: "app".into(),
                 crate_id: test_id("app"),
+                crate_root: Some("app/src/main.rs".into()),
                 is_product_root: true,
                 test_surface: false,
                 definitions: vec![node("main", "app", false)],
@@ -1186,6 +1319,7 @@ mod tests {
                 package_name: "lib".into(),
                 crate_name: "lib".into(),
                 crate_id: test_id("lib"),
+                crate_root: Some("lib/src/lib.rs".into()),
                 is_product_root: false,
                 test_surface: false,
                 definitions,
@@ -1204,6 +1338,7 @@ mod tests {
                 package_name: "integration_test".into(),
                 crate_name: "integration_test".into(),
                 crate_id: test_id("integration_test"),
+                crate_root: Some("integration_test/tests/test.rs".into()),
                 is_product_root: true,
                 test_surface: true,
                 definitions: vec![node("test_main", "integration_test", false)],
@@ -1221,6 +1356,7 @@ mod tests {
                 package_name: "lib".into(),
                 crate_name: "lib".into(),
                 crate_id: test_id("lib"),
+                crate_root: Some("lib/src/lib.rs".into()),
                 is_product_root: false,
                 test_surface: false,
                 definitions,
@@ -1456,7 +1592,7 @@ mod tests {
     fn test_requirement_preserves_uniform_production_field_visibility() {
         let mut production_input = fragments(
             vec![
-                uniform_field(node("production_required", "lib", true)),
+                uniform_field(source(node("production_required", "lib", true), 1)),
                 uniform_field(node("internal", "lib", true)),
                 node("entry", "lib", false),
             ],
@@ -1471,7 +1607,7 @@ mod tests {
             to: test_id("entry"),
             kind: EdgeKind::Body,
         });
-        let mut test_required = uniform_field(node("test_required", "lib", true));
+        let mut test_required = uniform_field(source(node("test_required", "lib", true), 1));
         test_required.name = "production_required".into();
         let mut test_input = test_fragments(vec![test_required], vec![]);
         test_input[0].edges[0].to = test_id("test_required");
@@ -1911,16 +2047,19 @@ mod tests {
     #[test]
     fn integration_test_api_is_public_while_its_helper_can_be_narrowed() {
         let input = fragments(
-            vec![node("entry", "lib", true), node("helper", "lib", true)],
+            vec![
+                source(node("entry", "lib", true), 1),
+                source(node("helper", "lib", true), 2),
+            ],
             vec![Edge {
                 from: test_id("entry"),
                 to: test_id("helper"),
                 kind: EdgeKind::Body,
             }],
         );
-        let mut test_entry = node("test_entry", "lib", true);
+        let mut test_entry = source(node("test_entry", "lib", true), 1);
         test_entry.name = "entry".into();
-        let mut test_helper = node("test_helper", "lib", true);
+        let mut test_helper = source(node("test_helper", "lib", true), 2);
         test_helper.name = "helper".into();
         let test_input = test_fragments(
             vec![test_entry, test_helper],
@@ -1945,8 +2084,8 @@ mod tests {
     fn production_reachability_does_not_follow_test_only_edges() {
         let mut production_input = fragments(
             vec![
-                node("production_entry", "lib", true),
-                node("production_helper", "lib", true),
+                source(node("production_entry", "lib", true), 1),
+                source(node("production_helper", "lib", true), 2),
             ],
             vec![],
         );
@@ -1956,9 +2095,9 @@ mod tests {
             kind: EdgeKind::Body,
         });
 
-        let mut test_entry = node("test_entry", "lib", true);
+        let mut test_entry = source(node("test_entry", "lib", true), 1);
         test_entry.name = "production_entry".into();
-        let mut test_helper = node("test_helper", "lib", true);
+        let mut test_helper = source(node("test_helper", "lib", true), 2);
         test_helper.name = "production_helper".into();
         let test_input = test_fragments(
             vec![test_entry, test_helper],
@@ -2270,12 +2409,16 @@ mod tests {
         );
         input[1].definitions[0].name = "duplicate".into();
         input[1].definitions[1].name = "duplicate".into();
+        for definition in &mut input[1].definitions {
+            definition.expansion_span = Some(expansion(4, 12));
+        }
         let duplicate = input[1].definitions.pop().unwrap();
         input.push(Fragment {
             protocol_version: ProtocolVersion,
             package_name: "lib".into(),
             crate_name: "lib".into(),
             crate_id: test_id("lib-test"),
+            crate_root: Some("lib/src/lib.rs".into()),
             is_product_root: false,
             test_surface: false,
             definitions: vec![duplicate],
@@ -2294,12 +2437,281 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_compilation_units_use_linear_equivalence_edges() {
+        const DEFINITIONS: usize = 256;
+
+        let definitions = (0..DEFINITIONS)
+            .map(|index| {
+                let id = format!("duplicate_{index}");
+                let mut definition = node(&id, "lib", true);
+                definition.name = "duplicate".into();
+                definition.span = Some(Span {
+                    file: "lib/src/lib.rs".into(),
+                    line: 1,
+                    column: 1,
+                });
+                definition
+            })
+            .collect::<Vec<_>>();
+        let definitions_by_id = definitions
+            .iter()
+            .map(|definition| (definition.id, definition))
+            .collect::<FxHashMap<_, _>>();
+        let compilation_ids = definitions
+            .iter()
+            .enumerate()
+            .map(|(compilation_id, definition)| (definition.id, compilation_id))
+            .collect::<FxHashMap<_, _>>();
+        let definition_ids = definitions
+            .iter()
+            .map(|definition| definition.id)
+            .collect::<FxHashSet<_>>();
+        let fragments = fragments(Vec::new(), Vec::new());
+        let definition_fragments = definitions
+            .iter()
+            .map(|definition| (definition.id, &fragments[0]))
+            .collect::<FxHashMap<_, _>>();
+        let (equivalents, _) =
+            equivalent_definitions(&definitions_by_id, &compilation_ids, &definition_fragments);
+
+        assert_eq!(equivalents.groups.len(), 1);
+        assert_eq!(equivalents.groups[0].len(), DEFINITIONS);
+        assert_eq!(equivalents.group_by_id.len(), DEFINITIONS);
+
+        let adjacency = adjacency(&[], &equivalents, &definition_ids);
+        let equivalence_edges = adjacency.values().map(Vec::len).sum::<usize>();
+        assert_eq!(equivalence_edges, 2 * (DEFINITIONS - 1));
+        assert_eq!(
+            reachable([definitions[0].id], &adjacency).len(),
+            DEFINITIONS
+        );
+    }
+
+    #[test]
+    fn reexport_index_only_contains_reexport_edges() {
+        let edges = [
+            Edge {
+                from: test_id("first"),
+                to: test_id("target_a"),
+                kind: EdgeKind::Reexport,
+            },
+            Edge {
+                from: test_id("first"),
+                to: test_id("helper"),
+                kind: EdgeKind::Body,
+            },
+            Edge {
+                from: test_id("first"),
+                to: test_id("target_b"),
+                kind: EdgeKind::Reexport,
+            },
+        ];
+        let edges = edges.iter().collect::<Vec<_>>();
+        let reexports = reexport_index(&edges);
+
+        assert_eq!(reexports.len(), 1);
+        assert_eq!(
+            reexports[&test_id("first")],
+            [test_id("target_a"), test_id("target_b")]
+        );
+    }
+
+    #[test]
+    fn spanless_declarations_in_different_crates_do_not_share_liveness() {
+        let mut input = fragments(vec![node("generated_live", "lib", true)], vec![]);
+        input[1].definitions[0].name = "generated".into();
+        let mut generated_dead = node("generated_dead", "test_support", true);
+        generated_dead.name = "generated".into();
+        input.push(Fragment {
+            protocol_version: ProtocolVersion,
+            package_name: "test_support".into(),
+            crate_name: "test_support".into(),
+            crate_id: test_id("test_support"),
+            crate_root: Some("test_support/src/lib.rs".into()),
+            is_product_root: false,
+            test_surface: false,
+            definitions: vec![generated_dead],
+            edges: vec![],
+            roots: vec![],
+            conservative_roots: vec![],
+            required_public_roots: vec![],
+        });
+        input[0].edges.push(Edge {
+            from: test_id("main"),
+            to: test_id("generated_live"),
+            kind: EdgeKind::Body,
+        });
+
+        let findings = analyze(&input, &HashSet::new());
+
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].definition.id, test_id("generated_dead"));
+        assert_eq!(findings[0].kind, FindingKind::DeadPublic);
+    }
+
+    #[test]
+    fn spanless_declarations_in_different_crates_do_not_share_interface_requirements() {
+        let mut input = fragments(
+            vec![
+                node("factory", "lib", true),
+                node("generated_live", "lib", true),
+            ],
+            vec![Edge {
+                from: test_id("factory"),
+                to: test_id("generated_live"),
+                kind: EdgeKind::Interface,
+            }],
+        );
+        input[1].definitions[1].name = "generated".into();
+        let mut generated_dead = node("generated_dead", "test_support", true);
+        generated_dead.name = "generated".into();
+        input.push(Fragment {
+            protocol_version: ProtocolVersion,
+            package_name: "test_support".into(),
+            crate_name: "test_support".into(),
+            crate_id: test_id("test_support"),
+            crate_root: Some("test_support/src/lib.rs".into()),
+            is_product_root: false,
+            test_surface: false,
+            definitions: vec![generated_dead],
+            edges: vec![],
+            roots: vec![],
+            conservative_roots: vec![],
+            required_public_roots: vec![],
+        });
+        input[0].edges.push(Edge {
+            from: test_id("main"),
+            to: test_id("factory"),
+            kind: EdgeKind::Body,
+        });
+
+        let findings = analyze(&input, &HashSet::new());
+
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].definition.id, test_id("generated_dead"));
+        assert_eq!(findings[0].kind, FindingKind::DeadPublic);
+    }
+
+    #[test]
+    fn spanless_declarations_in_same_named_targets_do_not_share_liveness() {
+        for (source_root, package_name, other_root) in [
+            ("lib/src/lib.rs", "secondary", "secondary/src/main.rs"),
+            ("lib/src/lib.rs", "lib", "lib/src/main.rs"),
+            ("lib/src/lib.rs", "lib", "lib/tests/lib.rs"),
+            ("lib/src/lib.rs", "lib", "lib/benches/lib.rs"),
+            ("lib/src/main.rs", "lib", "lib/examples/lib.rs"),
+        ] {
+            let mut generated_library = node("generated_library", "lib", false);
+            generated_library.name = "generated".into();
+            let mut input = fragments(
+                vec![generated_library, node("unreachable_public", "lib", true)],
+                vec![Edge {
+                    from: test_id("generated_library"),
+                    to: test_id("unreachable_public"),
+                    kind: EdgeKind::Body,
+                }],
+            );
+            input[1].crate_root = Some(source_root.into());
+            let mut generated_binary = node("generated_binary", "lib", false);
+            generated_binary.name = "generated".into();
+            input.push(Fragment {
+                protocol_version: ProtocolVersion,
+                package_name: package_name.into(),
+                crate_name: "lib".into(),
+                crate_id: test_id(&format!("{package_name}-bin")),
+                crate_root: Some(other_root.into()),
+                is_product_root: true,
+                test_surface: false,
+                definitions: vec![node("binary_main", "lib", false), generated_binary],
+                edges: vec![Edge {
+                    from: test_id("binary_main"),
+                    to: test_id("generated_binary"),
+                    kind: EdgeKind::Body,
+                }],
+                roots: vec![test_id("binary_main")],
+                conservative_roots: vec![],
+                required_public_roots: vec![],
+            });
+
+            let findings = analyze(&input, &HashSet::new());
+
+            assert_eq!(
+                findings.len(),
+                1,
+                "target `{other_root}` in package `{package_name}`"
+            );
+            assert_eq!(findings[0].definition.id, test_id("unreachable_public"));
+            assert_eq!(findings[0].kind, FindingKind::DeadPublic);
+        }
+    }
+
+    #[test]
+    fn distinct_or_unknown_spanless_declarations_do_not_share_liveness() {
+        for (production_expansion, test_expansion) in [
+            (Some(expansion(4, 12)), Some(expansion(8, 12))),
+            (Some(expansion(4, 12)), Some(expansion(4, 15))),
+            (None, None),
+        ] {
+            let mut generated_production = node("generated_production", "lib", false);
+            generated_production.name = "generated".into();
+            generated_production.expansion_span = production_expansion;
+            let mut input = fragments(
+                vec![
+                    generated_production,
+                    node("unreachable_public", "lib", true),
+                ],
+                vec![Edge {
+                    from: test_id("generated_production"),
+                    to: test_id("unreachable_public"),
+                    kind: EdgeKind::Body,
+                }],
+            );
+
+            let mut generated_test = node("generated_test", "lib", false);
+            generated_test.name = "generated".into();
+            generated_test.expansion_span = test_expansion;
+            input.push(Fragment {
+                protocol_version: ProtocolVersion,
+                package_name: "lib".into(),
+                crate_name: "lib".into(),
+                crate_id: test_id("lib-test"),
+                crate_root: Some("lib/src/lib.rs".into()),
+                is_product_root: false,
+                test_surface: true,
+                definitions: vec![node("test", "lib", false), generated_test],
+                edges: vec![Edge {
+                    from: test_id("test"),
+                    to: test_id("generated_test"),
+                    kind: EdgeKind::Body,
+                }],
+                roots: vec![test_id("test")],
+                conservative_roots: vec![],
+                required_public_roots: vec![],
+            });
+
+            let findings = analyze(&input, &HashSet::new());
+
+            assert_eq!(findings.len(), 1);
+            assert_eq!(findings[0].definition.id, test_id("unreachable_public"));
+            assert_eq!(findings[0].kind, FindingKind::DeadPublic);
+        }
+    }
+
+    #[test]
     fn same_span_declarations_in_one_compilation_unit_do_not_share_liveness() {
         let mut input = fragments(
-            vec![node("first", "lib", true), node("second", "lib", true)],
-            vec![],
+            vec![
+                node("first", "lib", true),
+                node("second", "lib", true),
+                node("entry", "lib", false),
+            ],
+            vec![Edge {
+                from: test_id("entry"),
+                to: test_id("first"),
+                kind: EdgeKind::Body,
+            }],
         );
-        for definition in &mut input[1].definitions {
+        for definition in &mut input[1].definitions[..2] {
             definition.span = Some(Span {
                 file: "shared.rs".into(),
                 line: 1,
@@ -2308,15 +2720,214 @@ mod tests {
         }
         input[0].edges.push(Edge {
             from: test_id("main"),
-            to: test_id("first"),
+            to: test_id("entry"),
             kind: EdgeKind::Body,
         });
 
         let findings = analyze(&input, &HashSet::new());
 
-        assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].definition.id, test_id("second"));
-        assert_eq!(findings[0].kind, FindingKind::DeadPublic);
+        assert_eq!(findings.len(), 2);
+        assert_eq!(findings[0].definition.id, test_id("first"));
+        assert_eq!(findings[0].kind, FindingKind::UnnecessaryPublic);
+        assert_eq!(findings[1].definition.id, test_id("second"));
+        assert_eq!(findings[1].kind, FindingKind::DeadPublic);
+    }
+
+    #[test]
+    fn repeated_source_local_helpers_can_be_private() {
+        let mut left = crate_visible_node("left::helper", &["left"]);
+        let mut right = crate_visible_node("right::helper", &["right"]);
+        for definition in [&mut left, &mut right] {
+            definition.span = Some(Span {
+                file: "shared.rs".into(),
+                line: 1,
+                column: 1,
+            });
+        }
+        let input = fragments(
+            vec![
+                left,
+                right,
+                scoped_node("left::caller", &["left"]),
+                scoped_node("right::caller", &["right"]),
+            ],
+            vec![
+                Edge {
+                    from: test_id("left::caller"),
+                    to: test_id("left::helper"),
+                    kind: EdgeKind::Body,
+                },
+                Edge {
+                    from: test_id("right::caller"),
+                    to: test_id("right::helper"),
+                    kind: EdgeKind::Body,
+                },
+            ],
+        );
+
+        let findings = analyze(&input, &HashSet::new());
+
+        assert_eq!(findings.len(), 2);
+        assert!(
+            findings
+                .iter()
+                .all(|finding| finding.kind == FindingKind::UnnecessaryRestrictedVisibility)
+        );
+    }
+
+    #[test]
+    fn repeated_source_cross_parent_use_preserves_crate_visibility() {
+        let mut first =
+            crate_visible_node("first_parent::first::helper", &["first_parent", "first"]);
+        let mut second = crate_visible_node(
+            "second_parent::second::helper",
+            &["second_parent", "second"],
+        );
+        for definition in [&mut first, &mut second] {
+            definition.span = Some(Span {
+                file: "shared.rs".into(),
+                line: 1,
+                column: 1,
+            });
+        }
+        let input = fragments(
+            vec![
+                first,
+                second,
+                scoped_node("first_parent::caller", &["first_parent"]),
+            ],
+            vec![Edge {
+                from: test_id("first_parent::caller"),
+                to: test_id("second_parent::second::helper"),
+                kind: EdgeKind::Body,
+            }],
+        );
+
+        assert!(analyze(&input, &HashSet::new()).is_empty());
+    }
+
+    #[test]
+    fn repeated_source_preserves_uniform_field_visibility() {
+        let mut first_value = uniform_field(crate_visible_node(
+            "first_parent::first::value",
+            &["first_parent", "first"],
+        ));
+        let mut second_value = uniform_field(crate_visible_node(
+            "second_parent::second::value",
+            &["second_parent", "second"],
+        ));
+        let mut first_spare = uniform_field(crate_visible_node(
+            "first_parent::first::spare",
+            &["first_parent", "first"],
+        ));
+        let mut second_spare = uniform_field(crate_visible_node(
+            "second_parent::second::spare",
+            &["second_parent", "second"],
+        ));
+        for definition in [&mut first_value, &mut second_value] {
+            definition.span = Some(Span {
+                file: "shared.rs".into(),
+                line: 2,
+                column: 5,
+            });
+        }
+        for definition in [&mut first_spare, &mut second_spare] {
+            definition.span = Some(Span {
+                file: "shared.rs".into(),
+                line: 3,
+                column: 5,
+            });
+        }
+        let input = fragments(
+            vec![
+                first_value,
+                second_value,
+                first_spare,
+                second_spare,
+                scoped_node("first_parent::caller", &["first_parent"]),
+            ],
+            vec![Edge {
+                from: test_id("first_parent::caller"),
+                to: test_id("second_parent::second::value"),
+                kind: EdgeKind::Body,
+            }],
+        );
+
+        assert!(analyze_preserving_uniform_fields(&input).is_empty());
+    }
+
+    #[test]
+    fn repeated_source_equivalence_edges_are_linear() {
+        const DEFINITIONS: usize = 256;
+
+        let definitions = (0..DEFINITIONS)
+            .map(|index| {
+                let mut definition = node(&format!("path_{index}::helper"), "lib", false);
+                definition.span = Some(Span {
+                    file: "shared.rs".into(),
+                    line: 1,
+                    column: 1,
+                });
+                definition
+            })
+            .collect::<Vec<_>>();
+        let definitions_by_id = definitions
+            .iter()
+            .map(|definition| (definition.id, definition))
+            .collect();
+        let compilation_ids = definitions
+            .iter()
+            .map(|definition| (definition.id, 0))
+            .collect();
+        let fragments = fragments(Vec::new(), Vec::new());
+        let definition_fragments = definitions
+            .iter()
+            .map(|definition| (definition.id, &fragments[0]))
+            .collect();
+        let (liveness, visibility) =
+            equivalent_definitions(&definitions_by_id, &compilation_ids, &definition_fragments);
+
+        assert!(liveness.groups.is_empty());
+        assert_eq!(visibility.groups.len(), 1);
+        assert_eq!(visibility.groups[0].len(), DEFINITIONS);
+        assert_eq!(visibility.group_by_id.len(), DEFINITIONS);
+
+        let mut adjacency = FxHashMap::default();
+        extend_equivalence_edges(&mut adjacency, &visibility, None);
+        assert_eq!(
+            adjacency.values().map(Vec::len).sum::<usize>(),
+            2 * (DEFINITIONS - 1)
+        );
+    }
+
+    #[test]
+    fn large_repeated_source_group_is_analyzed_once() {
+        const DEFINITIONS: usize = 20_000;
+
+        let mut definitions = Vec::with_capacity(2 * DEFINITIONS);
+        let mut edges = Vec::with_capacity(DEFINITIONS);
+        for index in 0..DEFINITIONS {
+            let module = format!("path_{index}");
+            let helper = format!("{module}::helper");
+            let caller = format!("{module}::caller");
+            let mut definition = uniform_field(crate_visible_node(&helper, &[&module]));
+            definition.span = Some(Span {
+                file: "shared.rs".into(),
+                line: 1,
+                column: 1,
+            });
+            definitions.push(definition);
+            definitions.push(scoped_node(&caller, &[&module]));
+            edges.push(Edge {
+                from: test_id(&caller),
+                to: test_id(&helper),
+                kind: EdgeKind::Body,
+            });
+        }
+        let input = fragments(definitions, edges);
+        let findings = analyze_preserving_uniform_fields(&input);
+
+        assert_eq!(findings.len(), DEFINITIONS);
     }
 
     #[test]
