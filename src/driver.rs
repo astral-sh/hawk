@@ -757,6 +757,7 @@ fn collect_fragment(
         package_name,
         crate_name,
         crate_id,
+        binary_name: env::var("CARGO_BIN_NAME").ok(),
         is_product_root,
         test_surface,
         definitions,
@@ -1297,7 +1298,7 @@ mod tests {
 
         assert_eq!(
             error.to_string(),
-            "Hawk frontend uses compiler driver protocol 1, but this driver uses protocol 2; install `cargo-hawk` and `cargo-hawk-driver` from the same release"
+            "Hawk frontend uses compiler driver protocol 1, but this driver uses protocol 3; install `cargo-hawk` and `cargo-hawk-driver` from the same release"
         );
     }
 
@@ -1308,6 +1309,7 @@ mod tests {
             package_name: "library".into(),
             crate_name: "library".into(),
             crate_id: "library".into(),
+            binary_name: None,
             is_product_root: false,
             test_surface: false,
             definitions: vec![],

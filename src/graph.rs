@@ -47,6 +47,7 @@ pub struct Fragment {
     pub package_name: String,
     pub crate_name: String,
     pub crate_id: String,
+    pub binary_name: Option<String>,
     pub is_product_root: bool,
     pub test_surface: bool,
     pub definitions: Vec<Definition>,
@@ -235,7 +236,9 @@ impl<'a> DefinitionIdentity<'a> {
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct SourceDefinitionIdentity<'a> {
+    package_name: Option<&'a str>,
     crate_name: Option<&'a str>,
+    binary_name: Option<&'a str>,
     name: Option<&'a str>,
     kind: DefinitionKind,
     file: Option<&'a str>,
@@ -296,6 +299,16 @@ pub fn analyze_with_options<'a>(
                 .map(move |definition| (definition.id.as_str(), compilation_id))
         })
         .collect();
+    let definition_fragments: HashMap<&str, &Fragment> = production_fragments
+        .iter()
+        .chain(test_fragments)
+        .flat_map(|fragment| {
+            fragment
+                .definitions
+                .iter()
+                .map(move |definition| (definition.id.as_str(), fragment))
+        })
+        .collect();
     let production_edges: Vec<&Edge> = production_fragments
         .iter()
         .flat_map(|fragment| &fragment.edges)
@@ -309,7 +322,11 @@ pub fn analyze_with_options<'a>(
         .chain(&test_edges)
         .copied()
         .collect();
-    let equivalents = equivalent_definitions(&definitions, &definition_compilation_ids);
+    let equivalents = equivalent_definitions(
+        &definitions,
+        &definition_compilation_ids,
+        &definition_fragments,
+    );
     let required_scopes = required_scopes(&definitions, &edges, &equivalents);
     let production_definition_ids: HashSet<&str> = production_fragments
         .iter()
@@ -906,11 +923,15 @@ fn adjacency<'a>(
 fn equivalent_definitions<'a>(
     definitions: &HashMap<&'a str, &'a Definition>,
     definition_compilation_ids: &HashMap<&'a str, usize>,
+    definition_fragments: &HashMap<&'a str, &'a Fragment>,
 ) -> HashMap<&'a str, Vec<&'a str>> {
     let mut groups: HashMap<SourceDefinitionIdentity<'a>, Vec<(&'a str, usize)>> = HashMap::new();
     for definition in definitions.values() {
         groups
-            .entry(source_definition_identity(definition))
+            .entry(source_definition_identity(
+                definition,
+                definition_fragments[definition.id.as_str()],
+            ))
             .or_default()
             .push((
                 definition.id.as_str(),
@@ -949,12 +970,24 @@ fn definition_identity<'a>(definition: &'a Definition) -> DefinitionIdentity<'a>
     )
 }
 
-fn source_definition_identity<'a>(definition: &'a Definition) -> SourceDefinitionIdentity<'a> {
+fn source_definition_identity<'a>(
+    definition: &'a Definition,
+    fragment: &'a Fragment,
+) -> SourceDefinitionIdentity<'a> {
     SourceDefinitionIdentity {
+        package_name: definition
+            .span
+            .is_none()
+            .then_some(fragment.package_name.as_str()),
         crate_name: definition
             .span
             .is_none()
             .then_some(definition.crate_name.as_str()),
+        binary_name: definition
+            .span
+            .is_none()
+            .then_some(fragment.binary_name.as_deref())
+            .flatten(),
         name: definition
             .span
             .is_none()
@@ -1143,6 +1176,7 @@ mod tests {
                 package_name: "app".into(),
                 crate_name: "app".into(),
                 crate_id: "app".into(),
+                binary_name: Some("app".into()),
                 is_product_root: true,
                 test_surface: false,
                 definitions: vec![node("main", "app", false)],
@@ -1156,6 +1190,7 @@ mod tests {
                 package_name: "lib".into(),
                 crate_name: "lib".into(),
                 crate_id: "lib".into(),
+                binary_name: None,
                 is_product_root: false,
                 test_surface: false,
                 definitions,
@@ -1174,6 +1209,7 @@ mod tests {
                 package_name: "integration_test".into(),
                 crate_name: "integration_test".into(),
                 crate_id: "integration_test".into(),
+                binary_name: None,
                 is_product_root: true,
                 test_surface: true,
                 definitions: vec![node("test_main", "integration_test", false)],
@@ -1191,6 +1227,7 @@ mod tests {
                 package_name: "lib".into(),
                 crate_name: "lib".into(),
                 crate_id: "lib".into(),
+                binary_name: None,
                 is_product_root: false,
                 test_surface: false,
                 definitions,
@@ -2240,6 +2277,7 @@ mod tests {
             package_name: "lib".into(),
             crate_name: "lib".into(),
             crate_id: "lib-test".into(),
+            binary_name: None,
             is_product_root: false,
             test_surface: false,
             definitions: vec![duplicate],
@@ -2268,6 +2306,7 @@ mod tests {
             package_name: "test_support".into(),
             crate_name: "test_support".into(),
             crate_id: "test_support".into(),
+            binary_name: None,
             is_product_root: false,
             test_surface: false,
             definitions: vec![generated_dead],
@@ -2310,6 +2349,7 @@ mod tests {
             package_name: "test_support".into(),
             crate_name: "test_support".into(),
             crate_id: "test_support".into(),
+            binary_name: None,
             is_product_root: false,
             test_surface: false,
             definitions: vec![generated_dead],
@@ -2329,6 +2369,48 @@ mod tests {
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].definition.id, "generated_dead");
         assert_eq!(findings[0].kind, FindingKind::DeadPublic);
+    }
+
+    #[test]
+    fn spanless_declarations_in_same_named_binaries_do_not_share_liveness() {
+        for package_name in ["secondary", "lib"] {
+            let mut generated_library = node("generated_library", "lib", false);
+            generated_library.name = "generated".into();
+            let mut input = fragments(
+                vec![generated_library, node("unreachable_public", "lib", true)],
+                vec![Edge {
+                    from: "generated_library".into(),
+                    to: "unreachable_public".into(),
+                    kind: EdgeKind::Body,
+                }],
+            );
+            let mut generated_binary = node("generated_binary", "lib", false);
+            generated_binary.name = "generated".into();
+            input.push(Fragment {
+                protocol_version: ProtocolVersion,
+                package_name: package_name.into(),
+                crate_name: "lib".into(),
+                crate_id: format!("{package_name}-bin"),
+                binary_name: Some("lib".into()),
+                is_product_root: true,
+                test_surface: false,
+                definitions: vec![node("binary_main", "lib", false), generated_binary],
+                edges: vec![Edge {
+                    from: "binary_main".into(),
+                    to: "generated_binary".into(),
+                    kind: EdgeKind::Body,
+                }],
+                roots: vec!["binary_main".into()],
+                conservative_roots: vec![],
+                required_public_roots: vec![],
+            });
+
+            let findings = analyze(&input, &HashSet::new());
+
+            assert_eq!(findings.len(), 1, "package `{package_name}`");
+            assert_eq!(findings[0].definition.id, "unreachable_public");
+            assert_eq!(findings[0].kind, FindingKind::DeadPublic);
+        }
     }
 
     #[test]

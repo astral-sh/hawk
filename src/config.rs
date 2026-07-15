@@ -796,6 +796,7 @@ mod tests {
             package_name: "library".into(),
             crate_name: "library".into(),
             crate_id: "library".into(),
+            binary_name: None,
             is_product_root: false,
             test_surface: false,
             definitions: vec![Definition {
