@@ -260,7 +260,7 @@ impl TerminalColor {
     }
 }
 
-pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
+pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
     if raw_args.get(1).is_some_and(|argument| argument == "hawk") {
         raw_args.remove(1);
     }
@@ -269,7 +269,7 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
         Err(error) => {
             let exit_code = error.exit_code();
             error.print().context("print command-line help")?;
-            return Ok(ExitCode::from(exit_code as u8));
+            return Ok(ExitCode::from(u8::try_from(exit_code).unwrap_or(1)));
         }
     };
     let lint_levels = LintLevels::from_matches(&matches)?;
@@ -359,10 +359,13 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
                 .collect::<Result<Vec<_>>>()
         })
         .transpose()?;
-    let target_dir = args
-        .target_dir
-        .clone()
-        .unwrap_or_else(|| default_target_dir(&workspace_root));
+    let target_dir = args.target_dir.as_ref().map_or_else(
+        || Ok(default_target_dir(&workspace_root)),
+        |target_dir| {
+            std::path::absolute(target_dir)
+                .with_context(|| format!("resolve target directory {}", target_dir.display()))
+        },
+    )?;
     fs::create_dir_all(&target_dir)
         .with_context(|| format!("create target directory {}", target_dir.display()))?;
 
@@ -611,7 +614,7 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
     })
 }
 
-pub fn write_error(raw_args: &[String], error: &anyhow::Error) -> Result<()> {
+pub(crate) fn write_error(raw_args: &[String], error: &anyhow::Error) -> Result<()> {
     let mut output = String::new();
     writeln!(
         output,
@@ -1103,7 +1106,7 @@ fn fix_plan_for<'a>(
                     .into_iter()
                     .flatten()
                     .map(move |definition| FixTarget {
-                        id: definition.id.clone(),
+                        id: definition.id,
                         crate_name: definition.crate_name.clone(),
                         name: definition.name.clone(),
                         definition_kind: definition.kind,
@@ -1280,9 +1283,16 @@ mod tests {
 
     use crate::config::ConfigDiagnosticKind;
     use cargo_hawk_internal::graph::{
-        Definition, DefinitionKind, Finding, FindingKind, FixPlan, FixTarget, Span,
+        Definition, DefinitionId, DefinitionKind, Finding, FindingKind, FixPlan, FixTarget, Span,
         VisibilityReduction,
     };
+
+    fn test_id(value: &str) -> DefinitionId {
+        let hash = value.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+        });
+        DefinitionId::new(0, hash)
+    }
 
     use super::{
         Args, CargoInvocation, ConsumerMode, DEFAULT_TARGET_DIR_COMPONENT_MAX_BYTES,
@@ -1396,7 +1406,7 @@ mod tests {
     #[test]
     fn fix_plan_signatures_are_independent_of_target_order() {
         let target = |id: &str, name: &str| FixTarget {
-            id: id.into(),
+            id: test_id(id),
             crate_name: "library".into(),
             name: name.into(),
             definition_kind: DefinitionKind::Function,
@@ -1539,7 +1549,7 @@ mod tests {
     #[test]
     fn diagnostic_rendering_includes_terminal_styles() {
         let definition = Definition {
-            id: "internal_helper".into(),
+            id: test_id("internal_helper"),
             crate_name: "library".into(),
             name: "internal_helper".into(),
             kind: DefinitionKind::Function,
@@ -1548,6 +1558,7 @@ mod tests {
                 line: 5,
                 column: 1,
             }),
+            expansion_span: None,
             public_api: true,
             restricted_visible_api: false,
             crate_visible_api: false,
@@ -1579,7 +1590,7 @@ mod tests {
     #[test]
     fn crate_visibility_diagnostic_names_the_required_scope() {
         let definition = Definition {
-            id: "scoped::run".into(),
+            id: test_id("scoped::run"),
             crate_name: "library".into(),
             name: "scoped::run".into(),
             kind: DefinitionKind::Function,
@@ -1588,6 +1599,7 @@ mod tests {
                 line: 7,
                 column: 5,
             }),
+            expansion_span: None,
             public_api: false,
             restricted_visible_api: true,
             crate_visible_api: true,
@@ -1618,7 +1630,7 @@ mod tests {
     #[test]
     fn restricted_visibility_diagnostic_removes_the_modifier() {
         let definition = Definition {
-            id: "scoped::private_parent_visible_helper".into(),
+            id: test_id("scoped::private_parent_visible_helper"),
             crate_name: "library".into(),
             name: "scoped::private_parent_visible_helper".into(),
             kind: DefinitionKind::Function,
@@ -1627,6 +1639,7 @@ mod tests {
                 line: 16,
                 column: 5,
             }),
+            expansion_span: None,
             public_api: false,
             restricted_visible_api: true,
             crate_visible_api: false,
@@ -1657,11 +1670,12 @@ mod tests {
     #[test]
     fn dead_enum_variant_diagnostic_accounts_for_unreachable_uses() {
         let definition = Definition {
-            id: "InternalState::Active".into(),
+            id: test_id("InternalState::Active"),
             crate_name: "library".into(),
             name: "InternalState::Active".into(),
             kind: DefinitionKind::EnumVariant,
             span: None,
+            expansion_span: None,
             public_api: true,
             restricted_visible_api: false,
             crate_visible_api: false,

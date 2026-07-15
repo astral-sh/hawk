@@ -48,6 +48,7 @@ anyhow = "1.0.98"
 cargo-platform = { version = "0.2.0", optional = true }
 cargo_metadata = { version = "0.20.0", optional = true }
 clap = { version = "4.5.40", features = ["derive"], optional = true }
+rustc-hash = "2.0.0"
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
 tempfile = "3.20.0"
@@ -55,6 +56,30 @@ toml = { version = "0.8.23", optional = true }
 
 [dev-dependencies]
 insta = { version = "1.43.2", default-features = false }
+
+[lints.rust]
+unsafe_code = "warn"
+unreachable_pub = "warn"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -2 }
+# Allowed pedantic lints, matching the Astral workspace defaults.
+char_lit_as_u8 = "allow"
+collapsible_else_if = "allow"
+collapsible_if = "allow"
+implicit_hasher = "allow"
+map_unwrap_or = "allow"
+match_same_arms = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+similar_names = "allow"
+single_match_else = "allow"
+struct_excessive_bools = "allow"
+too_many_arguments = "allow"
+too_many_lines = "allow"
+used_underscore_binding = "allow"
 
 # The profile that 'dist' will build with
 [profile.dist]

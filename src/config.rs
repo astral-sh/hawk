@@ -11,7 +11,7 @@ use serde::Deserialize;
 use cargo_hawk_internal::graph::{Definition, DefinitionKind, Finding, FindingKind, Fragment};
 
 #[derive(Debug)]
-pub struct Config {
+pub(crate) struct Config {
     path: Option<PathBuf>,
     source: String,
     preserve_uniform_field_visibility: bool,
@@ -23,7 +23,7 @@ pub struct Config {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct FeatureProfile {
+pub(crate) struct FeatureProfile {
     name: String,
     all_features: bool,
     no_default_features: bool,
@@ -31,15 +31,15 @@ pub struct FeatureProfile {
 }
 
 #[derive(Clone, Debug)]
-pub struct LintOverride {
-    pub lint: FindingKind,
-    pub crate_name: String,
-    pub item: String,
-    pub definition_kind: Option<DefinitionKind>,
-    pub level: OverrideLevel,
-    pub reason: String,
-    pub target: Option<Platform>,
-    pub span: ConfigSpan,
+pub(crate) struct LintOverride {
+    pub(crate) lint: FindingKind,
+    pub(crate) crate_name: String,
+    pub(crate) item: String,
+    pub(crate) definition_kind: Option<DefinitionKind>,
+    pub(crate) level: OverrideLevel,
+    pub(crate) reason: String,
+    pub(crate) target: Option<Platform>,
+    pub(crate) span: ConfigSpan,
 }
 
 #[derive(Clone, Debug)]
@@ -56,48 +56,48 @@ enum ExclusionSelector {
 }
 
 #[derive(Clone, Debug)]
-pub struct ProductionConsumer {
-    pub package: String,
-    pub binary: String,
-    pub reason: String,
-    pub target: Option<Platform>,
-    pub span: ConfigSpan,
+pub(crate) struct ProductionConsumer {
+    pub(crate) package: String,
+    pub(crate) binary: String,
+    pub(crate) reason: String,
+    pub(crate) target: Option<Platform>,
+    pub(crate) span: ConfigSpan,
 }
 
 #[derive(Clone, Debug)]
-pub struct DoctestPackage {
-    pub package: String,
-    pub span: ConfigSpan,
+pub(crate) struct DoctestPackage {
+    pub(crate) package: String,
+    pub(crate) span: ConfigSpan,
 }
 
 #[derive(Debug)]
-pub struct AnalysisTarget {
+pub(crate) struct AnalysisTarget {
     name: String,
     cfgs: Vec<Cfg>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
-pub enum OverrideLevel {
+pub(crate) enum OverrideLevel {
     Allow,
     Expect,
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct ConfigSpan {
-    pub line: usize,
-    pub column: usize,
+pub(crate) struct ConfigSpan {
+    pub(crate) line: usize,
+    pub(crate) column: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ConfigDiagnosticKind {
+pub(crate) enum ConfigDiagnosticKind {
     UnknownItem,
     AmbiguousItem,
     UnfulfilledExpectation,
 }
 
 impl ConfigDiagnosticKind {
-    pub const fn code(self) -> &'static str {
+    pub(crate) const fn code(self) -> &'static str {
         match self {
             Self::UnknownItem => "hawk::unknown_item",
             Self::AmbiguousItem => "hawk::ambiguous_item",
@@ -105,7 +105,7 @@ impl ConfigDiagnosticKind {
         }
     }
 
-    pub fn from_code(code: &str) -> Option<Self> {
+    pub(crate) fn from_code(code: &str) -> Option<Self> {
         match code {
             "hawk::unknown_item" => Some(Self::UnknownItem),
             "hawk::ambiguous_item" => Some(Self::AmbiguousItem),
@@ -116,14 +116,14 @@ impl ConfigDiagnosticKind {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct ConfigDiagnostic<'a> {
-    pub kind: ConfigDiagnosticKind,
-    pub entry: &'a LintOverride,
+pub(crate) struct ConfigDiagnostic<'a> {
+    pub(crate) kind: ConfigDiagnosticKind,
+    pub(crate) entry: &'a LintOverride,
 }
 
-pub struct AppliedFindings<'findings, 'config> {
-    pub findings: Vec<Finding<'findings>>,
-    pub config_diagnostics: Vec<ConfigDiagnostic<'config>>,
+pub(crate) struct AppliedFindings<'findings, 'config> {
+    pub(crate) findings: Vec<Finding<'findings>>,
+    pub(crate) config_diagnostics: Vec<ConfigDiagnostic<'config>>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -221,15 +221,15 @@ impl FeatureProfile {
         }
     }
 
-    pub fn name(&self) -> &str {
+    pub(crate) fn name(&self) -> &str {
         &self.name
     }
 
-    pub fn configure_cargo(&self, command: &mut Command) {
+    pub(crate) fn configure_cargo(&self, command: &mut Command) {
         command.args(self.cargo_arguments());
     }
 
-    pub fn cargo_arguments_description(&self) -> String {
+    pub(crate) fn cargo_arguments_description(&self) -> String {
         self.cargo_arguments().collect::<Vec<_>>().join(" ")
     }
 
@@ -247,7 +247,7 @@ impl FeatureProfile {
 }
 
 impl Config {
-    pub fn load(workspace_root: &Path, configured_path: Option<&Path>) -> Result<Self> {
+    pub(crate) fn load(workspace_root: &Path, configured_path: Option<&Path>) -> Result<Self> {
         let path = configured_path
             .map(Path::to_path_buf)
             .unwrap_or_else(|| workspace_root.join("hawk.toml"));
@@ -514,11 +514,11 @@ impl Config {
         })
     }
 
-    pub fn feature_profiles(&self) -> &[FeatureProfile] {
+    pub(crate) fn feature_profiles(&self) -> &[FeatureProfile] {
         &self.feature_profiles
     }
 
-    pub fn production_consumers(
+    pub(crate) fn production_consumers(
         &self,
         target: &AnalysisTarget,
     ) -> impl Iterator<Item = &ProductionConsumer> {
@@ -527,15 +527,15 @@ impl Config {
             .filter(move |consumer| consumer.applies_to(target))
     }
 
-    pub fn doctest_packages(&self) -> Option<&[DoctestPackage]> {
+    pub(crate) fn doctest_packages(&self) -> Option<&[DoctestPackage]> {
         self.doctests.as_deref()
     }
 
-    pub fn preserve_uniform_field_visibility(&self) -> bool {
+    pub(crate) fn preserve_uniform_field_visibility(&self) -> bool {
         self.preserve_uniform_field_visibility
     }
 
-    pub fn apply<'findings, 'config>(
+    pub(crate) fn apply<'findings, 'config>(
         &'config self,
         target: &AnalysisTarget,
         production_fragments: &[Fragment],
@@ -611,11 +611,11 @@ impl Config {
         }
     }
 
-    pub fn path(&self) -> Option<&Path> {
+    pub(crate) fn path(&self) -> Option<&Path> {
         self.path.as_deref()
     }
 
-    pub fn source_line(&self, line: usize) -> Option<&str> {
+    pub(crate) fn source_line(&self, line: usize) -> Option<&str> {
         self.source.lines().nth(line.checked_sub(1)?)
     }
 }
@@ -662,7 +662,7 @@ fn known_item_identity(definition: &Definition) -> KnownItemIdentity<'_> {
 }
 
 impl AnalysisTarget {
-    pub fn from_rustc(
+    pub(crate) fn from_rustc(
         target: Option<&str>,
         host: &str,
         rustc: &OsStr,
@@ -787,23 +787,32 @@ mod tests {
 
     use super::{AnalysisTarget, Config, ConfigDiagnosticKind};
     use cargo_hawk_internal::graph::{
-        Definition, DefinitionKind, FindingKind, Fragment, Span, analyze,
+        Definition, DefinitionId, DefinitionKind, FindingKind, Fragment, Span, analyze,
     };
+
+    fn test_id(value: &str) -> DefinitionId {
+        let hash = value.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+        });
+        DefinitionId::new(0, hash)
+    }
 
     fn fragment() -> Fragment {
         Fragment {
             protocol_version: crate::protocol::ProtocolVersion,
             package_name: "library".into(),
             crate_name: "library".into(),
-            crate_id: "library".into(),
+            crate_id: test_id("library"),
+            crate_root: Some("library/src/lib.rs".into()),
             is_product_root: false,
             test_surface: false,
             definitions: vec![Definition {
-                id: "unused".into(),
+                id: test_id("unused"),
                 crate_name: "library".into(),
                 name: "unused".into(),
                 kind: DefinitionKind::Function,
                 span: None,
+                expansion_span: None,
                 public_api: true,
                 restricted_visible_api: false,
                 crate_visible_api: false,
@@ -837,11 +846,12 @@ mod tests {
         let mut fragment = fragment();
         fragment.definitions = vec![
             Definition {
-                id: "alias".into(),
+                id: test_id("alias"),
                 crate_name: "library".into(),
                 name: "SameName".into(),
                 kind: DefinitionKind::TypeAlias,
                 span: None,
+                expansion_span: None,
                 public_api: true,
                 restricted_visible_api: false,
                 crate_visible_api: false,
@@ -851,11 +861,12 @@ mod tests {
                 dead_code_allowed: false,
             },
             Definition {
-                id: "constant".into(),
+                id: test_id("constant"),
                 crate_name: "library".into(),
                 name: "SameName".into(),
                 kind: DefinitionKind::Constant,
                 span: None,
+                expansion_span: None,
                 public_api: true,
                 restricted_visible_api: false,
                 crate_visible_api: false,
@@ -872,7 +883,7 @@ mod tests {
         let mut fragment = fragment();
         fragment.definitions = vec![
             Definition {
-                id: "generated".into(),
+                id: test_id("generated"),
                 crate_name: "library".into(),
                 name: "generated".into(),
                 kind: DefinitionKind::Module,
@@ -881,6 +892,7 @@ mod tests {
                     line: 1,
                     column: 1,
                 }),
+                expansion_span: None,
                 public_api: true,
                 restricted_visible_api: false,
                 crate_visible_api: false,
@@ -890,7 +902,7 @@ mod tests {
                 dead_code_allowed: false,
             },
             Definition {
-                id: "generated-unused".into(),
+                id: test_id("generated-unused"),
                 crate_name: "library".into(),
                 name: "generated::unused".into(),
                 kind: DefinitionKind::Function,
@@ -899,6 +911,7 @@ mod tests {
                     line: 2,
                     column: 1,
                 }),
+                expansion_span: None,
                 public_api: true,
                 restricted_visible_api: false,
                 crate_visible_api: false,
@@ -908,7 +921,7 @@ mod tests {
                 dead_code_allowed: false,
             },
             Definition {
-                id: "outside".into(),
+                id: test_id("outside"),
                 crate_name: "library".into(),
                 name: "outside".into(),
                 kind: DefinitionKind::Function,
@@ -917,6 +930,7 @@ mod tests {
                     line: 1,
                     column: 1,
                 }),
+                expansion_span: None,
                 public_api: true,
                 restricted_visible_api: false,
                 crate_visible_api: false,
@@ -926,7 +940,7 @@ mod tests {
                 dead_code_allowed: false,
             },
             Definition {
-                id: "generatedish".into(),
+                id: test_id("generatedish"),
                 crate_name: "library".into(),
                 name: "generatedish".into(),
                 kind: DefinitionKind::Function,
@@ -935,6 +949,7 @@ mod tests {
                     line: 2,
                     column: 1,
                 }),
+                expansion_span: None,
                 public_api: true,
                 restricted_visible_api: false,
                 crate_visible_api: false,
@@ -997,8 +1012,8 @@ reason = "retain every compiled cfg alternative"
         let config = Config::load(directory.path(), Some(&path)).expect("load configuration");
 
         let mut production_fragment = fragment();
-        production_fragment.crate_id = "library-production".into();
-        production_fragment.definitions[0].id = "production-dual".into();
+        production_fragment.crate_id = test_id("library-production");
+        production_fragment.definitions[0].id = test_id("production-dual");
         production_fragment.definitions[0].name = "dual".into();
         production_fragment.definitions[0].span = Some(Span {
             file: "library/src/lib.rs".into(),
@@ -1006,8 +1021,8 @@ reason = "retain every compiled cfg alternative"
             column: 1,
         });
         let mut test_fragment = fragment();
-        test_fragment.crate_id = "library-test".into();
-        test_fragment.definitions[0].id = "test-dual".into();
+        test_fragment.crate_id = test_id("library-test");
+        test_fragment.definitions[0].id = test_id("test-dual");
         test_fragment.definitions[0].name = "dual".into();
         test_fragment.definitions[0].span = Some(Span {
             file: "library/src/lib.rs".into(),
