@@ -688,6 +688,25 @@ fn production_binary_named_like_a_library_does_not_suppress_its_findings() {
 }
 
 #[test]
+fn same_named_integration_test_does_not_keep_a_spanless_library_item_live() {
+    for binary_name in [None, Some("same")] {
+        let context = HawkTestContext::new("spanless_target_collision");
+        let mut command = context.command();
+        if let Some(binary_name) = binary_name {
+            command.env("CARGO_BIN_NAME", binary_name);
+        } else {
+            command.env_remove("CARGO_BIN_NAME");
+        }
+        let output = command.output().expect("run cargo-hawk");
+
+        context.assert_success(&output);
+        let stdout = context.normalized_stdout(&output);
+        assert!(stdout.contains("warning[hawk::dead_public]: `dead_api`"));
+        assert!(!stdout.contains("hawk::unnecessary_public"));
+    }
+}
+
+#[test]
 fn production_products_reuse_shared_dependency_compilations() {
     let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/production_consumers/Cargo.toml");

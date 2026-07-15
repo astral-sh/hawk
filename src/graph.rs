@@ -47,7 +47,7 @@ pub struct Fragment {
     pub package_name: String,
     pub crate_name: String,
     pub crate_id: String,
-    pub binary_name: Option<String>,
+    pub crate_root: Option<String>,
     pub is_product_root: bool,
     pub test_surface: bool,
     pub definitions: Vec<Definition>,
@@ -238,7 +238,7 @@ impl<'a> DefinitionIdentity<'a> {
 struct SourceDefinitionIdentity<'a> {
     package_name: Option<&'a str>,
     crate_name: Option<&'a str>,
-    binary_name: Option<&'a str>,
+    crate_root: Option<&'a str>,
     name: Option<&'a str>,
     kind: DefinitionKind,
     file: Option<&'a str>,
@@ -983,10 +983,10 @@ fn source_definition_identity<'a>(
             .span
             .is_none()
             .then_some(definition.crate_name.as_str()),
-        binary_name: definition
+        crate_root: definition
             .span
             .is_none()
-            .then_some(fragment.binary_name.as_deref())
+            .then_some(fragment.crate_root.as_deref())
             .flatten(),
         name: definition
             .span
@@ -1176,7 +1176,7 @@ mod tests {
                 package_name: "app".into(),
                 crate_name: "app".into(),
                 crate_id: "app".into(),
-                binary_name: Some("app".into()),
+                crate_root: Some("app/src/main.rs".into()),
                 is_product_root: true,
                 test_surface: false,
                 definitions: vec![node("main", "app", false)],
@@ -1190,7 +1190,7 @@ mod tests {
                 package_name: "lib".into(),
                 crate_name: "lib".into(),
                 crate_id: "lib".into(),
-                binary_name: None,
+                crate_root: Some("lib/src/lib.rs".into()),
                 is_product_root: false,
                 test_surface: false,
                 definitions,
@@ -1209,7 +1209,7 @@ mod tests {
                 package_name: "integration_test".into(),
                 crate_name: "integration_test".into(),
                 crate_id: "integration_test".into(),
-                binary_name: None,
+                crate_root: Some("integration_test/tests/test.rs".into()),
                 is_product_root: true,
                 test_surface: true,
                 definitions: vec![node("test_main", "integration_test", false)],
@@ -1227,7 +1227,7 @@ mod tests {
                 package_name: "lib".into(),
                 crate_name: "lib".into(),
                 crate_id: "lib".into(),
-                binary_name: None,
+                crate_root: Some("lib/src/lib.rs".into()),
                 is_product_root: false,
                 test_surface: false,
                 definitions,
@@ -2277,7 +2277,7 @@ mod tests {
             package_name: "lib".into(),
             crate_name: "lib".into(),
             crate_id: "lib-test".into(),
-            binary_name: None,
+            crate_root: Some("lib/src/lib.rs".into()),
             is_product_root: false,
             test_surface: false,
             definitions: vec![duplicate],
@@ -2306,7 +2306,7 @@ mod tests {
             package_name: "test_support".into(),
             crate_name: "test_support".into(),
             crate_id: "test_support".into(),
-            binary_name: None,
+            crate_root: Some("test_support/src/lib.rs".into()),
             is_product_root: false,
             test_surface: false,
             definitions: vec![generated_dead],
@@ -2349,7 +2349,7 @@ mod tests {
             package_name: "test_support".into(),
             crate_name: "test_support".into(),
             crate_id: "test_support".into(),
-            binary_name: None,
+            crate_root: Some("test_support/src/lib.rs".into()),
             is_product_root: false,
             test_surface: false,
             definitions: vec![generated_dead],
@@ -2372,8 +2372,14 @@ mod tests {
     }
 
     #[test]
-    fn spanless_declarations_in_same_named_binaries_do_not_share_liveness() {
-        for package_name in ["secondary", "lib"] {
+    fn spanless_declarations_in_same_named_targets_do_not_share_liveness() {
+        for (source_root, package_name, other_root) in [
+            ("lib/src/lib.rs", "secondary", "secondary/src/main.rs"),
+            ("lib/src/lib.rs", "lib", "lib/src/main.rs"),
+            ("lib/src/lib.rs", "lib", "lib/tests/lib.rs"),
+            ("lib/src/lib.rs", "lib", "lib/benches/lib.rs"),
+            ("lib/src/main.rs", "lib", "lib/examples/lib.rs"),
+        ] {
             let mut generated_library = node("generated_library", "lib", false);
             generated_library.name = "generated".into();
             let mut input = fragments(
@@ -2384,6 +2390,7 @@ mod tests {
                     kind: EdgeKind::Body,
                 }],
             );
+            input[1].crate_root = Some(source_root.into());
             let mut generated_binary = node("generated_binary", "lib", false);
             generated_binary.name = "generated".into();
             input.push(Fragment {
@@ -2391,7 +2398,7 @@ mod tests {
                 package_name: package_name.into(),
                 crate_name: "lib".into(),
                 crate_id: format!("{package_name}-bin"),
-                binary_name: Some("lib".into()),
+                crate_root: Some(other_root.into()),
                 is_product_root: true,
                 test_surface: false,
                 definitions: vec![node("binary_main", "lib", false), generated_binary],
@@ -2407,7 +2414,11 @@ mod tests {
 
             let findings = analyze(&input, &HashSet::new());
 
-            assert_eq!(findings.len(), 1, "package `{package_name}`");
+            assert_eq!(
+                findings.len(),
+                1,
+                "target `{other_root}` in package `{package_name}`"
+            );
             assert_eq!(findings[0].definition.id, "unreachable_public");
             assert_eq!(findings[0].kind, FindingKind::DeadPublic);
         }

@@ -1,0 +1,11 @@
+[package]
+name = "pkg"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "same"
+
+[[bin]]
+name = "app"
+path = "src/main.rs"
