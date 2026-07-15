@@ -13,7 +13,6 @@ extern crate rustc_span;
 
 use cargo_hawk_internal::protocol;
 
-#[path = "../driver.rs"]
 mod driver;
 
 fn main() -> std::process::ExitCode {

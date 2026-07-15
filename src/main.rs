@@ -2,6 +2,8 @@ use cargo_hawk_internal::protocol;
 
 mod cli;
 mod config;
+mod diagnostics;
+mod toolchain;
 
 fn main() -> std::process::ExitCode {
     let Ok(args): Result<Vec<String>, _> = std::env::args_os()
@@ -11,7 +13,7 @@ fn main() -> std::process::ExitCode {
         eprintln!("hawk: command-line arguments must be valid UTF-8");
         return std::process::ExitCode::FAILURE;
     };
-    if let Some(exit_code) = cli::run_rustc_probe(&args) {
+    if let Some(exit_code) = toolchain::run_rustc_probe(&args) {
         return exit_code;
     }
     match cli::run(args.clone()) {
