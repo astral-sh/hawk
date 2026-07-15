@@ -488,7 +488,10 @@ pub fn run_rustc_probe(args: &[String]) -> Option<ExitCode> {
     }
     let rustc = rustc_probe_compiler(args)?;
     let rustc_arguments = args.get(2..)?;
-    if rustc_arguments == ["-vV"] {
+    if rustc_arguments
+        .first()
+        .is_some_and(|argument| argument == "-vV")
+    {
         return Some(Command::new(rustc).args(rustc_arguments).status().map_or(
             ExitCode::FAILURE,
             |status| {
@@ -555,7 +558,9 @@ fn rustc_probe_compiler(args: &[String]) -> Option<&str> {
         return None;
     }
     let rustc_arguments = args.get(2..)?;
-    let version_query = rustc_arguments == ["-vV"];
+    let version_query = rustc_arguments
+        .first()
+        .is_some_and(|argument| argument == "-vV");
     let target_configuration = rustc_arguments
         .iter()
         .any(|argument| argument == "--print=cfg");

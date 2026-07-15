@@ -450,7 +450,7 @@ fn target_selectors_honor_wrapper_appended_cfg_flags() {
     fs::write(
         &wrapper,
         format!(
-            "#!/bin/sh\nexport {library_path}={:?}\nrustc=\"$1\"\nshift\ncase \" $* \" in *\" -vV \"*) exec \"$rustc\" \"$@\" ;; esac\nexec \"$rustc\" \"$@\" --cfg wrapper_target\n",
+            "#!/bin/sh\nexport {library_path}={:?}\nrustc=\"$1\"\nshift\nexec \"$rustc\" \"$@\" --cfg wrapper_target\n",
             driver_library.display().to_string()
         ),
     )
