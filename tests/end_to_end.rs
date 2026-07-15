@@ -9,22 +9,12 @@ use std::os::unix::fs::{PermissionsExt, symlink};
 use std::os::unix::ffi::OsStringExt;
 
 const ISOLATED_ENVIRONMENT: &[&str] = &[
-    "CARGO_BUILD_RUSTC",
-    "CARGO_BUILD_RUSTC_WRAPPER",
-    "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER",
-    "CARGO_BUILD_RUSTDOC",
-    "CARGO_BUILD_RUSTDOCFLAGS",
-    "CARGO_BUILD_RUSTFLAGS",
-    "CARGO_BUILD_TARGET",
-    "CARGO_BUILD_TARGET_DIR",
-    "CARGO_ENCODED_RUSTDOCFLAGS",
-    "CARGO_ENCODED_RUSTFLAGS",
-    "CARGO_TARGET_DIR",
     "RUSTC_WRAPPER",
     "RUSTC_WORKSPACE_WRAPPER",
     "RUSTDOC",
     "RUSTDOCFLAGS",
     "RUSTFLAGS",
+    "RUSTUP_TOOLCHAIN",
     "HAWK_COLLECTION_OPTIONS",
     "HAWK_CONSUMER_MODE",
     "HAWK_FIX_PLAN",
@@ -35,6 +25,8 @@ const ISOLATED_ENVIRONMENT: &[&str] = &[
     "HAWK_RUSTC_PROBE",
     "HAWK_RUSTC_PROBE_TOKEN",
 ];
+
+const ISOLATED_GIT_ENVIRONMENT: &[&str] = &["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"];
 
 fn copy_directory(source: &Path, destination: &Path) {
     fs::create_dir_all(destination).expect("create fixture copy directory");
@@ -50,23 +42,21 @@ fn copy_directory(source: &Path, destination: &Path) {
 }
 
 fn initialize_git_repository(path: &Path) {
-    let status = Command::new("git")
+    let status = git_command(path)
         .arg("init")
         .arg("--quiet")
-        .current_dir(path)
         .status()
         .expect("initialize Git repository");
     assert!(status.success());
 
-    let status = Command::new("git")
+    let status = git_command(path)
         .arg("add")
         .arg(".")
-        .current_dir(path)
         .status()
         .expect("stage fixture workspace");
     assert!(status.success());
 
-    let status = Command::new("git")
+    let status = git_command(path)
         .args([
             "-c",
             "user.name=Hawk Tests",
@@ -77,10 +67,18 @@ fn initialize_git_repository(path: &Path) {
             "-m",
             "Initial fixture",
         ])
-        .current_dir(path)
         .status()
         .expect("commit fixture workspace");
     assert!(status.success());
+}
+
+fn git_command(path: &Path) -> Command {
+    let mut command = Command::new("git");
+    command.current_dir(path);
+    for variable in ISOLATED_GIT_ENVIRONMENT {
+        command.env_remove(variable);
+    }
+    command
 }
 
 struct HawkTestContext {
@@ -96,11 +94,7 @@ impl HawkTestContext {
 
     fn new_in_checkout(fixture: &str, checkout: &Path) -> Self {
         let source = checkout.join("tests/fixtures").join(fixture);
-        let workspace_parent = isolated_workspace_parent(checkout);
-        let workspace = tempfile::Builder::new()
-            .prefix(".hawk-test-")
-            .tempdir_in(&workspace_parent)
-            .expect("temporary fixture workspace");
+        let workspace = temporary_workspace(checkout);
         copy_directory(&source, workspace.path());
         Self {
             workspace,
@@ -135,27 +129,42 @@ impl HawkTestContext {
     }
 
     fn cargo(&self) -> Command {
-        let mut command = Command::new("cargo");
+        let mut command = Command::new(
+            Path::new(env!("HAWK_RUSTC_SYSROOT"))
+                .join("bin")
+                .join(format!("cargo{}", std::env::consts::EXE_SUFFIX)),
+        );
         command.current_dir(self.workspace());
         self.isolate(&mut command);
         command
     }
 
     fn isolate(&self, command: &mut Command) {
-        command
-            .env("CARGO_HOME", self.cargo_home.path())
-            .env("RUSTC", env!("HAWK_RUSTC"));
         for variable in ISOLATED_ENVIRONMENT {
+            command.env_remove(variable);
+        }
+        for variable in ISOLATED_GIT_ENVIRONMENT {
             command.env_remove(variable);
         }
         for (variable, _) in std::env::vars_os() {
             if variable
                 .to_str()
-                .is_some_and(|variable| variable.starts_with("CARGO_TARGET_"))
+                .is_some_and(|variable| variable == "CARGO" || variable.starts_with("CARGO_"))
             {
                 command.env_remove(variable);
             }
         }
+
+        let toolchain_bin = Path::new(env!("HAWK_RUSTC_SYSROOT")).join("bin");
+        let inherited_path = std::env::var_os("PATH").unwrap_or_default();
+        let path = std::env::join_paths(
+            std::iter::once(toolchain_bin).chain(std::env::split_paths(&inherited_path)),
+        )
+        .expect("valid PATH for isolated toolchain");
+        command
+            .env("CARGO_HOME", self.cargo_home.path())
+            .env("RUSTC", env!("HAWK_RUSTC"))
+            .env("PATH", path);
     }
 
     fn run(&self, args: &[&str]) -> Output {
@@ -183,9 +192,8 @@ impl HawkTestContext {
     }
 
     fn git_diff(&self) -> String {
-        let output = Command::new("git")
+        let output = git_command(self.workspace())
             .args(["diff", "--no-ext-diff", "--no-color"])
-            .current_dir(self.workspace())
             .output()
             .expect("read fixture diff");
         assert!(output.status.success());
@@ -216,12 +224,10 @@ impl HawkTestContext {
     }
 }
 
-fn isolated_workspace_parent(checkout: &Path) -> PathBuf {
-    let checkout = checkout
-        .canonicalize()
-        .expect("canonical fixture checkout path");
-    let mut workspace_parent = checkout.clone();
-    for ancestor in checkout.ancestors() {
+fn isolated_workspace_parent(root: &Path) -> PathBuf {
+    let root = root.canonicalize().expect("canonical workspace root path");
+    let mut workspace_parent = root.clone();
+    for ancestor in root.ancestors() {
         let cargo = ancestor.join(".cargo");
         if cargo.join("config.toml").is_file() || cargo.join("config").is_file() {
             workspace_parent = ancestor
@@ -231,6 +237,20 @@ fn isolated_workspace_parent(checkout: &Path) -> PathBuf {
         }
     }
     workspace_parent
+}
+
+fn temporary_workspace(checkout: &Path) -> tempfile::TempDir {
+    let temporary_root = std::env::temp_dir();
+    for root in [checkout, temporary_root.as_path()] {
+        let parent = isolated_workspace_parent(root);
+        if let Ok(workspace) = tempfile::Builder::new()
+            .prefix(".hawk-test-")
+            .tempdir_in(parent)
+        {
+            return workspace;
+        }
+    }
+    panic!("temporary fixture workspace");
 }
 
 #[test]
@@ -250,12 +270,12 @@ fn test_context_isolates_compiler_environment() {
     assert!(environment.iter().any(|(name, value)| {
         *name == "RUSTC" && value.is_some_and(|value| value == env!("HAWK_RUSTC"))
     }));
-    assert!(
+    assert_eq!(
+        isolated_workspace_parent(context.workspace()),
         context
             .workspace()
-            .starts_with(isolated_workspace_parent(Path::new(env!(
-                "CARGO_MANIFEST_DIR"
-            ))))
+            .canonicalize()
+            .expect("canonical workspace path")
     );
 }
 
@@ -267,9 +287,13 @@ fn test_context_ignores_inherited_compiler_environment() {
     let output = Command::new(std::env::current_exe().expect("current test executable"))
         .arg("--exact")
         .arg("benchmark_consumers_preserve_required_public_visibility")
+        .env("CARGO", "invalid-cargo")
+        .env("CARGO_BUILD_JOBS", "invalid-cargo-jobs")
         .env("CARGO_BUILD_RUSTC_WRAPPER", "invalid-cargo-rustc-wrapper")
         .env("CARGO_BUILD_RUSTFLAGS", "--invalid-cargo-rustc-flag")
         .env("CARGO_BUILD_TARGET", "invalid-target")
+        .env("CARGO_PROFILE_DEV_PANIC", "invalid-cargo-panic-strategy")
+        .env("CARGO_TERM_QUIET", "true")
         .env("RUSTC", "invalid-rustc")
         .env("RUSTC_WRAPPER", "invalid-rustc-wrapper")
         .env("RUSTDOCFLAGS", "--invalid-rustdoc-flag")
@@ -288,6 +312,57 @@ fn test_context_ignores_inherited_compiler_environment() {
     assert!(
         output.status.success(),
         "inherited compiler environment affected the nested test:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_context_ignores_inherited_toolchain() {
+    let fake_bin = tempfile::tempdir().expect("temporary fake binary directory");
+    for executable in ["cargo", "rustc", "rustdoc"] {
+        let executable = fake_bin.path().join(executable);
+        fs::write(&executable, "#!/bin/sh\nexit 1\n").expect("write fake toolchain executable");
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755))
+            .expect("make fake toolchain executable");
+    }
+    let path = std::env::join_paths(std::iter::once(fake_bin.path().to_path_buf()).chain(
+        std::env::split_paths(&std::env::var_os("PATH").expect("PATH is set")),
+    ))
+    .expect("construct PATH");
+
+    let output = Command::new(std::env::current_exe().expect("current test executable"))
+        .arg("--exact")
+        .arg("doctest_consumers_preserve_required_public_visibility_during_fixes")
+        .env("PATH", path)
+        .env("RUSTUP_TOOLCHAIN", "invalid-toolchain")
+        .output()
+        .expect("run nested end-to-end test");
+
+    assert!(
+        output.status.success(),
+        "inherited toolchain affected the nested test:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_context_ignores_inherited_git_environment() {
+    let git = tempfile::tempdir().expect("temporary inherited Git directory");
+    let output = Command::new(std::env::current_exe().expect("current test executable"))
+        .arg("--exact")
+        .arg("applies_multiple_fix_passes_in_a_clean_git_repository")
+        .env("GIT_DIR", git.path())
+        .env("GIT_WORK_TREE", git.path())
+        .env("GIT_INDEX_FILE", git.path().join("index"))
+        .output()
+        .expect("run nested end-to-end test");
+
+    assert!(
+        output.status.success(),
+        "inherited Git environment affected the nested test:\n{}\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
@@ -335,6 +410,42 @@ fn test_context_ignores_ancestor_cargo_configuration() {
         context.assert_success(&output);
         assert!(!context.workspace().starts_with(temporary_root.path()));
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn test_context_does_not_require_a_writable_checkout_parent() {
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/basic");
+    let temporary_root = tempfile::tempdir().expect("temporary root");
+    let checkout_parent = temporary_root.path().join("read-only");
+    let checkout = checkout_parent.join("checkout");
+    let fixture = checkout.join("tests/fixtures/basic");
+    copy_directory(&source, &fixture);
+
+    let cargo = checkout.join(".cargo");
+    fs::create_dir(&cargo).expect("checkout Cargo config directory");
+    fs::write(
+        cargo.join("config.toml"),
+        "[build]\nrustflags = [\"--invalid-checkout-rustc-flag\"]\n",
+    )
+    .expect("write checkout Cargo config");
+
+    let mut permissions = fs::metadata(&checkout_parent)
+        .expect("checkout parent metadata")
+        .permissions();
+    let mode = permissions.mode();
+    permissions.set_mode(0o555);
+    fs::set_permissions(&checkout_parent, permissions).expect("make checkout parent read-only");
+    let context = HawkTestContext::new_in_checkout("basic", &checkout);
+    let mut permissions = fs::metadata(&checkout_parent)
+        .expect("checkout parent metadata")
+        .permissions();
+    permissions.set_mode(mode);
+    fs::set_permissions(&checkout_parent, permissions).expect("restore checkout parent mode");
+
+    assert!(!context.workspace().starts_with(&checkout_parent));
+    let output = context.run(&["-A", "warnings"]);
+    context.assert_success(&output);
 }
 
 #[test]
@@ -457,7 +568,7 @@ fn ignores_stale_fix_plan_during_analysis() {
 fn honors_cargo_configured_compiler() {
     let context = HawkTestContext::new("basic");
 
-    let rustc_sysroot = Command::new("rustc")
+    let rustc_sysroot = Command::new(env!("HAWK_RUSTC"))
         .arg("--print=sysroot")
         .output()
         .expect("read Rust compiler sysroot");
@@ -500,9 +611,14 @@ fn honors_cargo_configured_compiler() {
     fs::set_permissions(&fake_rustc, fs::Permissions::from_mode(0o755))
         .expect("make fake rustc executable");
 
-    let path = std::env::join_paths(std::iter::once(fake_bin.path().to_path_buf()).chain(
-        std::env::split_paths(&std::env::var_os("PATH").expect("PATH is set")),
-    ))
+    let toolchain_bin = Path::new(env!("HAWK_RUSTC_SYSROOT")).join("bin");
+    let path = std::env::join_paths(
+        std::iter::once(fake_bin.path().to_path_buf())
+            .chain(std::iter::once(toolchain_bin))
+            .chain(std::env::split_paths(
+                &std::env::var_os("PATH").expect("PATH is set"),
+            )),
+    )
     .expect("construct PATH");
     let output = context
         .command()
@@ -520,7 +636,7 @@ fn honors_cargo_configured_compiler() {
 
 #[test]
 fn diagnoses_public_surface_of_a_binary_product() {
-    let rustc_version = Command::new("rustc")
+    let rustc_version = Command::new(env!("HAWK_RUSTC"))
         .arg("-vV")
         .output()
         .expect("read Rust compiler version");

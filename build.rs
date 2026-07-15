@@ -26,6 +26,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let sysroot = String::from_utf8(sysroot)?;
     let sysroot = sysroot.trim();
 
+    println!("cargo:rustc-env=HAWK_RUSTC_SYSROOT={sysroot}");
     println!("cargo:rustc-link-search=native={sysroot}/lib");
     if env::var("CARGO_CFG_TARGET_FAMILY").as_deref() == Ok("unix") {
         // Unit tests that link rustc_private run without the frontend's loader setup.
