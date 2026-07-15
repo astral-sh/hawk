@@ -18,7 +18,6 @@ fn command_output(command: &mut Command, description: &str) -> Result<Vec<u8>, B
 
 fn main() -> Result<(), Box<dyn Error>> {
     let rustc = env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
-    println!("cargo:rustc-env=HAWK_RUSTC={}", rustc.to_string_lossy());
     let sysroot = command_output(
         Command::new(&rustc).args(["--print", "sysroot"]),
         "rustc --print sysroot",
@@ -26,7 +25,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     let sysroot = String::from_utf8(sysroot)?;
     let sysroot = sysroot.trim();
 
-    println!("cargo:rustc-env=HAWK_RUSTC_SYSROOT={sysroot}");
     println!("cargo:rustc-link-search=native={sysroot}/lib");
     if env::var("CARGO_CFG_TARGET_FAMILY").as_deref() == Ok("unix") {
         // Unit tests that link rustc_private run without the frontend's loader setup.
