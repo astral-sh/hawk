@@ -1,5 +1,7 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::VecDeque;
+use std::fmt::{self, Display, Formatter};
 
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use serde::{Deserialize, Serialize};
 
 use crate::protocol::ProtocolVersion;
@@ -46,14 +48,14 @@ pub struct Fragment {
     pub protocol_version: ProtocolVersion,
     pub package_name: String,
     pub crate_name: String,
-    pub crate_id: String,
+    pub crate_id: DefinitionId,
     pub is_product_root: bool,
     pub test_surface: bool,
     pub definitions: Vec<Definition>,
     pub edges: Vec<Edge>,
-    pub roots: Vec<String>,
-    pub conservative_roots: Vec<String>,
-    pub required_public_roots: Vec<String>,
+    pub roots: Vec<DefinitionId>,
+    pub conservative_roots: Vec<DefinitionId>,
+    pub required_public_roots: Vec<DefinitionId>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -66,7 +68,7 @@ pub struct FixPlan {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct FixTarget {
-    pub id: String,
+    pub id: DefinitionId,
     pub crate_name: String,
     pub name: String,
     pub definition_kind: DefinitionKind,
@@ -78,7 +80,7 @@ pub struct FixTarget {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Definition {
-    pub id: String,
+    pub id: DefinitionId,
     pub crate_name: String,
     pub name: String,
     pub kind: DefinitionKind,
@@ -95,9 +97,26 @@ pub struct Definition {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Edge {
-    pub from: String,
-    pub to: String,
+    pub from: DefinitionId,
+    pub to: DefinitionId,
     pub kind: EdgeKind,
+}
+
+/// A compact, stable identity for a compiler definition.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(transparent)]
+pub struct DefinitionId([u64; 2]);
+
+impl DefinitionId {
+    pub const fn new(stable_crate_id: u64, local_hash: u64) -> Self {
+        Self([stable_crate_id, local_hash])
+    }
+}
+
+impl Display for DefinitionId {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{:016x}{:016x}", self.0[0], self.0[1])
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -245,8 +264,8 @@ struct SourceDefinitionIdentity<'a> {
 pub fn analyze<'a>(
     production_fragments: &'a [Fragment],
     test_fragments: &'a [Fragment],
-    candidate_crates: &HashSet<String>,
-    excluded_crates: &HashSet<String>,
+    candidate_crates: &std::collections::HashSet<String>,
+    excluded_crates: &std::collections::HashSet<String>,
 ) -> Vec<Finding<'a>> {
     analyze_with_options(
         production_fragments,
@@ -260,8 +279,8 @@ pub fn analyze<'a>(
 pub fn analyze_with_options<'a>(
     production_fragments: &'a [Fragment],
     test_fragments: &'a [Fragment],
-    candidate_crates: &HashSet<String>,
-    excluded_crates: &HashSet<String>,
+    candidate_crates: &std::collections::HashSet<String>,
+    excluded_crates: &std::collections::HashSet<String>,
     preserve_uniform_field_visibility: bool,
 ) -> Vec<Finding<'a>> {
     let observed_definitions: Vec<&Definition> = production_fragments
@@ -269,22 +288,22 @@ pub fn analyze_with_options<'a>(
         .chain(test_fragments)
         .flat_map(|fragment| &fragment.definitions)
         .collect();
-    let definitions: HashMap<&str, &Definition> = observed_definitions
+    let definitions: HashMap<DefinitionId, &Definition> = observed_definitions
         .iter()
         .copied()
-        .map(|definition| (definition.id.as_str(), definition))
+        .map(|definition| (definition.id, definition))
         .collect();
-    let definition_crate_ids: HashMap<&str, &str> = production_fragments
+    let definition_crate_ids: HashMap<DefinitionId, DefinitionId> = production_fragments
         .iter()
         .chain(test_fragments)
         .flat_map(|fragment| {
             fragment
                 .definitions
                 .iter()
-                .map(|definition| (definition.id.as_str(), fragment.crate_id.as_str()))
+                .map(|definition| (definition.id, fragment.crate_id))
         })
         .collect();
-    let definition_compilation_ids: HashMap<&str, usize> = production_fragments
+    let definition_compilation_ids: HashMap<DefinitionId, usize> = production_fragments
         .iter()
         .chain(test_fragments)
         .enumerate()
@@ -292,7 +311,7 @@ pub fn analyze_with_options<'a>(
             fragment
                 .definitions
                 .iter()
-                .map(move |definition| (definition.id.as_str(), compilation_id))
+                .map(move |definition| (definition.id, compilation_id))
         })
         .collect();
     let production_edges: Vec<&Edge> = production_fragments
@@ -310,15 +329,15 @@ pub fn analyze_with_options<'a>(
         .collect();
     let equivalents = equivalent_definitions(&definitions, &definition_compilation_ids);
     let required_scopes = required_scopes(&definitions, &edges, &equivalents);
-    let production_definition_ids: HashSet<&str> = production_fragments
+    let production_definition_ids: HashSet<DefinitionId> = production_fragments
         .iter()
         .flat_map(|fragment| &fragment.definitions)
-        .map(|definition| definition.id.as_str())
+        .map(|definition| definition.id)
         .collect();
-    let test_definition_ids: HashSet<&str> = test_fragments
+    let test_definition_ids: HashSet<DefinitionId> = test_fragments
         .iter()
         .flat_map(|fragment| &fragment.definitions)
-        .map(|definition| definition.id.as_str())
+        .map(|definition| definition.id)
         .collect();
     let production_adjacency =
         adjacency(&production_edges, &equivalents, &production_definition_ids);
@@ -327,30 +346,30 @@ pub fn analyze_with_options<'a>(
     let production_roots = production_fragments
         .iter()
         .filter(|fragment| fragment.is_product_root)
-        .flat_map(|fragment| fragment.roots.iter().map(String::as_str))
+        .flat_map(|fragment| fragment.roots.iter().copied())
         .chain(
             production_fragments
                 .iter()
-                .flat_map(|fragment| fragment.conservative_roots.iter().map(String::as_str)),
+                .flat_map(|fragment| fragment.conservative_roots.iter().copied()),
         );
     let production = reachable(production_roots, &production_adjacency);
     let test_roots = test_fragments
         .iter()
         .filter(|fragment| fragment.is_product_root)
-        .flat_map(|fragment| fragment.roots.iter().map(String::as_str))
+        .flat_map(|fragment| fragment.roots.iter().copied())
         .chain(
             test_fragments
                 .iter()
-                .flat_map(|fragment| fragment.conservative_roots.iter().map(String::as_str)),
+                .flat_map(|fragment| fragment.conservative_roots.iter().copied()),
         );
     let tests = reachable(test_roots, &test_adjacency);
 
-    let mut explicitly_required: HashSet<&str> = production_fragments
+    let mut explicitly_required: HashSet<DefinitionId> = production_fragments
         .iter()
         .chain(test_fragments)
-        .flat_map(|fragment| fragment.required_public_roots.iter().map(String::as_str))
+        .flat_map(|fragment| fragment.required_public_roots.iter().copied())
         .collect();
-    let no_explicitly_required = HashSet::new();
+    let no_explicitly_required = HashSet::default();
     let externally_required_visibility = required_public_visibility(
         &definitions,
         &definition_crate_ids,
@@ -362,13 +381,13 @@ pub fn analyze_with_options<'a>(
         .values()
         .filter(|definition| definition.public_api && definition.kind == DefinitionKind::Reexport)
     {
-        let targets = reexport_targets(definition.id.as_str(), &edges);
+        let targets = reexport_targets(definition.id, &edges);
         if !is_analyzable_reexport(&targets, &definitions)
             || targets
                 .iter()
                 .any(|target| externally_required_visibility.contains(target))
         {
-            explicitly_required.insert(definition.id.as_str());
+            explicitly_required.insert(definition.id);
         }
     }
     let required_public_visibility = required_public_visibility(
@@ -380,7 +399,7 @@ pub fn analyze_with_options<'a>(
     );
 
     let mut findings = Vec::new();
-    let mut reported = HashSet::new();
+    let mut reported = HashSet::default();
     let production_definitions: HashSet<_> = production_fragments
         .iter()
         .flat_map(|fragment| &fragment.definitions)
@@ -431,7 +450,7 @@ pub fn analyze_with_options<'a>(
             continue;
         }
 
-        if required_public_visibility.contains(definition.id.as_str()) {
+        if required_public_visibility.contains(&definition.id) {
             continue;
         }
 
@@ -540,16 +559,16 @@ fn field_group_identity(definition: &Definition) -> Option<(&str, &Span)> {
 fn suppress_uniform_field_visibility_findings<'a>(
     findings: &mut Vec<Finding<'a>>,
     definitions: &[&'a Definition],
-    required_public_visibility: &HashSet<&str>,
-    required_scopes: &HashMap<&str, RequiredScope>,
-    equivalents: &HashMap<&str, Vec<&str>>,
+    required_public_visibility: &HashSet<DefinitionId>,
+    required_scopes: &HashMap<DefinitionId, RequiredScope>,
+    equivalents: &HashMap<DefinitionId, Vec<DefinitionId>>,
 ) {
     let protected_groups: HashSet<_> = definitions
         .iter()
         .filter_map(|definition| {
             let identity = field_group_identity(definition)?;
             let required = if definition.public_api {
-                required_public_visibility.contains(definition.id.as_str())
+                required_public_visibility.contains(&definition.id)
             } else if definition.restricted_visible_api {
                 has_known_restricted_visibility_requirement(
                     definition,
@@ -574,8 +593,8 @@ fn suppress_uniform_field_visibility_findings<'a>(
 
 fn has_known_restricted_visibility_requirement(
     definition: &Definition,
-    required_scopes: &HashMap<&str, RequiredScope>,
-    equivalents: &HashMap<&str, Vec<&str>>,
+    required_scopes: &HashMap<DefinitionId, RequiredScope>,
+    equivalents: &HashMap<DefinitionId, Vec<DefinitionId>>,
 ) -> bool {
     let required_scope = merged_required_scope(definition, required_scopes, equivalents);
     matches!(
@@ -586,8 +605,8 @@ fn has_known_restricted_visibility_requirement(
 
 fn restricted_visibility_finding_kind(
     definition: &Definition,
-    required_scopes: &HashMap<&str, RequiredScope>,
-    equivalents: &HashMap<&str, Vec<&str>>,
+    required_scopes: &HashMap<DefinitionId, RequiredScope>,
+    equivalents: &HashMap<DefinitionId, Vec<DefinitionId>>,
 ) -> Option<FindingKind> {
     if matches!(
         definition.kind,
@@ -622,18 +641,18 @@ fn restricted_visibility_finding_kind(
 
 fn merged_required_scope(
     definition: &Definition,
-    required_scopes: &HashMap<&str, RequiredScope>,
-    equivalents: &HashMap<&str, Vec<&str>>,
+    required_scopes: &HashMap<DefinitionId, RequiredScope>,
+    equivalents: &HashMap<DefinitionId, Vec<DefinitionId>>,
 ) -> RequiredScope {
     let mut required_scope = RequiredScope::default();
-    for id in std::iter::once(definition.id.as_str()).chain(
+    for id in std::iter::once(definition.id).chain(
         equivalents
-            .get(definition.id.as_str())
+            .get(&definition.id)
             .into_iter()
             .flatten()
             .copied(),
     ) {
-        if let Some(scope) = required_scopes.get(id) {
+        if let Some(scope) = required_scopes.get(&id) {
             required_scope.merge(scope);
         }
     }
@@ -708,19 +727,19 @@ impl RequiredScope {
     }
 }
 
-fn required_scopes<'a>(
-    definitions: &HashMap<&'a str, &'a Definition>,
-    edges: &[&'a Edge],
-    equivalents: &HashMap<&'a str, Vec<&'a str>>,
-) -> HashMap<&'a str, RequiredScope> {
-    let mut required_scopes: HashMap<&str, RequiredScope> = HashMap::new();
-    let mut propagation: HashMap<&str, Vec<&str>> = HashMap::new();
+fn required_scopes(
+    definitions: &HashMap<DefinitionId, &Definition>,
+    edges: &[&Edge],
+    equivalents: &HashMap<DefinitionId, Vec<DefinitionId>>,
+) -> HashMap<DefinitionId, RequiredScope> {
+    let mut required_scopes: HashMap<DefinitionId, RequiredScope> = HashMap::default();
+    let mut propagation: HashMap<DefinitionId, Vec<DefinitionId>> = HashMap::default();
     let mut pending = VecDeque::new();
     for edge in edges {
-        if edge.from == edge.to || !definitions.contains_key(edge.to.as_str()) {
+        if edge.from == edge.to || !definitions.contains_key(&edge.to) {
             continue;
         }
-        let source = definitions.get(edge.from.as_str());
+        let source = definitions.get(&edge.from);
         let requirement = if edge.kind == EdgeKind::Reexport
             || (edge.kind == EdgeKind::VisibilityParent
                 && source.is_some_and(|source| source.visible_reexport_api))
@@ -732,36 +751,33 @@ fn required_scopes<'a>(
             })
         };
         if required_scopes
-            .entry(edge.to.as_str())
+            .entry(edge.to)
             .or_default()
             .merge(&requirement)
         {
-            pending.push_back(edge.to.as_str());
+            pending.push_back(edge.to);
         }
         if propagates_visibility_requirement(edge.kind) {
-            propagation
-                .entry(edge.from.as_str())
-                .or_default()
-                .push(edge.to.as_str());
+            propagation.entry(edge.from).or_default().push(edge.to);
         }
     }
     for (source, targets) in equivalents {
         propagation
-            .entry(source)
+            .entry(*source)
             .or_default()
             .extend(targets.iter().copied());
     }
     while let Some(source) = pending.pop_front() {
-        let Some(required_scope) = required_scopes.get(source).cloned() else {
+        let Some(required_scope) = required_scopes.get(&source).cloned() else {
             continue;
         };
-        for target in propagation.get(source).into_iter().flatten() {
+        for target in propagation.get(&source).into_iter().flatten() {
             if required_scopes
-                .entry(target)
+                .entry(*target)
                 .or_default()
                 .merge(&required_scope)
             {
-                pending.push_back(target);
+                pending.push_back(*target);
             }
         }
     }
@@ -781,63 +797,58 @@ fn propagates_visibility_requirement(kind: EdgeKind) -> bool {
 fn is_live(
     definition: &Definition,
     edges: &[&Edge],
-    reachable: &HashSet<&str>,
-    equivalents: &HashMap<&str, Vec<&str>>,
+    reachable: &HashSet<DefinitionId>,
+    equivalents: &HashMap<DefinitionId, Vec<DefinitionId>>,
 ) -> bool {
     let equivalent_ids = equivalents
-        .get(definition.id.as_str())
+        .get(&definition.id)
         .into_iter()
         .flatten()
         .copied();
-    let ids = std::iter::once(definition.id.as_str()).chain(equivalent_ids);
+    let ids = std::iter::once(definition.id).chain(equivalent_ids);
     if definition.kind == DefinitionKind::Reexport {
         ids.flat_map(|id| reexport_targets(id, edges))
-            .any(|target| reachable.contains(target))
+            .any(|target| reachable.contains(&target))
     } else {
-        ids.into_iter().any(|id| reachable.contains(id))
+        ids.into_iter().any(|id| reachable.contains(&id))
     }
 }
 
-fn required_public_visibility<'a>(
-    definitions: &HashMap<&'a str, &'a Definition>,
-    definition_crate_ids: &HashMap<&'a str, &'a str>,
-    edges: &[&'a Edge],
-    equivalents: &HashMap<&'a str, Vec<&'a str>>,
-    explicitly_required: &HashSet<&'a str>,
-) -> HashSet<&'a str> {
+fn required_public_visibility(
+    definitions: &HashMap<DefinitionId, &Definition>,
+    definition_crate_ids: &HashMap<DefinitionId, DefinitionId>,
+    edges: &[&Edge],
+    equivalents: &HashMap<DefinitionId, Vec<DefinitionId>>,
+    explicitly_required: &HashSet<DefinitionId>,
+) -> HashSet<DefinitionId> {
     let mut required = explicitly_required.clone();
     // Rust privacy-checks every compiled item, including items outside the
     // selected product's runtime reachability graph.
     required.extend(edges.iter().filter_map(|edge| {
-        let from = definition_crate_ids.get(edge.from.as_str())?;
-        let to = definition_crate_ids.get(edge.to.as_str())?;
-        (from != to).then_some(edge.to.as_str())
+        let from = definition_crate_ids.get(&edge.from)?;
+        let to = definition_crate_ids.get(&edge.to)?;
+        (from != to).then_some(edge.to)
     }));
 
-    let mut interface_edges: HashMap<&str, Vec<&str>> = HashMap::new();
+    let mut interface_edges: HashMap<DefinitionId, Vec<DefinitionId>> = HashMap::default();
     for edge in edges {
-        if propagates_visibility_requirement(edge.kind)
-            && definitions.contains_key(edge.to.as_str())
-        {
-            interface_edges
-                .entry(edge.from.as_str())
-                .or_default()
-                .push(edge.to.as_str());
+        if propagates_visibility_requirement(edge.kind) && definitions.contains_key(&edge.to) {
+            interface_edges.entry(edge.from).or_default().push(edge.to);
         }
     }
     for (source, targets) in equivalents {
         interface_edges
-            .entry(source)
+            .entry(*source)
             .or_default()
             .extend(targets.iter().copied());
     }
 
-    let mut pending: Vec<&str> = required.iter().copied().collect();
+    let mut pending: Vec<DefinitionId> = required.iter().copied().collect();
     while let Some(from) = pending.pop() {
-        if let Some(targets) = interface_edges.get(from) {
+        if let Some(targets) = interface_edges.get(&from) {
             for target in targets {
-                if required.insert(target) {
-                    pending.push(target);
+                if required.insert(*target) {
+                    pending.push(*target);
                 }
             }
         }
@@ -846,15 +857,18 @@ fn required_public_visibility<'a>(
     required
 }
 
-fn reexport_targets<'a>(source: &str, edges: &'a [&Edge]) -> Vec<&'a str> {
+fn reexport_targets(source: DefinitionId, edges: &[&Edge]) -> Vec<DefinitionId> {
     edges
         .iter()
         .filter(|edge| edge.kind == EdgeKind::Reexport && edge.from == source)
-        .map(|edge| edge.to.as_str())
+        .map(|edge| edge.to)
         .collect()
 }
 
-fn is_analyzable_reexport(targets: &[&str], definitions: &HashMap<&str, &Definition>) -> bool {
+fn is_analyzable_reexport(
+    targets: &[DefinitionId],
+    definitions: &HashMap<DefinitionId, &Definition>,
+) -> bool {
     !targets.is_empty()
         && targets.iter().all(|target| {
             definitions.get(target).is_some_and(|definition| {
@@ -874,24 +888,21 @@ fn is_analyzable_reexport(targets: &[&str], definitions: &HashMap<&str, &Definit
         })
 }
 
-fn adjacency<'a>(
-    edges: &'a [&Edge],
-    equivalents: &HashMap<&'a str, Vec<&'a str>>,
-    definition_ids: &HashSet<&str>,
-) -> HashMap<&'a str, Vec<&'a str>> {
-    let mut adjacency: HashMap<&str, Vec<&str>> = HashMap::new();
+fn adjacency(
+    edges: &[&Edge],
+    equivalents: &HashMap<DefinitionId, Vec<DefinitionId>>,
+    definition_ids: &HashSet<DefinitionId>,
+) -> HashMap<DefinitionId, Vec<DefinitionId>> {
+    let mut adjacency: HashMap<DefinitionId, Vec<DefinitionId>> = HashMap::default();
     for edge in edges {
         if edge.kind == EdgeKind::VisibilityRequirement {
             continue;
         }
-        adjacency
-            .entry(edge.from.as_str())
-            .or_default()
-            .push(edge.to.as_str());
+        adjacency.entry(edge.from).or_default().push(edge.to);
     }
     for (source, targets) in equivalents {
         if definition_ids.contains(source) {
-            adjacency.entry(source).or_default().extend(
+            adjacency.entry(*source).or_default().extend(
                 targets
                     .iter()
                     .copied()
@@ -903,21 +914,19 @@ fn adjacency<'a>(
 }
 
 fn equivalent_definitions<'a>(
-    definitions: &HashMap<&'a str, &'a Definition>,
-    definition_compilation_ids: &HashMap<&'a str, usize>,
-) -> HashMap<&'a str, Vec<&'a str>> {
-    let mut groups: HashMap<SourceDefinitionIdentity<'a>, Vec<(&'a str, usize)>> = HashMap::new();
+    definitions: &HashMap<DefinitionId, &'a Definition>,
+    definition_compilation_ids: &HashMap<DefinitionId, usize>,
+) -> HashMap<DefinitionId, Vec<DefinitionId>> {
+    let mut groups: HashMap<SourceDefinitionIdentity<'a>, Vec<(DefinitionId, usize)>> =
+        HashMap::default();
     for definition in definitions.values() {
         groups
             .entry(source_definition_identity(definition))
             .or_default()
-            .push((
-                definition.id.as_str(),
-                definition_compilation_ids[definition.id.as_str()],
-            ));
+            .push((definition.id, definition_compilation_ids[&definition.id]));
     }
 
-    let mut equivalents: HashMap<&str, Vec<&str>> = HashMap::new();
+    let mut equivalents: HashMap<DefinitionId, Vec<DefinitionId>> = HashMap::default();
     for group in groups.values().filter(|group| {
         group.len() > 1
             && group
@@ -961,15 +970,15 @@ fn source_definition_identity<'a>(definition: &'a Definition) -> SourceDefinitio
     }
 }
 
-fn reachable<'a>(
-    roots: impl IntoIterator<Item = &'a str>,
-    adjacency: &HashMap<&'a str, Vec<&'a str>>,
-) -> HashSet<&'a str> {
-    let mut live = HashSet::new();
-    let mut pending: Vec<&str> = roots.into_iter().collect();
+fn reachable(
+    roots: impl IntoIterator<Item = DefinitionId>,
+    adjacency: &HashMap<DefinitionId, Vec<DefinitionId>>,
+) -> HashSet<DefinitionId> {
+    let mut live = HashSet::default();
+    let mut pending: Vec<DefinitionId> = roots.into_iter().collect();
     while let Some(id) = pending.pop() {
         if live.insert(id)
-            && let Some(next) = adjacency.get(id)
+            && let Some(next) = adjacency.get(&id)
         {
             pending.extend(next.iter().copied());
         }
@@ -980,11 +989,19 @@ fn reachable<'a>(
 #[cfg(test)]
 mod tests {
     use super::{
-        Definition, DefinitionKind, Edge, EdgeKind, Finding, FindingKind, Fragment, RequiredScope,
-        Span, VisibilityReduction, analyze as analyze_with_tests, analyze_with_options,
+        Definition, DefinitionId, DefinitionKind, Edge, EdgeKind, Finding, FindingKind, Fragment,
+        RequiredScope, Span, VisibilityReduction, analyze as analyze_with_tests,
+        analyze_with_options,
     };
     use crate::protocol::ProtocolVersion;
     use std::collections::HashSet;
+
+    fn test_id(value: &str) -> DefinitionId {
+        let hash = value.bytes().fold(0xcbf29ce484222325_u64, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
+        });
+        DefinitionId::new(0, hash)
+    }
 
     fn analyze<'a>(
         fragments: &'a [Fragment],
@@ -1036,6 +1053,24 @@ mod tests {
     }
 
     #[test]
+    fn definition_ids_are_compact_and_round_trip() {
+        let id = DefinitionId::new(0x0123_4567_89ab_cdef, 0xfedc_ba98_7654_3210);
+
+        assert_eq!(std::mem::size_of::<DefinitionId>(), 16);
+        assert_eq!(id.to_string(), "0123456789abcdeffedcba9876543210");
+
+        let serialized = serde_json::to_string(&id).expect("serialize definition ID");
+        assert_eq!(serialized, "[81985529216486895,18364758544493064720]");
+        assert_eq!(
+            serde_json::from_str::<DefinitionId>(&serialized).expect("deserialize definition ID"),
+            id
+        );
+        assert!(
+            serde_json::from_str::<DefinitionId>("\"DefPathHash(Fingerprint(1, 2))\"").is_err()
+        );
+    }
+
+    #[test]
     fn required_scope_merge_follows_its_lattice() {
         let mut scope = RequiredScope::Bottom;
         assert!(scope.merge(&RequiredScope::Known {
@@ -1067,7 +1102,7 @@ mod tests {
 
     fn node(id: &str, crate_name: &str, public_api: bool) -> Definition {
         Definition {
-            id: id.into(),
+            id: test_id(id),
             crate_name: crate_name.into(),
             name: id.into(),
             kind: DefinitionKind::Function,
@@ -1137,12 +1172,12 @@ mod tests {
                 protocol_version: ProtocolVersion,
                 package_name: "app".into(),
                 crate_name: "app".into(),
-                crate_id: "app".into(),
+                crate_id: test_id("app"),
                 is_product_root: true,
                 test_surface: false,
                 definitions: vec![node("main", "app", false)],
                 edges: vec![],
-                roots: vec!["main".into()],
+                roots: vec![test_id("main")],
                 conservative_roots: vec![],
                 required_public_roots: vec![],
             },
@@ -1150,7 +1185,7 @@ mod tests {
                 protocol_version: ProtocolVersion,
                 package_name: "lib".into(),
                 crate_name: "lib".into(),
-                crate_id: "lib".into(),
+                crate_id: test_id("lib"),
                 is_product_root: false,
                 test_surface: false,
                 definitions,
@@ -1168,16 +1203,16 @@ mod tests {
                 protocol_version: ProtocolVersion,
                 package_name: "integration_test".into(),
                 crate_name: "integration_test".into(),
-                crate_id: "integration_test".into(),
+                crate_id: test_id("integration_test"),
                 is_product_root: true,
                 test_surface: true,
                 definitions: vec![node("test_main", "integration_test", false)],
                 edges: vec![Edge {
-                    from: "test_main".into(),
-                    to: "test_entry".into(),
+                    from: test_id("test_main"),
+                    to: test_id("test_entry"),
                     kind: EdgeKind::Body,
                 }],
-                roots: vec!["test_main".into()],
+                roots: vec![test_id("test_main")],
                 conservative_roots: vec![],
                 required_public_roots: vec![],
             },
@@ -1185,7 +1220,7 @@ mod tests {
                 protocol_version: ProtocolVersion,
                 package_name: "lib".into(),
                 crate_name: "lib".into(),
-                crate_id: "lib".into(),
+                crate_id: test_id("lib"),
                 is_product_root: false,
                 test_surface: false,
                 definitions,
@@ -1221,14 +1256,14 @@ mod tests {
                 node("unused", "lib", true),
             ],
             vec![Edge {
-                from: "production_entry".into(),
-                to: "production_helper".into(),
+                from: test_id("production_entry"),
+                to: test_id("production_helper"),
                 kind: EdgeKind::Body,
             }],
         );
         production[0].edges.push(Edge {
-            from: "main".into(),
-            to: "production_entry".into(),
+            from: test_id("main"),
+            to: test_id("production_entry"),
             kind: EdgeKind::Body,
         });
         let mut test_entry = node("test_entry", "lib", true);
@@ -1238,8 +1273,8 @@ mod tests {
         let mut tests = test_fragments(
             vec![test_entry, test_helper],
             vec![Edge {
-                from: "test_entry".into(),
-                to: "test_helper".into(),
+                from: test_id("test_entry"),
+                to: test_id("test_helper"),
                 kind: EdgeKind::Body,
             }],
         );
@@ -1267,8 +1302,8 @@ mod tests {
         let input = fragments(
             vec![node("unused", "lib", true), node("helper", "lib", true)],
             vec![Edge {
-                from: "unused".into(),
-                to: "helper".into(),
+                from: test_id("unused"),
+                to: test_id("helper"),
                 kind: EdgeKind::Body,
             }],
         );
@@ -1291,8 +1326,8 @@ mod tests {
         input[0].crate_name = "lib".into();
         input[0].definitions[0].crate_name = "lib".into();
         input[0].edges.push(Edge {
-            from: "main".into(),
-            to: "entry".into(),
+            from: test_id("main"),
+            to: test_id("entry"),
             kind: EdgeKind::Body,
         });
 
@@ -1300,7 +1335,7 @@ mod tests {
 
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].kind, FindingKind::DeadPublic);
-        assert_eq!(findings[0].definition.id, "unused");
+        assert_eq!(findings[0].definition.id, test_id("unused"));
     }
 
     #[test]
@@ -1308,14 +1343,14 @@ mod tests {
         let mut input = fragments(
             vec![node("entry", "lib", true), node("helper", "lib", true)],
             vec![Edge {
-                from: "entry".into(),
-                to: "helper".into(),
+                from: test_id("entry"),
+                to: test_id("helper"),
                 kind: EdgeKind::Body,
             }],
         );
         input[0].edges.push(Edge {
-            from: "main".into(),
-            to: "entry".into(),
+            from: test_id("main"),
+            to: test_id("entry"),
             kind: EdgeKind::Body,
         });
 
@@ -1323,7 +1358,7 @@ mod tests {
 
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].kind, FindingKind::UnnecessaryPublic);
-        assert_eq!(findings[0].definition.id, "helper");
+        assert_eq!(findings[0].definition.id, test_id("helper"));
         assert!(!findings[0].test_only);
         assert!(!findings[0].test_compiled_only);
     }
@@ -1337,27 +1372,27 @@ mod tests {
                 node("entry", "lib", false),
             ],
             vec![Edge {
-                from: "entry".into(),
-                to: "internal".into(),
+                from: test_id("entry"),
+                to: test_id("internal"),
                 kind: EdgeKind::Body,
             }],
         );
         input[0].edges.extend([
             Edge {
-                from: "main".into(),
-                to: "required".into(),
+                from: test_id("main"),
+                to: test_id("required"),
                 kind: EdgeKind::Body,
             },
             Edge {
-                from: "main".into(),
-                to: "entry".into(),
+                from: test_id("main"),
+                to: test_id("entry"),
                 kind: EdgeKind::Body,
             },
         ]);
 
         let findings = analyze(&input, &HashSet::new());
         assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].definition.id, "internal");
+        assert_eq!(findings[0].definition.id, test_id("internal"));
 
         assert!(analyze_preserving_uniform_fields(&input).is_empty());
     }
@@ -1372,8 +1407,8 @@ mod tests {
             vec![],
         );
         input[0].edges.push(Edge {
-            from: "main".into(),
-            to: "required".into(),
+            from: test_id("main"),
+            to: test_id("required"),
             kind: EdgeKind::Body,
         });
 
@@ -1381,7 +1416,7 @@ mod tests {
 
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].kind, FindingKind::DeadPublic);
-        assert_eq!(findings[0].definition.id, "dead");
+        assert_eq!(findings[0].definition.id, test_id("dead"));
     }
 
     #[test]
@@ -1393,20 +1428,20 @@ mod tests {
                 node("entry", "lib", false),
             ],
             vec![Edge {
-                from: "entry".into(),
-                to: "internal".into(),
+                from: test_id("entry"),
+                to: test_id("internal"),
                 kind: EdgeKind::Body,
             }],
         );
         input[0].edges.extend([
             Edge {
-                from: "main".into(),
-                to: "required".into(),
+                from: test_id("main"),
+                to: test_id("required"),
                 kind: EdgeKind::Body,
             },
             Edge {
-                from: "main".into(),
-                to: "entry".into(),
+                from: test_id("main"),
+                to: test_id("entry"),
                 kind: EdgeKind::Body,
             },
         ]);
@@ -1414,7 +1449,7 @@ mod tests {
         let findings = analyze_preserving_uniform_fields(&input);
 
         assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].definition.id, "internal");
+        assert_eq!(findings[0].definition.id, test_id("internal"));
     }
 
     #[test]
@@ -1426,20 +1461,20 @@ mod tests {
                 node("entry", "lib", false),
             ],
             vec![Edge {
-                from: "entry".into(),
-                to: "internal".into(),
+                from: test_id("entry"),
+                to: test_id("internal"),
                 kind: EdgeKind::Body,
             }],
         );
         production_input[0].edges.push(Edge {
-            from: "main".into(),
-            to: "entry".into(),
+            from: test_id("main"),
+            to: test_id("entry"),
             kind: EdgeKind::Body,
         });
         let mut test_required = uniform_field(node("test_required", "lib", true));
         test_required.name = "production_required".into();
         let mut test_input = test_fragments(vec![test_required], vec![]);
-        test_input[0].edges[0].to = "test_required".into();
+        test_input[0].edges[0].to = test_id("test_required");
 
         let findings = analyze_with_options(
             &production_input,
@@ -1462,8 +1497,8 @@ mod tests {
             vec![],
         );
         production_input[0].edges.push(Edge {
-            from: "main".into(),
-            to: "production_required".into(),
+            from: test_id("main"),
+            to: test_id("production_required"),
             kind: EdgeKind::Body,
         });
         let test_input = test_fragments(
@@ -1472,8 +1507,8 @@ mod tests {
                 uniform_field_at(node("test_internal", "lib", true), 10),
             ],
             vec![Edge {
-                from: "test_entry".into(),
-                to: "test_internal".into(),
+                from: test_id("test_entry"),
+                to: test_id("test_internal"),
                 kind: EdgeKind::Body,
             }],
         );
@@ -1487,7 +1522,7 @@ mod tests {
         );
 
         assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].definition.id, "test_internal");
+        assert_eq!(findings[0].definition.id, test_id("test_internal"));
     }
 
     #[test]
@@ -1498,8 +1533,8 @@ mod tests {
                 crate_visible_node("scoped::helper", &["scoped"]),
             ],
             vec![Edge {
-                from: "scoped::entry".into(),
-                to: "scoped::helper".into(),
+                from: test_id("scoped::entry"),
+                to: test_id("scoped::helper"),
                 kind: EdgeKind::Body,
             }],
         );
@@ -1511,7 +1546,7 @@ mod tests {
             findings[0].kind,
             FindingKind::UnnecessaryRestrictedVisibility
         );
-        assert_eq!(findings[0].definition.id, "scoped::helper");
+        assert_eq!(findings[0].definition.id, test_id("scoped::helper"));
     }
 
     #[test]
@@ -1528,7 +1563,7 @@ mod tests {
             findings[0].kind,
             FindingKind::UnnecessaryRestrictedVisibility
         );
-        assert_eq!(findings[0].definition.id, "scoped::unused");
+        assert_eq!(findings[0].definition.id, test_id("scoped::unused"));
     }
 
     #[test]
@@ -1550,13 +1585,13 @@ mod tests {
             ],
             vec![
                 Edge {
-                    from: "outside::entry".into(),
-                    to: "scoped::nested::required".into(),
+                    from: test_id("outside::entry"),
+                    to: test_id("scoped::nested::required"),
                     kind: EdgeKind::Body,
                 },
                 Edge {
-                    from: "scoped::nested::entry".into(),
-                    to: "scoped::nested::internal".into(),
+                    from: test_id("scoped::nested::entry"),
+                    to: test_id("scoped::nested::internal"),
                     kind: EdgeKind::Body,
                 },
             ],
@@ -1564,7 +1599,10 @@ mod tests {
 
         let findings = analyze(&input, &HashSet::new());
         assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].definition.id, "scoped::nested::internal");
+        assert_eq!(
+            findings[0].definition.id,
+            test_id("scoped::nested::internal")
+        );
 
         assert!(analyze_preserving_uniform_fields(&input).is_empty());
     }
@@ -1588,13 +1626,13 @@ mod tests {
             ],
             vec![
                 Edge {
-                    from: "scoped::sibling::entry".into(),
-                    to: "scoped::nested::required".into(),
+                    from: test_id("scoped::sibling::entry"),
+                    to: test_id("scoped::nested::required"),
                     kind: EdgeKind::Body,
                 },
                 Edge {
-                    from: "scoped::nested::entry".into(),
-                    to: "scoped::nested::internal".into(),
+                    from: test_id("scoped::nested::entry"),
+                    to: test_id("scoped::nested::internal"),
                     kind: EdgeKind::Body,
                 },
             ],
@@ -1622,13 +1660,13 @@ mod tests {
             ],
             vec![
                 Edge {
-                    from: "scoped::sibling::entry".into(),
-                    to: "scoped::nested::parent_visible".into(),
+                    from: test_id("scoped::sibling::entry"),
+                    to: test_id("scoped::nested::parent_visible"),
                     kind: EdgeKind::Body,
                 },
                 Edge {
-                    from: "scoped::nested::entry".into(),
-                    to: "scoped::nested::private".into(),
+                    from: test_id("scoped::nested::entry"),
+                    to: test_id("scoped::nested::private"),
                     kind: EdgeKind::Body,
                 },
             ],
@@ -1657,8 +1695,8 @@ mod tests {
                 restricted_visible_node("scoped::helper", &["scoped"]),
             ],
             vec![Edge {
-                from: "scoped::entry".into(),
-                to: "scoped::helper".into(),
+                from: test_id("scoped::entry"),
+                to: test_id("scoped::helper"),
                 kind: EdgeKind::Body,
             }],
         );
@@ -1670,7 +1708,7 @@ mod tests {
             findings[0].kind,
             FindingKind::UnnecessaryRestrictedVisibility
         );
-        assert_eq!(findings[0].definition.id, "scoped::helper");
+        assert_eq!(findings[0].definition.id, test_id("scoped::helper"));
     }
 
     #[test]
@@ -1681,8 +1719,8 @@ mod tests {
                 crate_visible_node("scoped::nested::helper", &["scoped", "nested"]),
             ],
             vec![Edge {
-                from: "scoped::sibling::entry".into(),
-                to: "scoped::nested::helper".into(),
+                from: test_id("scoped::sibling::entry"),
+                to: test_id("scoped::nested::helper"),
                 kind: EdgeKind::Body,
             }],
         );
@@ -1691,7 +1729,7 @@ mod tests {
 
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].kind, FindingKind::UnnecessaryCrateVisibility);
-        assert_eq!(findings[0].definition.id, "scoped::nested::helper");
+        assert_eq!(findings[0].definition.id, test_id("scoped::nested::helper"));
     }
 
     #[test]
@@ -1702,8 +1740,8 @@ mod tests {
                 crate_visible_node("scoped::nested::helper", &["scoped", "nested"]),
             ],
             vec![Edge {
-                from: "outside::entry".into(),
-                to: "scoped::nested::helper".into(),
+                from: test_id("outside::entry"),
+                to: test_id("scoped::nested::helper"),
                 kind: EdgeKind::Body,
             }],
         );
@@ -1721,13 +1759,13 @@ mod tests {
             vec![node("entry", "lib", false), module, descendant],
             vec![
                 Edge {
-                    from: "entry".into(),
-                    to: "scoped::nested::helper".into(),
+                    from: test_id("entry"),
+                    to: test_id("scoped::nested::helper"),
                     kind: EdgeKind::Body,
                 },
                 Edge {
-                    from: "scoped::nested::helper".into(),
-                    to: "scoped::nested".into(),
+                    from: test_id("scoped::nested::helper"),
+                    to: test_id("scoped::nested"),
                     kind: EdgeKind::VisibilityParent,
                 },
             ],
@@ -1737,7 +1775,7 @@ mod tests {
 
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].kind, FindingKind::UnnecessaryCrateVisibility);
-        assert_eq!(findings[0].definition.id, "scoped::nested");
+        assert_eq!(findings[0].definition.id, test_id("scoped::nested"));
     }
 
     #[test]
@@ -1760,13 +1798,13 @@ mod tests {
             ],
             vec![
                 Edge {
-                    from: "scoped::sibling::entry".into(),
-                    to: "scoped::nested::ErrorKind::UnexpectedEnd".into(),
+                    from: test_id("scoped::sibling::entry"),
+                    to: test_id("scoped::nested::ErrorKind::UnexpectedEnd"),
                     kind: EdgeKind::Body,
                 },
                 Edge {
-                    from: "scoped::nested::ErrorKind::UnexpectedEnd".into(),
-                    to: "scoped::nested::ErrorKind".into(),
+                    from: test_id("scoped::nested::ErrorKind::UnexpectedEnd"),
+                    to: test_id("scoped::nested::ErrorKind"),
                     kind: EdgeKind::Interface,
                 },
             ],
@@ -1776,7 +1814,10 @@ mod tests {
 
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].kind, FindingKind::UnnecessaryCrateVisibility);
-        assert_eq!(findings[0].definition.id, "scoped::nested::ErrorKind");
+        assert_eq!(
+            findings[0].definition.id,
+            test_id("scoped::nested::ErrorKind")
+        );
     }
 
     #[test]
@@ -1792,13 +1833,13 @@ mod tests {
             ],
             vec![
                 Edge {
-                    from: "scoped::sibling::entry".into(),
-                    to: "scoped::nested::read".into(),
+                    from: test_id("scoped::sibling::entry"),
+                    to: test_id("scoped::nested::read"),
                     kind: EdgeKind::Body,
                 },
                 Edge {
-                    from: "scoped::nested::read".into(),
-                    to: "scoped::nested::Error".into(),
+                    from: test_id("scoped::nested::read"),
+                    to: test_id("scoped::nested::Error"),
                     kind: EdgeKind::Interface,
                 },
             ],
@@ -1821,8 +1862,8 @@ mod tests {
         let input = fragments(
             vec![reexport, crate_visible_node("scoped::Target", &["scoped"])],
             vec![Edge {
-                from: "scoped::TargetExport".into(),
-                to: "scoped::Target".into(),
+                from: test_id("scoped::TargetExport"),
+                to: test_id("scoped::Target"),
                 kind: EdgeKind::Reexport,
             }],
         );
@@ -1847,18 +1888,18 @@ mod tests {
             ],
             vec![
                 Edge {
-                    from: "wrapper::api::f".into(),
-                    to: "target::f".into(),
+                    from: test_id("wrapper::api::f"),
+                    to: test_id("target::f"),
                     kind: EdgeKind::Reexport,
                 },
                 Edge {
-                    from: "wrapper::api::f".into(),
-                    to: "wrapper::api".into(),
+                    from: test_id("wrapper::api::f"),
+                    to: test_id("wrapper::api"),
                     kind: EdgeKind::VisibilityParent,
                 },
                 Edge {
-                    from: "sibling::call".into(),
-                    to: "target::f".into(),
+                    from: test_id("sibling::call"),
+                    to: test_id("target::f"),
                     kind: EdgeKind::Body,
                 },
             ],
@@ -1872,8 +1913,8 @@ mod tests {
         let input = fragments(
             vec![node("entry", "lib", true), node("helper", "lib", true)],
             vec![Edge {
-                from: "entry".into(),
-                to: "helper".into(),
+                from: test_id("entry"),
+                to: test_id("helper"),
                 kind: EdgeKind::Body,
             }],
         );
@@ -1884,8 +1925,8 @@ mod tests {
         let test_input = test_fragments(
             vec![test_entry, test_helper],
             vec![Edge {
-                from: "test_entry".into(),
-                to: "test_helper".into(),
+                from: test_id("test_entry"),
+                to: test_id("test_helper"),
                 kind: EdgeKind::Body,
             }],
         );
@@ -1895,7 +1936,7 @@ mod tests {
 
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].kind, FindingKind::UnnecessaryPublic);
-        assert_eq!(findings[0].definition.id, "helper");
+        assert_eq!(findings[0].definition.id, test_id("helper"));
         assert!(findings[0].test_only);
         assert!(!findings[0].test_compiled_only);
     }
@@ -1910,8 +1951,8 @@ mod tests {
             vec![],
         );
         production_input[0].edges.push(Edge {
-            from: "main".into(),
-            to: "production_entry".into(),
+            from: test_id("main"),
+            to: test_id("production_entry"),
             kind: EdgeKind::Body,
         });
 
@@ -1922,8 +1963,8 @@ mod tests {
         let test_input = test_fragments(
             vec![test_entry, test_helper],
             vec![Edge {
-                from: "test_entry".into(),
-                to: "test_helper".into(),
+                from: test_id("test_entry"),
+                to: test_id("test_helper"),
                 kind: EdgeKind::Body,
             }],
         );
@@ -1937,7 +1978,7 @@ mod tests {
 
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].kind, FindingKind::UnnecessaryPublic);
-        assert_eq!(findings[0].definition.id, "production_helper");
+        assert_eq!(findings[0].definition.id, test_id("production_helper"));
         assert!(findings[0].test_only);
         assert!(!findings[0].test_compiled_only);
     }
@@ -1951,8 +1992,8 @@ mod tests {
                 node("test_helper", "test_support", true),
             ],
             vec![Edge {
-                from: "test_entry".into(),
-                to: "test_helper".into(),
+                from: test_id("test_entry"),
+                to: test_id("test_helper"),
                 kind: EdgeKind::Body,
             }],
         );
@@ -1967,7 +2008,7 @@ mod tests {
 
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].kind, FindingKind::UnnecessaryPublic);
-        assert_eq!(findings[0].definition.id, "test_helper");
+        assert_eq!(findings[0].definition.id, test_id("test_helper"));
         assert!(findings[0].test_only);
         assert!(findings[0].test_compiled_only);
     }
@@ -1987,7 +2028,7 @@ mod tests {
 
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].kind, FindingKind::DeadPublic);
-        assert_eq!(findings[0].definition.id, "unused");
+        assert_eq!(findings[0].definition.id, test_id("unused"));
         assert!(!findings[0].test_only);
         assert!(findings[0].test_compiled_only);
     }
@@ -2022,8 +2063,8 @@ mod tests {
             .definitions
             .push(crate_visible_node("resolver::resolve", &["resolver"]));
         test_input[0].edges.push(Edge {
-            from: "test_main".into(),
-            to: "resolver::resolve".into(),
+            from: test_id("test_main"),
+            to: test_id("resolver::resolve"),
             kind: EdgeKind::Body,
         });
 
@@ -2060,8 +2101,8 @@ mod tests {
     fn public_entry_needed_across_crates_is_clean() {
         let mut input = fragments(vec![node("entry", "lib", true)], vec![]);
         input[0].edges.push(Edge {
-            from: "main".into(),
-            to: "entry".into(),
+            from: test_id("main"),
+            to: test_id("entry"),
             kind: EdgeKind::Body,
         });
 
@@ -2076,14 +2117,14 @@ mod tests {
                 typed_node("api_enum::used", "lib", true, DefinitionKind::EnumVariant),
             ],
             vec![Edge {
-                from: "api_enum::used".into(),
-                to: "api_enum".into(),
+                from: test_id("api_enum::used"),
+                to: test_id("api_enum"),
                 kind: EdgeKind::Interface,
             }],
         );
         input[0].edges.push(Edge {
-            from: "main".into(),
-            to: "api_enum::used".into(),
+            from: test_id("main"),
+            to: test_id("api_enum::used"),
             kind: EdgeKind::Body,
         });
 
@@ -2105,20 +2146,20 @@ mod tests {
             ],
             vec![
                 Edge {
-                    from: "entry".into(),
-                    to: "api_enum".into(),
+                    from: test_id("entry"),
+                    to: test_id("api_enum"),
                     kind: EdgeKind::Interface,
                 },
                 Edge {
-                    from: "entry".into(),
-                    to: "api_enum::internal".into(),
+                    from: test_id("entry"),
+                    to: test_id("api_enum::internal"),
                     kind: EdgeKind::Body,
                 },
             ],
         );
         input[0].edges.push(Edge {
-            from: "main".into(),
-            to: "entry".into(),
+            from: test_id("main"),
+            to: test_id("entry"),
             kind: EdgeKind::Body,
         });
 
@@ -2133,14 +2174,14 @@ mod tests {
                 typed_node("payload", "lib", true, DefinitionKind::Struct),
             ],
             vec![Edge {
-                from: "api_field".into(),
-                to: "payload".into(),
+                from: test_id("api_field"),
+                to: test_id("payload"),
                 kind: EdgeKind::Interface,
             }],
         );
         input[0].edges.push(Edge {
-            from: "main".into(),
-            to: "api_field".into(),
+            from: test_id("main"),
+            to: test_id("api_field"),
             kind: EdgeKind::Body,
         });
 
@@ -2155,14 +2196,14 @@ mod tests {
                 typed_node("generated_field", "lib", false, DefinitionKind::Field),
             ],
             vec![Edge {
-                from: "generated_field".into(),
-                to: "source_field".into(),
+                from: test_id("generated_field"),
+                to: test_id("source_field"),
                 kind: EdgeKind::VisibilityRequirement,
             }],
         );
         input[0].edges.push(Edge {
-            from: "main".into(),
-            to: "generated_field".into(),
+            from: test_id("main"),
+            to: test_id("generated_field"),
             kind: EdgeKind::Body,
         });
 
@@ -2179,20 +2220,20 @@ mod tests {
             ],
             vec![
                 Edge {
-                    from: "entry".into(),
-                    to: "generated_field".into(),
+                    from: test_id("entry"),
+                    to: test_id("generated_field"),
                     kind: EdgeKind::Body,
                 },
                 Edge {
-                    from: "generated_field".into(),
-                    to: "source_field".into(),
+                    from: test_id("generated_field"),
+                    to: test_id("source_field"),
                     kind: EdgeKind::VisibilityRequirement,
                 },
             ],
         );
         input[0].edges.push(Edge {
-            from: "main".into(),
-            to: "entry".into(),
+            from: test_id("main"),
+            to: test_id("entry"),
             kind: EdgeKind::Body,
         });
 
@@ -2200,7 +2241,7 @@ mod tests {
 
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].kind, FindingKind::DeadPublic);
-        assert_eq!(findings[0].definition.id, "source_field");
+        assert_eq!(findings[0].definition.id, test_id("source_field"));
     }
 
     #[test]
@@ -2210,8 +2251,8 @@ mod tests {
             .definitions
             .push(node("unreachable_helper", "app", false));
         input[0].edges.push(Edge {
-            from: "unreachable_helper".into(),
-            to: "entry".into(),
+            from: test_id("unreachable_helper"),
+            to: test_id("entry"),
             kind: EdgeKind::Body,
         });
 
@@ -2234,7 +2275,7 @@ mod tests {
             protocol_version: ProtocolVersion,
             package_name: "lib".into(),
             crate_name: "lib".into(),
-            crate_id: "lib-test".into(),
+            crate_id: test_id("lib-test"),
             is_product_root: false,
             test_surface: false,
             definitions: vec![duplicate],
@@ -2244,8 +2285,8 @@ mod tests {
             required_public_roots: vec![],
         });
         input[0].edges.push(Edge {
-            from: "main".into(),
-            to: "duplicate_b".into(),
+            from: test_id("main"),
+            to: test_id("duplicate_b"),
             kind: EdgeKind::Body,
         });
 
@@ -2266,15 +2307,15 @@ mod tests {
             });
         }
         input[0].edges.push(Edge {
-            from: "main".into(),
-            to: "first".into(),
+            from: test_id("main"),
+            to: test_id("first"),
             kind: EdgeKind::Body,
         });
 
         let findings = analyze(&input, &HashSet::new());
 
         assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].definition.id, "second");
+        assert_eq!(findings[0].definition.id, test_id("second"));
         assert_eq!(findings[0].kind, FindingKind::DeadPublic);
     }
 
@@ -2286,8 +2327,8 @@ mod tests {
                 node("helper", "lib", true),
             ],
             vec![Edge {
-                from: "debug_entry".into(),
-                to: "helper".into(),
+                from: test_id("debug_entry"),
+                to: test_id("helper"),
                 kind: EdgeKind::Body,
             }],
         );
@@ -2308,17 +2349,17 @@ mod tests {
         let mut input = fragments(
             vec![allowed_entry, node("helper", "lib", true)],
             vec![Edge {
-                from: "allowed_entry".into(),
-                to: "helper".into(),
+                from: test_id("allowed_entry"),
+                to: test_id("helper"),
                 kind: EdgeKind::Body,
             }],
         );
-        input[1].conservative_roots.push("allowed_entry".into());
+        input[1].conservative_roots.push(test_id("allowed_entry"));
 
         let findings = analyze(&input, &HashSet::new());
 
         assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].definition.id, "helper");
+        assert_eq!(findings[0].definition.id, test_id("helper"));
         assert_eq!(findings[0].kind, FindingKind::UnnecessaryPublic);
     }
 
@@ -2330,14 +2371,14 @@ mod tests {
                 node("return_type", "lib", true),
             ],
             vec![Edge {
-                from: "factory".into(),
-                to: "return_type".into(),
+                from: test_id("factory"),
+                to: test_id("return_type"),
                 kind: EdgeKind::Interface,
             }],
         );
         input[0].edges.push(Edge {
-            from: "main".into(),
-            to: "factory".into(),
+            from: test_id("main"),
+            to: test_id("factory"),
             kind: EdgeKind::Body,
         });
 
@@ -2347,7 +2388,7 @@ mod tests {
     #[test]
     fn trait_interface_type_required_by_rust_visibility_is_clean() {
         let mut input = fragments(vec![node("options", "lib", true)], vec![]);
-        input[1].required_public_roots.push("options".into());
+        input[1].required_public_roots.push(test_id("options"));
 
         assert!(analyze(&input, &HashSet::new()).is_empty());
     }
@@ -2355,7 +2396,7 @@ mod tests {
     #[test]
     fn public_reexport_target_required_by_rust_visibility_is_clean() {
         let mut input = fragments(vec![node("reexported", "lib", true)], vec![]);
-        input[1].required_public_roots.push("reexported".into());
+        input[1].required_public_roots.push(test_id("reexported"));
 
         assert!(analyze(&input, &HashSet::new()).is_empty());
     }
@@ -2368,18 +2409,18 @@ mod tests {
                 node("target", "lib", true),
             ],
             vec![Edge {
-                from: "alias".into(),
-                to: "target".into(),
+                from: test_id("alias"),
+                to: test_id("target"),
                 kind: EdgeKind::Reexport,
             }],
         );
-        input[1].required_public_roots.push("target".into());
+        input[1].required_public_roots.push(test_id("target"));
 
         let findings = analyze(&input, &HashSet::new());
 
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].kind, FindingKind::DeadPublic);
-        assert_eq!(findings[0].definition.id, "alias");
+        assert_eq!(findings[0].definition.id, test_id("alias"));
     }
 
     #[test]
@@ -2392,29 +2433,29 @@ mod tests {
             ],
             vec![
                 Edge {
-                    from: "alias".into(),
-                    to: "target".into(),
+                    from: test_id("alias"),
+                    to: test_id("target"),
                     kind: EdgeKind::Reexport,
                 },
                 Edge {
-                    from: "entry".into(),
-                    to: "target".into(),
+                    from: test_id("entry"),
+                    to: test_id("target"),
                     kind: EdgeKind::Body,
                 },
             ],
         );
         input[0].edges.push(Edge {
-            from: "main".into(),
-            to: "entry".into(),
+            from: test_id("main"),
+            to: test_id("entry"),
             kind: EdgeKind::Body,
         });
-        input[1].required_public_roots.push("target".into());
+        input[1].required_public_roots.push(test_id("target"));
 
         let findings = analyze(&input, &HashSet::new());
 
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].kind, FindingKind::UnnecessaryPublic);
-        assert_eq!(findings[0].definition.id, "alias");
+        assert_eq!(findings[0].definition.id, test_id("alias"));
     }
 
     #[test]
@@ -2425,17 +2466,17 @@ mod tests {
                 node("target", "lib", true),
             ],
             vec![Edge {
-                from: "alias".into(),
-                to: "target".into(),
+                from: test_id("alias"),
+                to: test_id("target"),
                 kind: EdgeKind::Reexport,
             }],
         );
         input[0].edges.push(Edge {
-            from: "main".into(),
-            to: "target".into(),
+            from: test_id("main"),
+            to: test_id("target"),
             kind: EdgeKind::Body,
         });
-        input[1].required_public_roots.push("target".into());
+        input[1].required_public_roots.push(test_id("target"));
 
         assert!(analyze(&input, &HashSet::new()).is_empty());
     }
@@ -2450,20 +2491,20 @@ mod tests {
             ],
             vec![
                 Edge {
-                    from: "entry".into(),
-                    to: "child".into(),
+                    from: test_id("entry"),
+                    to: test_id("child"),
                     kind: EdgeKind::Body,
                 },
                 Edge {
-                    from: "child".into(),
-                    to: "namespace".into(),
+                    from: test_id("child"),
+                    to: test_id("namespace"),
                     kind: EdgeKind::VisibilityParent,
                 },
             ],
         );
         input[0].edges.push(Edge {
-            from: "main".into(),
-            to: "entry".into(),
+            from: test_id("main"),
+            to: test_id("entry"),
             kind: EdgeKind::Body,
         });
 
@@ -2471,7 +2512,7 @@ mod tests {
 
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].kind, FindingKind::UnnecessaryPublic);
-        assert_eq!(findings[0].definition.id, "namespace");
+        assert_eq!(findings[0].definition.id, test_id("namespace"));
     }
 
     #[test]
@@ -2482,14 +2523,14 @@ mod tests {
                 node("child", "lib", true),
             ],
             vec![Edge {
-                from: "child".into(),
-                to: "namespace".into(),
+                from: test_id("child"),
+                to: test_id("namespace"),
                 kind: EdgeKind::VisibilityParent,
             }],
         );
         input[0].edges.push(Edge {
-            from: "main".into(),
-            to: "child".into(),
+            from: test_id("main"),
+            to: test_id("child"),
             kind: EdgeKind::Body,
         });
 
@@ -2501,20 +2542,22 @@ mod tests {
         let mut input = fragments(
             vec![node("extension_trait", "lib", true)],
             vec![Edge {
-                from: "extension_method".into(),
-                to: "extension_trait".into(),
+                from: test_id("extension_method"),
+                to: test_id("extension_trait"),
                 kind: EdgeKind::Interface,
             }],
         );
         input[1]
             .definitions
             .push(node("extension_method", "lib", false));
-        input[1].conservative_roots.push("extension_method".into());
+        input[1]
+            .conservative_roots
+            .push(test_id("extension_method"));
 
         let findings = analyze(&input, &HashSet::new());
 
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].kind, FindingKind::UnnecessaryPublic);
-        assert_eq!(findings[0].definition.id, "extension_trait");
+        assert_eq!(findings[0].definition.id, test_id("extension_trait"));
     }
 }
