@@ -220,7 +220,9 @@ reason = "non-Windows compatibility surface"
 
 An entry is validated only when its selector applies to the analyzed
 compilation target. This avoids stale-expectation failures for declarations
-that are not compiled on that target.
+that are not compiled on that target. Selectors use Cargo's effective target
+and compiler configuration, including `build.target`, `build.rustflags`, and
+additional `--cfg` values supplied through `RUSTFLAGS`.
 
 ## External library boundaries
 

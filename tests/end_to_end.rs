@@ -332,6 +332,62 @@ fn honors_cargo_configured_compiler() {
 }
 
 #[test]
+fn target_selectors_honor_cargo_configuration() {
+    let context = HawkTestContext::new("basic");
+    let rustc_version = Command::new("rustc")
+        .arg("-vV")
+        .output()
+        .expect("read Rust compiler version");
+    assert!(rustc_version.status.success());
+    let rustc_version = String::from_utf8(rustc_version.stdout).expect("UTF-8 compiler version");
+    let host_target = rustc_version
+        .lines()
+        .find_map(|line| line.strip_prefix("host: "))
+        .expect("compiler host target");
+    fs::create_dir(context.workspace().join(".cargo")).expect("create Cargo config directory");
+    fs::write(
+        context.workspace().join(".cargo/config.toml"),
+        format!("[build]\ntarget = \"{host_target}\"\nrustflags = [\"--cfg\", \"hawk_target\"]\n"),
+    )
+    .expect("write Cargo config");
+    fs::write(
+        context.workspace().join("hawk.toml"),
+        format!(
+            "[[production]]\npackage = \"app\"\nbin = \"app\"\ntarget = 'cfg(hawk_target)'\nreason = \"configured target\"\n\n[[production]]\npackage = \"app\"\nbin = \"app\"\ntarget = \"{host_target}\"\nreason = \"configured triple\"\n"
+        ),
+    )
+    .expect("write Hawk config");
+
+    let output = context.run(&["-A", "warnings"]);
+
+    context.assert_success(&output);
+    assert!(
+        context
+            .normalized_stdout(&output)
+            .contains(&format!("target `{host_target}`"))
+    );
+}
+
+#[test]
+fn target_selectors_honor_rustflags_environment() {
+    let context = HawkTestContext::new("basic");
+    fs::write(
+        context.workspace().join("hawk.toml"),
+        "[[production]]\npackage = \"app\"\nbin = \"app\"\ntarget = 'cfg(hawk_target)'\nreason = \"environment target\"\n",
+    )
+    .expect("write Hawk config");
+    let output = context
+        .command()
+        .arg("-A")
+        .arg("warnings")
+        .env("RUSTFLAGS", "--cfg hawk_target")
+        .output()
+        .expect("run cargo-hawk with rustflags");
+
+    context.assert_success(&output);
+}
+
+#[test]
 fn diagnoses_public_surface_of_a_binary_product() {
     let rustc_version = Command::new("rustc")
         .arg("-vV")

@@ -12,6 +12,7 @@ use anstyle::{AnsiColor, Style};
 use anyhow::{Context, Result, bail};
 use cargo_metadata::{MetadataCommand, TargetKind};
 use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser, ValueEnum};
+use serde::{Deserialize, Serialize};
 
 use crate::config::{
     AnalysisTarget, Config, ConfigDiagnostic, ConfigDiagnosticKind, FeatureProfile,
@@ -264,11 +265,21 @@ struct RustToolchain {
     rustc: OsString,
     sysroot: PathBuf,
     host: String,
+    target: Option<String>,
+    rustflags: Vec<String>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct RustcProbe {
+    rustc: String,
+    target: Option<String>,
+    rustflags: Vec<String>,
 }
 
 impl RustToolchain {
-    fn discover(workspace_root: &Path, manifest_path: &Path) -> Result<Self> {
-        let rustc = cargo_rustc(workspace_root, manifest_path)?;
+    fn discover(workspace_root: &Path, manifest_path: &Path, target: Option<&str>) -> Result<Self> {
+        let probe = cargo_rustc(workspace_root, manifest_path, target)?;
+        let rustc = OsString::from(probe.rustc);
         let output = Command::new(&rustc)
             .current_dir(workspace_root)
             .arg("-vV")
@@ -334,6 +345,8 @@ impl RustToolchain {
             rustc,
             sysroot,
             host: host.to_owned(),
+            target: probe.target,
+            rustflags: probe.rustflags,
         })
     }
 
@@ -343,6 +356,14 @@ impl RustToolchain {
 
     fn host(&self) -> &str {
         &self.host
+    }
+
+    fn target(&self) -> Option<&str> {
+        self.target.as_deref()
+    }
+
+    fn rustflags(&self) -> &[String] {
+        &self.rustflags
     }
 
     fn configure_command(&self, command: &mut Command) -> Result<()> {
@@ -358,7 +379,11 @@ impl RustToolchain {
     }
 }
 
-fn cargo_rustc(workspace_root: &Path, manifest_path: &Path) -> Result<OsString> {
+fn cargo_rustc(
+    workspace_root: &Path,
+    manifest_path: &Path,
+    target: Option<&str>,
+) -> Result<RustcProbe> {
     let probe_dir = tempfile::tempdir().context("create Cargo rustc probe directory")?;
     let output_path = probe_dir.path().join("rustc");
     // The probe wrapper exits unsuccessfully after reporting rustc. Keep Cargo's cached
@@ -400,16 +425,25 @@ fn cargo_rustc(workspace_root: &Path, manifest_path: &Path) -> Result<OsString> 
         .env("RUSTC_WORKSPACE_WRAPPER", executable)
         .env(protocol::RUSTC_PROBE_ENV, &output_path)
         .env(protocol::RUSTC_PROBE_TOKEN_ENV, probe_token);
+    if let Some(target) = target {
+        command.arg("--target").arg(target);
+    }
     let output = command
         .output()
         .context("query Cargo's selected compiler")?;
-    let rustc = fs::read_to_string(&output_path).with_context(|| {
+    let target_output_path = output_path.with_file_name("target-rustc");
+    let probe_path = if target_output_path.is_file() {
+        target_output_path
+    } else {
+        output_path
+    };
+    let probe = File::open(&probe_path).with_context(|| {
         format!(
             "Cargo did not report its selected compiler: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         )
     })?;
-    Ok(OsString::from(rustc.trim()))
+    serde_json::from_reader(BufReader::new(probe)).context("decode Cargo rustc probe result")
 }
 
 pub fn run_rustc_probe(args: &[String]) -> Option<ExitCode> {
@@ -433,6 +467,35 @@ pub fn run_rustc_probe(args: &[String]) -> Option<ExitCode> {
         return None;
     }
     let rustc = rustc_probe_compiler(args)?;
+    let rustc_arguments = args.get(2..)?;
+    if rustc_arguments == ["-vV"] {
+        return Some(Command::new(rustc).args(rustc_arguments).status().map_or(
+            ExitCode::FAILURE,
+            |status| {
+                if status.success() {
+                    ExitCode::SUCCESS
+                } else {
+                    ExitCode::FAILURE
+                }
+            },
+        ));
+    }
+
+    let target_configuration = rustc_probe_configuration(rustc, rustc_arguments);
+    if target_configuration.is_none() && output_path.is_file() {
+        return Some(ExitCode::FAILURE);
+    }
+    let target_configuration = target_configuration?;
+    let status = Command::new(rustc).args(rustc_arguments).status();
+    if !status.is_ok_and(|status| status.success()) {
+        return Some(ExitCode::FAILURE);
+    }
+    let is_target_query = target_configuration.target.is_some();
+    let output_path = if is_target_query {
+        output_path.with_file_name("target-rustc")
+    } else {
+        output_path
+    };
     let mut output = match OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -450,7 +513,7 @@ pub fn run_rustc_probe(args: &[String]) -> Option<ExitCode> {
             return Some(ExitCode::FAILURE);
         }
     };
-    if let Err(error) = fs::remove_file(&marker_path) {
+    if is_target_query && let Err(error) = fs::remove_file(&marker_path) {
         drop(output);
         let _ = fs::remove_file(&output_path);
         eprintln!(
@@ -459,9 +522,9 @@ pub fn run_rustc_probe(args: &[String]) -> Option<ExitCode> {
         );
         return Some(ExitCode::FAILURE);
     }
-    let write_result = output
-        .write_all(rustc.as_bytes())
-        .and_then(|()| output.flush())
+    let write_result = serde_json::to_writer(&mut output, &target_configuration)
+        .context("serialize Cargo rustc probe result")
+        .and_then(|()| output.flush().context("flush Cargo rustc probe result"))
         .with_context(|| {
             format!(
                 "write Cargo rustc probe result to {}",
@@ -473,7 +536,11 @@ pub fn run_rustc_probe(args: &[String]) -> Option<ExitCode> {
         let _ = fs::remove_file(&output_path);
         eprintln!("hawk: {error:#}");
     }
-    Some(ExitCode::FAILURE)
+    Some(if is_target_query {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    })
 }
 
 fn rustc_probe_compiler(args: &[String]) -> Option<&str> {
@@ -485,10 +552,40 @@ fn rustc_probe_compiler(args: &[String]) -> Option<&str> {
     }
     let rustc_arguments = args.get(2..)?;
     let version_query = rustc_arguments == ["-vV"];
+    let target_configuration = rustc_arguments
+        .iter()
+        .any(|argument| argument == "--print=cfg");
     let crate_compilation = rustc_arguments
         .windows(2)
         .any(|arguments| arguments[0] == "--crate-name" && !arguments[1].starts_with('-'));
-    (version_query || crate_compilation).then_some(rustc.as_str())
+    (version_query || target_configuration || crate_compilation).then_some(rustc.as_str())
+}
+
+fn rustc_probe_configuration(rustc: &str, arguments: &[String]) -> Option<RustcProbe> {
+    let start = arguments
+        .iter()
+        .position(|argument| argument == "--print=file-names")?
+        + 1;
+    let end = arguments[start..]
+        .iter()
+        .position(|argument| argument == "--crate-type" || argument.starts_with("--crate-type="))?
+        + start;
+    let rustflags = arguments[start..end].to_vec();
+    let target = rustflags.iter().enumerate().find_map(|(index, argument)| {
+        argument
+            .strip_prefix("--target=")
+            .map(str::to_owned)
+            .or_else(|| {
+                (argument == "--target")
+                    .then(|| rustflags.get(index + 1).cloned())
+                    .flatten()
+            })
+    });
+    Some(RustcProbe {
+        rustc: rustc.to_owned(),
+        target,
+        rustflags,
+    })
 }
 
 fn command_exists(command: &str) -> bool {
@@ -631,12 +728,14 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
             "--fix does not support multiple feature profiles; run analysis without --fix or configure a single `[[feature-profile]]`"
         );
     }
-    let toolchain = RustToolchain::discover(&workspace_root, &manifest_path)?;
+    let toolchain =
+        RustToolchain::discover(&workspace_root, &manifest_path, args.target.as_deref())?;
     let analysis_target = AnalysisTarget::from_rustc(
-        args.target.as_deref(),
+        toolchain.target(),
         toolchain.host(),
         toolchain.rustc(),
         &workspace_root,
+        toolchain.rustflags(),
     )?;
     let mut production_products: Vec<ProductionSelection<'_>> = Vec::new();
     for consumer in config.production_consumers(&analysis_target) {
@@ -927,7 +1026,7 @@ pub fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
                 .expect("formatting diagnostics into a string cannot fail");
         }
     }
-    let compilation_target = args.target.as_deref().map_or_else(
+    let compilation_target = toolchain.target().map_or_else(
         || "the host target".to_owned(),
         |target| format!("target `{target}`"),
     );

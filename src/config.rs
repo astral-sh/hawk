@@ -667,13 +667,14 @@ impl AnalysisTarget {
         host: &str,
         rustc: &OsStr,
         current_dir: &Path,
+        rustflags: &[String],
     ) -> Result<Self> {
         let name = target.unwrap_or(host).to_owned();
         let mut rustc_command = Command::new(rustc);
-        rustc_command.current_dir(current_dir).arg("--print=cfg");
-        if let Some(target) = target {
-            rustc_command.arg("--target").arg(target);
-        }
+        rustc_command
+            .current_dir(current_dir)
+            .arg("--print=cfg")
+            .args(rustflags);
         let output = rustc_command
             .output()
             .with_context(|| format!("query rustc configuration for target `{name}`"))?;
