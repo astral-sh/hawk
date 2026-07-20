@@ -81,7 +81,7 @@ dependencies = [
 
 [[package]]
 name = "cargo-hawk"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "anstream",
  "anstyle",

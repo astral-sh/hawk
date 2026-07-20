@@ -2,6 +2,24 @@
 
 <!-- prettier-ignore-start -->
 
+## 0.1.8
+
+Released on 2026-07-19.
+
+### Other changes
+
+- Add a Hawk check subcommand ([#127](https://github.com/astral-sh/hawk/pull/127))
+- Adopt Astral workspace lint defaults ([#116](https://github.com/astral-sh/hawk/pull/116))
+- Avoid repeated work while collecting analysis graphs ([#120](https://github.com/astral-sh/hawk/pull/120))
+- Consolidate Hawk end-to-end test contexts ([#126](https://github.com/astral-sh/hawk/pull/126))
+- Fix visibility edits for repeated path modules ([#121](https://github.com/astral-sh/hawk/pull/121))
+- Index graph analysis and avoid equivalence cliques ([#124](https://github.com/astral-sh/hawk/pull/124))
+- Resolve relative target directories before invoking Cargo ([#118](https://github.com/astral-sh/hawk/pull/118))
+- Scope spanless definition equivalence to its Cargo target ([#122](https://github.com/astral-sh/hawk/pull/122))
+- Separate Hawk frontend and driver concerns ([#117](https://github.com/astral-sh/hawk/pull/117))
+- Use compact definition IDs in analysis graphs ([#119](https://github.com/astral-sh/hawk/pull/119))
+- Validate the compiler driver protocol environment ([#125](https://github.com/astral-sh/hawk/pull/125))
+
 ## 0.1.7
 
 Released on 2026-07-09.
