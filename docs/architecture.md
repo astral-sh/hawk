@@ -19,7 +19,7 @@ one Clippy lint.
 
 | Concern                       | Clippy                                                                                        | Hawk                                                                                             |
 | ----------------------------- | --------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
-| User entry point              | `cargo clippy`, or `clippy-driver` directly                                                   | `cargo-hawk`; `cargo-hawk-driver` is an internal executable                                      |
+| User entry point              | `cargo clippy`, or `clippy-driver` directly                                                   | `cargo hawk check`; `cargo-hawk-driver` is an internal executable                                |
 | Cargo integration             | Sets `RUSTC_WORKSPACE_WRAPPER=clippy-driver`                                                  | Sets `RUSTC_WORKSPACE_WRAPPER=cargo-hawk-driver`                                                 |
 | Compiler integration          | A `rustc_driver` callback registers Clippy lint passes with rustc's lint store                | A `rustc_driver` callback inspects analyzed HIR/type context and serializes graph fragments      |
 | Unit of analysis              | One rustc invocation at a time                                                                | All instrumented crate compilations from selected production targets and non-production surface  |
@@ -123,7 +123,7 @@ use the driver as its compiler wrapper.
 An analysis run proceeds as follows:
 
 ```text
- cargo-hawk
+ cargo-hawk check
      |
      | read Cargo metadata, hawk.toml, lint levels, and target cfg
      v
@@ -308,7 +308,7 @@ visibility reduction.
 Hawk uses Clippy-style ordered command-line levels:
 
 ```sh
-cargo-hawk --manifest-path Cargo.toml -D warnings -W hawk::unnecessary_public
+cargo-hawk check --manifest-path Cargo.toml -D warnings -W hawk::unnecessary_public
 ```
 
 The visibility diagnostics are `hawk::dead_public`, `hawk::unnecessary_public`,

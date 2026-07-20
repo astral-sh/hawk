@@ -89,6 +89,7 @@ impl HawkTestContext {
         let mut command = Command::new(env!("CARGO_BIN_EXE_cargo-hawk"));
         command
             .current_dir(self.workspace())
+            .arg("check")
             .arg("--manifest-path")
             .arg(self.workspace().join("Cargo.toml"))
             .arg("--target-dir")
@@ -266,6 +267,22 @@ fn exits_successfully_when_diagnostic_output_is_closed() {
 }
 
 #[test]
+fn prints_usage_without_a_subcommand() {
+    for args in [&[][..], &["hawk"][..]] {
+        let output = Command::new(env!("CARGO_BIN_EXE_cargo-hawk"))
+            .args(args)
+            .output()
+            .expect("run cargo-hawk without a subcommand");
+
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        let stderr = String::from_utf8(output.stderr).expect("usage output is UTF-8");
+        assert!(stderr.contains("Usage: cargo hawk <COMMAND>"));
+        assert!(stderr.contains("check  Check a Cargo workspace for unnecessary public surface"));
+    }
+}
+
+#[test]
 fn prints_version_without_overwriting_an_inherited_rustc_probe_path() {
     let probe_dir = tempfile::tempdir().expect("temporary rustc probe directory");
     let victim = probe_dir.path().join("rustc");
@@ -314,6 +331,7 @@ fn resolves_relative_target_directory_from_the_launch_directory() {
     let launch_directory = tempfile::tempdir().expect("temporary launch directory");
     let output = Command::new(env!("CARGO_BIN_EXE_cargo-hawk"))
         .current_dir(launch_directory.path())
+        .arg("check")
         .arg("--manifest-path")
         .arg(context.workspace().join("Cargo.toml"))
         .arg("--target-dir")
@@ -1225,6 +1243,7 @@ pub(crate) fn cross_helper() {}
         .expect("clear unrelated integration test");
     let target_dir = tempfile::tempdir().expect("temporary target directory");
     let output = Command::new(env!("CARGO_BIN_EXE_cargo-hawk"))
+        .arg("check")
         .arg("--manifest-path")
         .arg(workspace.path().join("Cargo.toml"))
         .arg("--fix")

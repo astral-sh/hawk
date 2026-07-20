@@ -229,7 +229,7 @@ entire workspace library crate because it exposes a supported API outside the
 closed-world analysis, pass `--exclude-crate`:
 
 ```sh
-./target/debug/cargo-hawk \
+./target/debug/cargo-hawk check \
   --manifest-path /path/to/workspace/Cargo.toml \
   --exclude-crate supported_library
 ```

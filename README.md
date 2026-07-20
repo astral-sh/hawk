@@ -71,7 +71,7 @@ Hawk validates the selected compiler before analysis. If a workspace selects
 another Rust version, invoke Hawk with its pinned toolchain:
 
 ```sh
-cargo +1.97.0 hawk
+cargo +1.97.0 hawk check
 ```
 
 To build Hawk from source, install the compiler development component:
@@ -108,21 +108,22 @@ bin = "app"
 reason = "shipped application binary"
 ```
 
-Analyze the workspace:
+Run `cargo hawk` to see the available commands. Analyze the workspace with
+`check`:
 
 ```sh
-cargo hawk \
+cargo hawk check \
   --manifest-path /path/to/workspace/Cargo.toml
 ```
 
 To enforce findings in CI or apply visibility fixes:
 
 ```sh
-cargo hawk \
+cargo hawk check \
   --manifest-path /path/to/workspace/Cargo.toml \
   -D warnings
 
-cargo hawk \
+cargo hawk check \
   --manifest-path /path/to/workspace/Cargo.toml \
   --fix
 ```

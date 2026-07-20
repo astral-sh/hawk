@@ -31,7 +31,7 @@ both executables on your `PATH` manually.
 Run the Cargo subcommand with the pinned toolchain:
 
 ```sh
-cargo +1.97.0 hawk --manifest-path /path/to/workspace/Cargo.toml
+cargo +1.97.0 hawk check --manifest-path /path/to/workspace/Cargo.toml
 ```
 
 ## Build Hawk
@@ -63,8 +63,11 @@ multiple binaries, target-scoped entries, and accepted findings.
 
 ## Run analysis
 
+Run `cargo hawk` without a subcommand to see the available commands. Use
+`check` to analyze a workspace:
+
 ```sh
-./target/debug/cargo-hawk \
+./target/debug/cargo-hawk check \
   --manifest-path /path/to/workspace/Cargo.toml
 ```
 
@@ -82,7 +85,7 @@ library crate whose public API is consumed outside the configured production
 targets:
 
 ```sh
-./target/debug/cargo-hawk \
+./target/debug/cargo-hawk check \
   --manifest-path /path/to/workspace/Cargo.toml \
   --exclude-crate supported_library
 ```
@@ -107,7 +110,7 @@ without changing build status. Deny the `warnings` group to use Hawk as a CI
 gate:
 
 ```sh
-./target/debug/cargo-hawk \
+./target/debug/cargo-hawk check \
   --manifest-path /path/to/workspace/Cargo.toml \
   -D warnings
 ```
@@ -116,7 +119,7 @@ Hawk accepts Clippy-style ordered `-A`/`--allow`, `-W`/`--warn`, and
 `-D`/`--deny` lint levels. Later options take precedence:
 
 ```sh
-./target/debug/cargo-hawk \
+./target/debug/cargo-hawk check \
   --manifest-path /path/to/workspace/Cargo.toml \
   -D warnings \
   -W hawk::unnecessary_public
@@ -140,7 +143,7 @@ allow-by-default lints.
 Pass `--fix` to apply visibility reductions through Cargo's fix machinery:
 
 ```sh
-./target/debug/cargo-hawk \
+./target/debug/cargo-hawk check \
   --manifest-path /path/to/workspace/Cargo.toml \
   --fix
 ```
@@ -187,7 +190,7 @@ eval "$(cargo xwin env --quiet \
   --target "$target" \
   --manifest-path /path/to/workspace/Cargo.toml)"
 
-./target/debug/cargo-hawk \
+./target/debug/cargo-hawk check \
   --manifest-path /path/to/workspace/Cargo.toml \
   --target "$target"
 ```

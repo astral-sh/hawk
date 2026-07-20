@@ -21,5 +21,6 @@ env -u RUSTC_BOOTSTRAP RUSTUP_TOOLCHAIN=1.97.0 \
   "$binary_dir/cargo-hawk" --help >/dev/null
 env -u RUSTC_BOOTSTRAP RUSTUP_TOOLCHAIN=1.97.0 \
   "$binary_dir/cargo-hawk" \
+  check \
   --manifest-path "$fixture/Cargo.toml" \
   -A warnings

@@ -42,7 +42,7 @@ impl RustToolchain {
             || host != env!("HAWK_RUSTC_HOST")
         {
             bail!(
-                "Hawk was built for rustc {} ({}, {}), but the selected compiler is rustc {} ({}, {}); run Hawk with the matching toolchain, for example `cargo +{} hawk`",
+                "Hawk was built for rustc {} ({}, {}), but the selected compiler is rustc {} ({}, {}); run Hawk with the matching toolchain, for example `cargo +{} hawk check`",
                 env!("HAWK_RUSTC_RELEASE"),
                 env!("HAWK_RUSTC_COMMIT_HASH"),
                 env!("HAWK_RUSTC_HOST"),

@@ -11,7 +11,7 @@ use std::process::{Command, ExitCode, Stdio};
 use anstyle::Style;
 use anyhow::{Context, Result, bail};
 use cargo_metadata::{MetadataCommand, TargetKind};
-use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser, ValueEnum};
+use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 
 use crate::config::{AnalysisTarget, Config, ConfigDiagnosticKind, FeatureProfile};
 use crate::diagnostics::{DiagnosticRenderer, EMPHASIS, ERROR, WARNING, styled};
@@ -27,10 +27,23 @@ use cargo_hawk_internal::graph::{
 #[derive(Debug, Parser)]
 #[command(
     name = "cargo hawk",
+    bin_name = "cargo hawk",
     about = "Find unnecessary public surface in a Cargo binary product",
     version
 )]
 struct Args {
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Debug, Subcommand)]
+enum Commands {
+    /// Check a Cargo workspace for unnecessary public surface.
+    Check(CheckArgs),
+}
+
+#[derive(Debug, clap::Args)]
+struct CheckArgs {
     /// Path to the workspace manifest.
     #[arg(long, default_value = "Cargo.toml")]
     manifest_path: PathBuf,
@@ -272,8 +285,13 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
             return Ok(ExitCode::from(u8::try_from(exit_code).unwrap_or(1)));
         }
     };
-    let lint_levels = LintLevels::from_matches(&matches)?;
-    let args = Args::from_arg_matches(&matches).context("read command-line arguments")?;
+    let check_matches = matches
+        .subcommand_matches("check")
+        .expect("required check subcommand has matches");
+    let lint_levels = LintLevels::from_matches(check_matches)?;
+    let Commands::Check(args) = Args::from_arg_matches(&matches)
+        .context("read command-line arguments")?
+        .command;
     debug_assert_eq!(
         lint_levels.overrides.len(),
         args.allow.len() + args.warn.len() + args.deny.len()
@@ -633,11 +651,16 @@ fn terminal_color(raw_args: &[String]) -> TerminalColor {
     if raw_args.get(1).is_some_and(|argument| argument == "hawk") {
         raw_args.remove(1);
     }
-    Args::try_parse_from(raw_args).map_or_else(|_| TerminalColor::default(), |args| args.color)
+    Args::try_parse_from(raw_args).map_or_else(
+        |_| TerminalColor::default(),
+        |args| match args.command {
+            Commands::Check(args) => args.color,
+        },
+    )
 }
 
 struct InstrumentedCargo<'a> {
-    args: &'a Args,
+    args: &'a CheckArgs,
     workspace_root: &'a Path,
     manifest_path: &'a Path,
     target_dir: &'a Path,
@@ -1691,6 +1714,7 @@ mod tests {
         let matches = Args::command()
             .try_get_matches_from([
                 "cargo-hawk",
+                "check",
                 "-Dwarnings",
                 "--warn",
                 "hawk::unnecessary_public",
@@ -1698,7 +1722,12 @@ mod tests {
                 "hawk::unknown_item",
             ])
             .expect("parse lint-level arguments");
-        let levels = LintLevels::from_matches(&matches).expect("valid lint selectors");
+        let levels = LintLevels::from_matches(
+            matches
+                .subcommand_matches("check")
+                .expect("check subcommand matches"),
+        )
+        .expect("valid lint selectors");
 
         assert_eq!(levels.level(FindingKind::DeadPublic), LintLevel::Deny);
         assert_eq!(
@@ -1728,12 +1757,18 @@ mod tests {
         let matches = Args::command()
             .try_get_matches_from([
                 "cargo-hawk",
+                "check",
                 "-W",
                 "hawk::unnecessary_crate_visibility",
                 "-Dwarnings",
             ])
             .expect("parse lint-level arguments");
-        let levels = LintLevels::from_matches(&matches).expect("valid lint selectors");
+        let levels = LintLevels::from_matches(
+            matches
+                .subcommand_matches("check")
+                .expect("check subcommand matches"),
+        )
+        .expect("valid lint selectors");
 
         assert_eq!(
             levels.level(FindingKind::UnnecessaryCrateVisibility),
