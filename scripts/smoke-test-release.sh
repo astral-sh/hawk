@@ -17,9 +17,9 @@ done
 
 cp -R "$project_root/tests/fixtures/basic/." "$fixture"
 
-env -u RUSTC_BOOTSTRAP RUSTUP_TOOLCHAIN=1.97.0 \
+env -u RUSTC_BOOTSTRAP RUSTUP_TOOLCHAIN=1.97.1 \
   "$binary_dir/cargo-hawk" --help >/dev/null
-env -u RUSTC_BOOTSTRAP RUSTUP_TOOLCHAIN=1.97.0 \
+env -u RUSTC_BOOTSTRAP RUSTUP_TOOLCHAIN=1.97.1 \
   "$binary_dir/cargo-hawk" \
   check \
   --manifest-path "$fixture/Cargo.toml" \

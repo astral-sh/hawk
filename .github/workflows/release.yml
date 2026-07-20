@@ -157,7 +157,7 @@ jobs:
           HAWK_TARGET: ${{ matrix.host }}
         run: ./scripts/check-release-linkage.sh "$HAWK_TARGET" dist
       - name: Remove compiler development component
-        run: rustup component remove rustc-dev --toolchain 1.97.0
+        run: rustup component remove rustc-dev --toolchain 1.97.1
       - name: Smoke test release archive
         env:
           HAWK_SMOKE_ARCHIVE: ${{ runner.temp }}/hawk-release-archive
@@ -227,7 +227,7 @@ jobs:
 
           cp dist-manifest.json "$BUILD_MANIFEST_NAME"
       - name: Install normal Rust toolchain
-        run: rustup toolchain install 1.97.0
+        run: rustup toolchain install 1.97.1
       - name: Smoke test shell installer
         env:
           CARGO_HAWK_DOWNLOAD_URL: file://${{ github.workspace }}/target/distrib
