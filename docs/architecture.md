@@ -253,9 +253,9 @@ descendants too, while separately declared inherent members and unrelated
 interface dependencies continue to receive their own findings. Suppressing a
 parent leaves any otherwise actionable descendants visible, while suppressing
 any descendant finding protects its enclosing declaration from a misleading
-removal diagnostic. If cfg alternatives declare the same module path from
-different source locations, Hawk conservatively keeps their descendant findings
-visible.
+removal diagnostic. If cfg alternatives declare the same containing path with
+different kinds or source locations, Hawk conservatively keeps their descendant
+findings visible.
 
 A selected production target is not a library surface to reduce, so its crate
 does not receive these findings.

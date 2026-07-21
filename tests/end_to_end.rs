@@ -1049,6 +1049,82 @@ reason = "helper is intentionally retained"
     assert!(!stdout.contains("hawk::unfulfilled_expectation"));
 }
 
+fn write_kind_changing_cfg_alternatives(context: &HawkTestContext) {
+    fs::write(
+        context.workspace().join("library/src/lib.rs"),
+        r"#![deny(dead_code)]
+
+pub fn dead_api() {}
+
+#[cfg(not(test))]
+pub struct StructAlternative {
+    pub production_dead: u8,
+}
+
+#[cfg(test)]
+pub union StructAlternative {
+    pub test_live: u8,
+}
+
+#[cfg(not(test))]
+#[allow(non_snake_case)]
+pub mod ModuleAlternative {
+    pub fn production_dead() {}
+}
+
+#[cfg(test)]
+pub struct ModuleAlternative {
+    pub test_live: u8,
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn reaches_kind_changing_alternatives() {
+        let value = crate::StructAlternative { test_live: 1 };
+        let _ = unsafe { value.test_live };
+        let value = crate::ModuleAlternative { test_live: 1 };
+        let _ = value.test_live;
+    }
+}
+",
+    )
+    .expect("write kind-changing cfg alternatives");
+}
+
+#[test]
+fn kind_changing_cfg_alternatives_keep_their_child_diagnostics() {
+    let context = HawkTestContext::new("dead_public_fixes");
+    write_kind_changing_cfg_alternatives(&context);
+    let output = context.run(&[]);
+
+    context.assert_success(&output);
+    let stdout = context.normalized_stdout(&output);
+    assert!(stdout.contains("`StructAlternative::production_dead` is public"));
+    assert!(
+        stdout.contains("`StructAlternative::test_live` is public but is needed only by tests")
+    );
+    assert!(stdout.contains("`ModuleAlternative::production_dead` is public"));
+    assert!(
+        stdout.contains("`ModuleAlternative::test_live` is public but is needed only by tests")
+    );
+}
+
+#[test]
+fn kind_changing_cfg_alternatives_fix_their_live_fields() {
+    let context = HawkTestContext::new("dead_public_fixes");
+    write_kind_changing_cfg_alternatives(&context);
+    let output = context.run(&["--fix", "--allow-no-vcs"]);
+
+    context.assert_success(&output);
+    let library = fs::read_to_string(context.workspace().join("library/src/lib.rs"))
+        .expect("read fixed cfg alternatives");
+    assert!(library.contains("union StructAlternative {\n    test_live: u8,"));
+    assert!(library.contains("struct ModuleAlternative {\n    test_live: u8,"));
+    assert!(library.contains("pub struct StructAlternative {\n    pub production_dead: u8,"));
+    assert!(library.contains("pub mod ModuleAlternative {\n    pub fn production_dead() {}"));
+}
+
 #[test]
 fn applies_visibility_fixes_through_cargo_fix() {
     let context = HawkTestContext::new("basic");

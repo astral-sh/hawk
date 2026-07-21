@@ -637,12 +637,20 @@ pub fn suppress_dead_public_descendants(
     }
     let dead_paths: FxHashSet<_> = findings
         .iter()
-        .filter(|finding| finding.kind == FindingKind::DeadPublic)
+        .filter(|finding| {
+            finding.kind == FindingKind::DeadPublic
+                && matches!(
+                    finding.definition.kind,
+                    DefinitionKind::Module
+                        | DefinitionKind::Struct
+                        | DefinitionKind::Union
+                        | DefinitionKind::Enum
+                )
+        })
         .map(|finding| {
             (
                 finding.definition.crate_name.as_str(),
                 finding.definition.name.as_str(),
-                finding.definition.kind,
             )
         })
         .collect();
@@ -653,17 +661,26 @@ pub fn suppress_dead_public_descendants(
         .chain(test_fragments)
         .flat_map(|fragment| &fragment.definitions)
     {
-        let path = (
-            definition.crate_name.as_str(),
-            definition.name.as_str(),
-            definition.kind,
-        );
-        if !dead_paths.contains(&path) {
+        let path = (definition.crate_name.as_str(), definition.name.as_str());
+        if !dead_paths.contains(&path)
+            || !matches!(
+                definition.kind,
+                DefinitionKind::Module
+                    | DefinitionKind::Struct
+                    | DefinitionKind::Union
+                    | DefinitionKind::Enum
+            )
+        {
             continue;
         }
-        let source = (definition.span.as_ref(), definition.expansion_span.as_ref());
+        let source = (
+            definition.kind,
+            definition.span.as_ref(),
+            definition.expansion_span.as_ref(),
+        );
         // Cfg alternatives can share a logical path while containing
-        // different declarations; do not collapse across distinct sources.
+        // different declarations; do not collapse across distinct kinds or
+        // sources.
         if sources
             .insert(path, source)
             .is_some_and(|previous| previous != source)
@@ -693,7 +710,6 @@ pub fn suppress_dead_public_descendants(
             !ambiguous_paths.contains(&(
                 finding.definition.crate_name.as_str(),
                 finding.definition.name.as_str(),
-                finding.definition.kind,
             ))
         })
         .map(|finding| {
@@ -1750,6 +1766,65 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    #[test]
+    fn dead_parents_do_not_suppress_fields_of_differently_kinded_cfg_alternatives() {
+        for (dead_kind, alternative_kind) in [
+            (DefinitionKind::Struct, DefinitionKind::Union),
+            (DefinitionKind::Module, DefinitionKind::Struct),
+        ] {
+            let dead = source(typed_node("Alternative", "lib", true, dead_kind), 1);
+            let mut alternative =
+                source(typed_node("Alternative", "lib", true, alternative_kind), 1);
+            alternative.id = test_id("alternative_parent");
+            let field = source(
+                typed_node("Alternative::test_live", "lib", true, DefinitionKind::Field),
+                2,
+            );
+            let input = fragments(vec![dead, alternative, field], vec![]);
+            let mut findings = vec![
+                Finding {
+                    kind: FindingKind::DeadPublic,
+                    definition: &input[1].definitions[0],
+                    test_only: false,
+                    test_compiled_only: false,
+                },
+                Finding {
+                    kind: FindingKind::UnnecessaryPublic,
+                    definition: &input[1].definitions[1],
+                    test_only: true,
+                    test_compiled_only: true,
+                },
+                Finding {
+                    kind: FindingKind::UnnecessaryPublic,
+                    definition: &input[1].definitions[2],
+                    test_only: true,
+                    test_compiled_only: true,
+                },
+            ];
+
+            suppress_dead_public_descendants(&input, &[], &[], &mut findings);
+
+            assert_eq!(
+                finding_summaries(findings),
+                vec![
+                    (FindingKind::DeadPublic, "Alternative".into(), false, false),
+                    (
+                        FindingKind::UnnecessaryPublic,
+                        "Alternative".into(),
+                        true,
+                        true,
+                    ),
+                    (
+                        FindingKind::UnnecessaryPublic,
+                        "Alternative::test_live".into(),
+                        true,
+                        true,
+                    ),
+                ]
+            );
+        }
     }
 
     #[test]
