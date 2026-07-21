@@ -1978,6 +1978,8 @@ fn override_does_not_suppress_a_same_named_item_in_another_crate() {
     assert!(!stdout.contains("hawk::ambiguous_item"));
     assert!(!stdout.contains("hawk::unfulfilled_expectation"));
     assert!(stdout.contains("hawk: 1 finding(s)"));
+    assert!(stdout.contains("  hawk::dead_public: 1 (right-package: 1)"));
+    assert!(!stdout.contains("right_shared: 1"));
 }
 
 #[test]

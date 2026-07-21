@@ -640,6 +640,16 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
     let mut json_diagnostics = Vec::new();
     let mut diagnostic_count = 0;
     let mut diagnostic_counts = BTreeMap::<String, BTreeMap<String, usize>>::new();
+    let definition_packages: HashMap<_, _> = production_fragments
+        .iter()
+        .chain(&test_fragments)
+        .flat_map(|fragment| {
+            fragment
+                .definitions
+                .iter()
+                .map(|definition| (definition.id, fragment.package_name.as_str()))
+        })
+        .collect();
     let mut has_denied_diagnostic = false;
     let production_description = if production_products.len() == 1 {
         format!("binary `{}`", production_products[0].binary)
@@ -656,7 +666,13 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
             *diagnostic_counts
                 .entry(finding.kind.code().to_owned())
                 .or_default()
-                .entry(finding.definition.crate_name.clone())
+                .entry(
+                    definition_packages
+                        .get(&finding.definition.id)
+                        .copied()
+                        .unwrap_or(&finding.definition.crate_name)
+                        .to_owned(),
+                )
                 .or_default() += 1;
             has_denied_diagnostic |= level == LintLevel::Deny;
             match args.output_format {
