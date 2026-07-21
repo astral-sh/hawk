@@ -604,6 +604,8 @@ pub fn analyze_with_options<'a>(
         );
     }
 
+    suppress_dead_public_descendants(&mut findings, &definitions, &edges, &equivalents);
+
     findings.sort_by_key(|finding| {
         let span = finding.definition.span.as_ref();
         (
@@ -621,6 +623,77 @@ pub fn analyze_with_options<'a>(
 
 fn field_group_identity(definition: &Definition) -> Option<&Span> {
     definition.uniform_field_group.as_ref()
+}
+
+fn suppress_dead_public_descendants<'a>(
+    findings: &mut Vec<Finding<'a>>,
+    definitions: &FxHashMap<DefinitionId, &'a Definition>,
+    edges: &[&Edge],
+    equivalents: &EquivalenceGroups,
+) {
+    let dead: FxHashSet<_> = findings
+        .iter()
+        .filter(|finding| finding.kind == FindingKind::DeadPublic)
+        .flat_map(|finding| {
+            std::iter::once(finding.definition.id)
+                .chain(equivalents.group(finding.definition.id).iter().copied())
+        })
+        .collect();
+    let mut children: FxHashMap<DefinitionId, Vec<DefinitionId>> = FxHashMap::default();
+    for edge in edges {
+        let Some(child) = definitions.get(&edge.from) else {
+            continue;
+        };
+        let Some(parent) = definitions.get(&edge.to) else {
+            continue;
+        };
+        if is_containment_edge(edge.kind, child, parent) {
+            children.entry(edge.to).or_default().push(edge.from);
+        }
+    }
+
+    let descendants = reachable(
+        children
+            .iter()
+            .filter(|(parent, _)| dead.contains(parent))
+            .flat_map(|(_, children)| children.iter().copied()),
+        &children,
+    );
+    findings.retain(|finding| {
+        finding.kind != FindingKind::DeadPublic
+            || !std::iter::once(finding.definition.id)
+                .chain(equivalents.group(finding.definition.id).iter().copied())
+                .any(|id| descendants.contains(&id))
+    });
+}
+
+fn is_containment_edge(kind: EdgeKind, child: &Definition, parent: &Definition) -> bool {
+    // Interface edges also point at types mentioned by fields and method
+    // signatures, so the diagnostic path must identify the actual parent.
+    if child.crate_name != parent.crate_name
+        || child
+            .name
+            .strip_prefix(parent.name.as_str())
+            .is_none_or(|suffix| !suffix.starts_with("::"))
+    {
+        return false;
+    }
+
+    match kind {
+        EdgeKind::VisibilityParent => parent.kind == DefinitionKind::Module,
+        EdgeKind::Interface => matches!(
+            (child.kind, parent.kind),
+            (
+                DefinitionKind::Field,
+                DefinitionKind::Struct | DefinitionKind::Union
+            ) | (DefinitionKind::EnumVariant, DefinitionKind::Enum)
+                | (
+                    DefinitionKind::InherentMethod | DefinitionKind::InherentAssociatedConstant,
+                    DefinitionKind::Struct | DefinitionKind::Enum | DefinitionKind::Union
+                )
+        ),
+        _ => false,
+    }
 }
 
 fn suppress_uniform_field_visibility_findings<'a>(
@@ -1450,6 +1523,117 @@ mod tests {
             findings
                 .iter()
                 .all(|finding| finding.kind == FindingKind::DeadPublic)
+        );
+    }
+
+    #[test]
+    fn dead_public_members_are_suppressed_beneath_dead_adts() {
+        let input = fragments(
+            vec![
+                typed_node("DeadStruct", "lib", true, DefinitionKind::Struct),
+                typed_node("DeadStruct::field", "lib", true, DefinitionKind::Field),
+                typed_node("DeadUnion", "lib", true, DefinitionKind::Union),
+                typed_node("DeadUnion::field", "lib", true, DefinitionKind::Field),
+                typed_node("DeadEnum", "lib", true, DefinitionKind::Enum),
+                typed_node(
+                    "DeadEnum::Variant",
+                    "lib",
+                    true,
+                    DefinitionKind::EnumVariant,
+                ),
+                typed_node(
+                    "DeadStruct::method",
+                    "lib",
+                    true,
+                    DefinitionKind::InherentMethod,
+                ),
+                typed_node(
+                    "DeadStruct::VALUE",
+                    "lib",
+                    true,
+                    DefinitionKind::InherentAssociatedConstant,
+                ),
+            ],
+            [
+                ("DeadStruct::field", "DeadStruct"),
+                ("DeadUnion::field", "DeadUnion"),
+                ("DeadEnum::Variant", "DeadEnum"),
+                ("DeadStruct::method", "DeadStruct"),
+                ("DeadStruct::VALUE", "DeadStruct"),
+            ]
+            .into_iter()
+            .map(|(from, to)| Edge {
+                from: test_id(from),
+                to: test_id(to),
+                kind: EdgeKind::Interface,
+            })
+            .collect(),
+        );
+
+        assert_eq!(
+            finding_summaries(analyze(&input, &HashSet::new())),
+            vec![
+                (FindingKind::DeadPublic, "DeadEnum".into(), false, false),
+                (FindingKind::DeadPublic, "DeadStruct".into(), false, false),
+                (FindingKind::DeadPublic, "DeadUnion".into(), false, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn dead_public_descendants_are_suppressed_beneath_dead_modules() {
+        let input = fragments(
+            vec![
+                typed_node("dead", "lib", true, DefinitionKind::Module),
+                typed_node("dead::private", "lib", false, DefinitionKind::Module),
+                typed_node("dead::private::nested", "lib", true, DefinitionKind::Module),
+                node("dead::private::nested::entry", "lib", true),
+            ],
+            [
+                ("dead::private", "dead"),
+                ("dead::private::nested", "dead::private"),
+                ("dead::private::nested::entry", "dead::private::nested"),
+            ]
+            .into_iter()
+            .map(|(from, to)| Edge {
+                from: test_id(from),
+                to: test_id(to),
+                kind: EdgeKind::VisibilityParent,
+            })
+            .collect(),
+        );
+
+        assert_eq!(
+            finding_summaries(analyze(&input, &HashSet::new())),
+            vec![(FindingKind::DeadPublic, "dead".into(), false, false)]
+        );
+    }
+
+    #[test]
+    fn arbitrary_interface_edges_do_not_suppress_dead_public_findings() {
+        let input = fragments(
+            vec![
+                typed_node("Dead", "lib", true, DefinitionKind::Struct),
+                typed_node("Other::field", "lib", true, DefinitionKind::Field),
+                node("dead_entry", "lib", true),
+            ],
+            ["Other::field", "dead_entry"]
+                .into_iter()
+                .map(|from| Edge {
+                    from: test_id(from),
+                    to: test_id("Dead"),
+                    kind: EdgeKind::Interface,
+                })
+                .collect(),
+        );
+
+        assert_eq!(
+            finding_summaries(analyze(&input, &HashSet::new())),
+            vec![
+                (FindingKind::DeadPublic, "Dead".into(), false, false),
+                (FindingKind::DeadPublic, "Other::field".into(), false, false),
+                (FindingKind::DeadPublic, "dead_entry".into(), false, false),
+            ]
         );
     }
 

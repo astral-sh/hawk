@@ -459,7 +459,7 @@ fn diagnoses_public_surface_of_a_binary_product() {
     assert!(unrelated_json.exists());
     let stdout = context.normalized_stdout(&output);
     let summary = format!(
-        "hawk: 42 finding(s) for `app --bin app --all-features` and workspace non-production targets on target `{host_target}`\n"
+        "hawk: 39 finding(s) for `app --bin app --all-features` and workspace non-production targets on target `{host_target}`\n"
     );
     let diagnostics = stdout
         .strip_suffix(&summary)
@@ -584,13 +584,6 @@ fn diagnoses_public_surface_of_a_binary_product() {
         | ^^^ public declaration
         = help: consider restricting this declaration's visibility or removing it
 
-    warning[hawk::dead_public]: `DeadFields::unused` is public but is not reachable from binary `app`
-      --> library/src/lib.rs:132:5
-        |
-    132 |     pub unused: u8,
-        |     ^^^ public declaration
-        = help: consider restricting this declaration's visibility or removing it
-
     warning[hawk::unnecessary_public]: `ConstructedTuple` is public but all reachable uses are within `library`; it can be `pub(crate)`
       --> library/src/lib.rs:155:1
         |
@@ -617,13 +610,6 @@ fn diagnoses_public_surface_of_a_binary_product() {
         |
     162 | pub union DeadUnion {
         | ^^^ public declaration
-        = help: consider restricting this declaration's visibility or removing it
-
-    warning[hawk::dead_public]: `DeadUnion::value` is public but is not reachable from binary `app`
-      --> library/src/lib.rs:163:5
-        |
-    163 |     pub value: u8,
-        |     ^^^ public declaration
         = help: consider restricting this declaration's visibility or removing it
 
     warning[hawk::dead_public]: `ProductEnum::Unused` is a public enum variant but is not reachable from binary `app`
@@ -680,13 +666,6 @@ fn diagnoses_public_surface_of_a_binary_product() {
         |
     260 | pub mod dead_outer {
         | ^^^ public module
-        = help: consider restricting this module's visibility or removing it
-
-    warning[hawk::dead_public]: public module `dead_outer::dead_nested` has no declaration reachable from binary `app`
-      --> library/src/lib.rs:261:5
-        |
-    261 |     pub mod dead_nested {}
-        |     ^^^ public module
         = help: consider restricting this module's visibility or removing it
 
     warning[hawk::unnecessary_public]: `test_only_helper` is public but is needed only by tests; it can be `pub(crate)`
@@ -928,7 +907,7 @@ fn ordered_lint_levels_control_severity_and_exit_status() {
     assert!(stdout.contains("warning[hawk::unnecessary_public]"));
     assert!(stdout.contains("error[hawk::unfulfilled_expectation]"));
     assert!(!stdout.contains("hawk::unknown_item"));
-    assert!(stdout.contains("hawk: 41 finding(s)"));
+    assert!(stdout.contains("hawk: 38 finding(s)"));
 }
 
 #[test]
