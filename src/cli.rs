@@ -229,7 +229,8 @@ impl LintLevels {
             diagnostic.default_level(),
             |level, (selector, override_level)| {
                 if *selector == LintSelector::Diagnostic(diagnostic)
-                    || (*selector == LintSelector::Warnings && level.is_emitted())
+                    || (*selector == LintSelector::Warnings
+                        && (diagnostic.default_level().is_emitted() || level.is_emitted()))
                 {
                     *override_level
                 } else {
@@ -1773,6 +1774,25 @@ mod tests {
         assert_eq!(
             levels.level(FindingKind::UnnecessaryCrateVisibility),
             LintLevel::Deny
+        );
+    }
+
+    #[test]
+    fn later_warnings_group_reenables_default_warnings() {
+        let matches = Args::command()
+            .try_get_matches_from(["cargo-hawk", "check", "-Awarnings", "-Dwarnings"])
+            .expect("parse lint-level arguments");
+        let levels = LintLevels::from_matches(
+            matches
+                .subcommand_matches("check")
+                .expect("check subcommand matches"),
+        )
+        .expect("valid lint selectors");
+
+        assert_eq!(levels.level(FindingKind::DeadPublic), LintLevel::Deny);
+        assert_eq!(
+            levels.level(FindingKind::UnnecessaryCrateVisibility),
+            LintLevel::Allow
         );
     }
 }

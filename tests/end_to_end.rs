@@ -932,6 +932,21 @@ fn ordered_lint_levels_control_severity_and_exit_status() {
 }
 
 #[test]
+fn later_warnings_group_reenables_default_warnings() {
+    let context = HawkTestContext::new("basic");
+    let output = context.run(&["-A", "warnings", "-D", "warnings"]);
+
+    assert!(
+        !output.status.success(),
+        "denied diagnostic did not fail:\n{}",
+        context.normalized_stdout(&output)
+    );
+    let stdout = context.normalized_stdout(&output);
+    assert!(stdout.contains("error[hawk::dead_public]"));
+    assert!(!stdout.contains("hawk::unnecessary_crate_visibility"));
+}
+
+#[test]
 fn applies_visibility_fixes_through_cargo_fix() {
     let context = HawkTestContext::new("basic");
     let output = context.run(&["--fix", "--allow-no-vcs"]);
