@@ -1751,23 +1751,6 @@ fn reports_operational_json_errors_on_stderr() {
 }
 
 #[test]
-fn reports_only_dead_public_findings() {
-    let context = HawkTestContext::new("basic");
-    let output = context.run(&["--only", "dead-public"]);
-
-    context.assert_success(&output);
-    let stdout = context.normalized_stdout(&output);
-    assert!(stdout.contains("warning[hawk::dead_public]"));
-    assert!(!stdout.contains("warning[hawk::unnecessary_public]"));
-    assert!(stdout.contains("warning[hawk::unknown_item]"));
-    assert!(stdout.contains("warning[hawk::unfulfilled_expectation]"));
-    assert!(stdout.contains("hawk: 17 finding(s)"));
-    assert!(stdout.contains("  hawk::dead_public: 15 (library: 14, test_support: 1)"));
-    assert!(stdout.contains("  hawk::unknown_item: 1 (configuration: 1)"));
-    assert!(!stdout.contains("  hawk::unnecessary_public:"));
-}
-
-#[test]
 fn applies_visibility_fixes_through_cargo_fix() {
     let context = HawkTestContext::new("basic");
     let output = context.run(&["--fix", "--allow-no-vcs"]);
@@ -2129,4 +2112,21 @@ fn narrows_crate_visibility_to_the_required_module_scope_when_enabled() {
     assert!(library.contains("    fn parent_helper() {}"));
     assert!(library.contains("        pub(super) fn call_parent_helper() {"));
     assert!(library.contains("    pub(crate) mod api {"));
+}
+
+#[test]
+fn reports_only_dead_public_findings() {
+    let context = HawkTestContext::new("basic");
+    let output = context.run(&["--only", "dead-public"]);
+
+    context.assert_success(&output);
+    let stdout = context.normalized_stdout(&output);
+    assert!(stdout.contains("warning[hawk::dead_public]"));
+    assert!(!stdout.contains("warning[hawk::unnecessary_public]"));
+    assert!(stdout.contains("warning[hawk::unknown_item]"));
+    assert!(stdout.contains("warning[hawk::unfulfilled_expectation]"));
+    assert!(stdout.contains("hawk: 17 finding(s)"));
+    assert!(stdout.contains("  hawk::dead_public: 15 (library: 14, test_support: 1)"));
+    assert!(stdout.contains("  hawk::unknown_item: 1 (configuration: 1)"));
+    assert!(!stdout.contains("  hawk::unnecessary_public:"));
 }

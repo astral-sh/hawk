@@ -180,7 +180,7 @@ as unknown items and unfulfilled expectations:
   --only dead-public
 ```
 
-The final summary groups emitted findings by lint and library crate. Hawk
+The final summary groups emitted findings by lint and Cargo package. Hawk
 reports configuration diagnostics separately under `configuration`.
 
 `hawk::unnecessary_crate_visibility` is allow-by-default because preferring
