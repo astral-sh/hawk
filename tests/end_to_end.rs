@@ -2125,8 +2125,40 @@ fn reports_only_dead_public_findings() {
     assert!(!stdout.contains("warning[hawk::unnecessary_public]"));
     assert!(stdout.contains("warning[hawk::unknown_item]"));
     assert!(stdout.contains("warning[hawk::unfulfilled_expectation]"));
-    assert!(stdout.contains("hawk: 17 finding(s)"));
-    assert!(stdout.contains("  hawk::dead_public: 15 (library: 14, test_support: 1)"));
+    assert!(stdout.contains("hawk: 14 finding(s)"));
+    assert!(stdout.contains("  hawk::dead_public: 12 (library: 11, test_support: 1)"));
     assert!(stdout.contains("  hawk::unknown_item: 1 (configuration: 1)"));
     assert!(!stdout.contains("  hawk::unnecessary_public:"));
+}
+
+#[test]
+fn reports_only_dead_public_findings_as_json() {
+    let context = HawkTestContext::new("basic");
+    let output = context.run(&["--only", "dead-public", "--output-format=json"]);
+
+    context.assert_success(&output);
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout contains one JSON report");
+    assert_eq!(report["schema_version"], 2);
+    assert_eq!(report["summary"]["diagnostic_count"], 14);
+    let diagnostics = report["diagnostics"]
+        .as_array()
+        .expect("diagnostics is an array");
+    assert_eq!(diagnostics.len(), 14);
+    assert!(
+        diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic["category"] == "configuration"
+                || diagnostic["code"] == "hawk::dead_public")
+    );
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic["category"] == "configuration")
+    );
+    assert!(
+        diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic["code"] != "hawk::unnecessary_public")
+    );
 }

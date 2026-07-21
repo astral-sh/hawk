@@ -170,9 +170,10 @@ The supported selectors are `warnings`, `hawk::dead_public`,
 are emitted as errors and cause a non-zero exit status. Invalid configuration
 and failed instrumented Cargo builds fail independently of lint levels.
 
-To focus on deletion candidates, pass `--only dead-public`. This suppresses
-visibility-reduction findings while preserving configuration diagnostics such
-as unknown items and unfulfilled expectations:
+To focus on deletion candidates in either text or JSON output, pass
+`--only dead-public`. This suppresses visibility-reduction findings while
+preserving configuration diagnostics such as unknown items and unfulfilled
+expectations:
 
 ```sh
 ./target/debug/cargo-hawk check \

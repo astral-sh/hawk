@@ -623,20 +623,6 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
         ),
     );
     let mut renderer = DiagnosticRenderer::new(&workspace_root);
-    let definition_packages: HashMap<_, _> = if args.output_format == OutputFormat::Json {
-        production_fragments
-            .iter()
-            .chain(&test_fragments)
-            .flat_map(|fragment| {
-                fragment
-                    .definitions
-                    .iter()
-                    .map(|definition| (definition.id, fragment.package_name.as_str()))
-            })
-            .collect()
-    } else {
-        HashMap::new()
-    };
     let mut json_diagnostics = Vec::new();
     let mut diagnostic_count = 0;
     let mut diagnostic_counts = BTreeMap::<String, BTreeMap<String, usize>>::new();
