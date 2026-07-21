@@ -475,6 +475,7 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
                     &excluded,
                     config.preserve_uniform_field_visibility(),
                 ),
+                lint_levels.level(FindingKind::DeadPublic).is_emitted(),
             );
             let fixable_findings: Vec<_> = initial_findings
                 .findings
@@ -584,6 +585,7 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
             &excluded,
             config.preserve_uniform_field_visibility(),
         ),
+        lint_levels.level(FindingKind::DeadPublic).is_emitted(),
     );
     let mut renderer = DiagnosticRenderer::new(&workspace_root);
     let mut diagnostic_count = 0;

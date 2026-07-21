@@ -543,6 +543,7 @@ impl Config {
         production_fragments: &[Fragment],
         test_fragments: &[Fragment],
         findings: Vec<Finding<'findings>>,
+        collapse_dead_public: bool,
     ) -> AppliedFindings<'findings, 'config> {
         let known_items: HashSet<KnownItemIdentity<'_>> = production_fragments
             .iter()
@@ -612,12 +613,14 @@ impl Config {
                 !suppressed
             })
             .collect();
-        suppress_dead_public_descendants(
-            production_fragments,
-            test_fragments,
-            &retained_definitions,
-            &mut findings,
-        );
+        if collapse_dead_public {
+            suppress_dead_public_descendants(
+                production_fragments,
+                test_fragments,
+                &retained_definitions,
+                &mut findings,
+            );
+        }
         AppliedFindings {
             findings,
             config_diagnostics,
@@ -1020,6 +1023,7 @@ reason = "known retained public surface"
             &fragments,
             &[],
             findings,
+            true,
         );
 
         assert!(applied.findings.is_empty());
@@ -1051,6 +1055,7 @@ reason = "parent is intentionally retained"
             &fragments,
             &[],
             findings,
+            true,
         );
 
         assert_eq!(applied.findings.len(), 1);
@@ -1083,9 +1088,43 @@ reason = "field is intentionally retained"
             &fragments,
             &[],
             findings,
+            true,
         );
 
         assert!(applied.findings.is_empty());
+        assert!(applied.config_diagnostics.is_empty());
+    }
+
+    #[test]
+    fn disabled_dead_public_collapsing_still_fulfills_child_expectations() {
+        let directory = tempfile::tempdir().expect("temporary configuration directory");
+        let path = directory.path().join("hawk.toml");
+        std::fs::write(
+            &path,
+            r#"
+[[override]]
+lint = "hawk::dead_public"
+crate = "library"
+item = "Dead::field"
+level = "expect"
+reason = "field is intentionally retained"
+"#,
+        )
+        .expect("write configuration");
+        let config = Config::load(directory.path(), Some(&path)).expect("load configuration");
+        let fragments = vec![dead_parent_fragment()];
+        let findings = analyze(&fragments, &[], &candidate_crates(), &HashSet::new());
+
+        let applied = config.apply(
+            &target("aarch64-apple-darwin", &["unix"]),
+            &fragments,
+            &[],
+            findings,
+            false,
+        );
+
+        assert_eq!(applied.findings.len(), 1);
+        assert_eq!(applied.findings[0].definition.name, "Dead");
         assert!(applied.config_diagnostics.is_empty());
     }
 
@@ -1123,6 +1162,7 @@ reason = "generated parent declaration"
             &fragments,
             &[],
             findings,
+            true,
         );
 
         assert_eq!(applied.findings.len(), 1);
@@ -1181,6 +1221,7 @@ reason = "retain every compiled cfg alternative"
             &production_fragments,
             &test_fragments,
             findings,
+            true,
         );
 
         assert!(applied.findings.is_empty());
@@ -1212,6 +1253,7 @@ reason = "detect stale selectors"
             &fragments,
             &[],
             findings,
+            true,
         );
 
         assert_eq!(applied.findings.len(), 1);
@@ -1248,6 +1290,7 @@ reason = "ambiguous Rust namespace"
             &fragments,
             &[],
             findings,
+            true,
         );
 
         assert_eq!(applied.findings.len(), 2);
@@ -1284,6 +1327,7 @@ reason = "retain the type alias"
             &fragments,
             &[],
             findings,
+            true,
         );
 
         assert_eq!(applied.findings.len(), 1);
@@ -1319,6 +1363,7 @@ reason = "only retained on Windows"
             &fragments,
             &[],
             analyze(&fragments, &[], &candidate_crates(), &HashSet::new()),
+            true,
         );
         assert!(windows.findings.is_empty());
         assert!(windows.config_diagnostics.is_empty());
@@ -1328,6 +1373,7 @@ reason = "only retained on Windows"
             &fragments,
             &[],
             analyze(&fragments, &[], &candidate_crates(), &HashSet::new()),
+            true,
         );
         assert_eq!(unix.findings.len(), 1);
         assert!(unix.config_diagnostics.is_empty());
@@ -1359,6 +1405,7 @@ reason = "only compiled on Windows"
             &fragments,
             &[],
             findings,
+            true,
         );
 
         assert_eq!(applied.findings.len(), 1);
@@ -1387,6 +1434,7 @@ reason = "generated public declarations"
             &fragments,
             &[],
             analyze(&fragments, &[], &candidate_crates(), &HashSet::new()),
+            true,
         );
 
         assert_eq!(
@@ -1422,6 +1470,7 @@ reason = "not actually a module"
             &fragments,
             &[],
             analyze(&fragments, &[], &candidate_crates(), &HashSet::new()),
+            true,
         );
 
         assert_eq!(applied.findings.len(), 3);
@@ -1449,6 +1498,7 @@ reason = "generated source file"
             &fragments,
             &[],
             analyze(&fragments, &[], &candidate_crates(), &HashSet::new()),
+            true,
         );
 
         assert_eq!(
@@ -1485,6 +1535,7 @@ reason = "generated only on Windows"
             &fragments,
             &[],
             analyze(&fragments, &[], &candidate_crates(), &HashSet::new()),
+            true,
         );
         assert_eq!(windows.findings.len(), 2);
 
@@ -1493,6 +1544,7 @@ reason = "generated only on Windows"
             &fragments,
             &[],
             analyze(&fragments, &[], &candidate_crates(), &HashSet::new()),
+            true,
         );
         assert_eq!(unix.findings.len(), 3);
     }

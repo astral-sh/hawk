@@ -1049,6 +1049,109 @@ reason = "helper is intentionally retained"
     assert!(!stdout.contains("hawk::unfulfilled_expectation"));
 }
 
+#[test]
+fn allowed_dead_public_keeps_and_fixes_restricted_descendant_findings() {
+    let context = HawkTestContext::new("basic");
+    let library_path = context.workspace().join("library/src/lib.rs");
+    let mut library = fs::read_to_string(&library_path).expect("read library source");
+    library.push_str(
+        r"
+
+pub mod dead_with_restricted_helper {
+    pub(crate) fn helper() {}
+}
+",
+    );
+    fs::write(&library_path, library).expect("write library source");
+
+    let output = context.run(&["-A", "hawk::dead_public"]);
+    context.assert_success(&output);
+    let stdout = context.normalized_stdout(&output);
+    assert!(!stdout.contains("public module `dead_with_restricted_helper`"));
+    assert!(
+        stdout.contains("`dead_with_restricted_helper::helper` has explicit restricted visibility"),
+        "{stdout}"
+    );
+
+    let output = context.run(&["-A", "hawk::dead_public", "--fix", "--allow-no-vcs"]);
+    context.assert_success(&output);
+    let library = fs::read_to_string(library_path).expect("read fixed library source");
+    assert!(library.contains("pub mod dead_with_restricted_helper {\n    fn helper() {}"));
+}
+
+#[test]
+fn retained_inherent_members_protect_their_receiver_and_enclosing_module() {
+    let context = HawkTestContext::new("basic");
+    let library_path = context.workspace().join("library/src/lib.rs");
+    let mut library = fs::read_to_string(&library_path).expect("read library source");
+    library.push_str(
+        r"
+
+pub struct RetainedTop;
+
+impl RetainedTop {
+    pub fn retained_method() {}
+
+    pub const ACTIONABLE: u8 = 1;
+}
+
+pub mod retained_inherent_module {
+    pub struct Nested;
+
+    impl Nested {
+        pub fn actionable_method() {}
+
+        pub const RETAINED: u8 = 1;
+    }
+}
+",
+    );
+    fs::write(library_path, library).expect("write library source");
+    let configuration = tempfile::NamedTempFile::new().expect("temporary configuration");
+    fs::write(
+        configuration.path(),
+        r#"
+[[production]]
+package = "app"
+bin = "app"
+reason = "test binary product"
+
+[[override]]
+lint = "hawk::dead_public"
+crate = "library"
+item = "RetainedTop::retained_method"
+kind = "inherent_method"
+level = "allow"
+reason = "method is intentionally retained"
+
+[[override]]
+lint = "hawk::dead_public"
+crate = "library"
+item = "retained_inherent_module::Nested::RETAINED"
+kind = "inherent_associated_constant"
+level = "allow"
+reason = "constant is intentionally retained"
+"#,
+    )
+    .expect("write temporary configuration");
+    let output = context
+        .command()
+        .arg("--config")
+        .arg(configuration.path())
+        .output()
+        .expect("run cargo-hawk");
+
+    context.assert_success(&output);
+    let stdout = context.normalized_stdout(&output);
+    assert!(!stdout.contains("`RetainedTop` is public"));
+    assert!(!stdout.contains("`RetainedTop::retained_method`"));
+    assert!(stdout.contains("`RetainedTop::ACTIONABLE` is public"));
+    assert!(!stdout.contains("public module `retained_inherent_module`"));
+    assert!(!stdout.contains("`retained_inherent_module::Nested` is public"));
+    assert!(!stdout.contains("`retained_inherent_module::Nested::RETAINED`"));
+    assert!(stdout.contains("`retained_inherent_module::Nested::actionable_method` is public"));
+}
+
 fn write_kind_changing_cfg_alternatives(context: &HawkTestContext) {
     fs::write(
         context.workspace().join("library/src/lib.rs"),
@@ -1123,6 +1226,54 @@ fn kind_changing_cfg_alternatives_fix_their_live_fields() {
     assert!(library.contains("struct ModuleAlternative {\n    test_live: u8,"));
     assert!(library.contains("pub struct StructAlternative {\n    pub production_dead: u8,"));
     assert!(library.contains("pub mod ModuleAlternative {\n    pub fn production_dead() {}"));
+}
+
+#[test]
+fn retained_cfg_alternative_fields_do_not_protect_dead_production_parents() {
+    let context = HawkTestContext::new("dead_public_fixes");
+    write_kind_changing_cfg_alternatives(&context);
+    let configuration = tempfile::NamedTempFile::new().expect("temporary configuration");
+    fs::write(
+        configuration.path(),
+        r#"
+[[production]]
+package = "app"
+bin = "app"
+reason = "test binary product"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "library"
+item = "StructAlternative::test_live"
+kind = "field"
+level = "allow"
+reason = "union field is intentionally retained"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "library"
+item = "ModuleAlternative::test_live"
+kind = "field"
+level = "allow"
+reason = "struct field is intentionally retained"
+"#,
+    )
+    .expect("write temporary configuration");
+    let output = context
+        .command()
+        .arg("--config")
+        .arg(configuration.path())
+        .output()
+        .expect("run cargo-hawk");
+
+    context.assert_success(&output);
+    let stdout = context.normalized_stdout(&output);
+    assert!(stdout.contains("`StructAlternative` is public but is not reachable"));
+    assert!(stdout.contains("`StructAlternative::production_dead` is public"));
+    assert!(stdout.contains("public module `ModuleAlternative` has no declaration reachable"));
+    assert!(stdout.contains("`ModuleAlternative::production_dead` is public"));
+    assert!(!stdout.contains("`StructAlternative::test_live`"));
+    assert!(!stdout.contains("`ModuleAlternative::test_live`"));
 }
 
 #[test]

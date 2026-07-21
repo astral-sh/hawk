@@ -688,20 +688,14 @@ pub fn suppress_dead_public_descendants(
             ambiguous_paths.insert(path);
         }
     }
-    let mut protected_paths = FxHashSet::default();
-    for definition in retained_definitions {
-        visit_containing_paths(definition, |path| {
-            protected_paths.insert(path);
-            false
-        });
-    }
+    let protected = protected_containing_definitions(
+        production_fragments,
+        test_fragments,
+        retained_definitions,
+    );
     findings.retain(|finding| {
         finding.kind != FindingKind::DeadPublic
-            || !protected_paths.contains(&(
-                finding.definition.crate_name.as_str(),
-                finding.definition.name.as_str(),
-                finding.definition.kind,
-            ))
+            || !protected.contains(&containment_identity(finding.definition))
     });
     let dead_paths: FxHashSet<_> = findings
         .iter()
@@ -723,6 +717,106 @@ pub fn suppress_dead_public_descendants(
     findings.retain(|finding| {
         !visit_containing_paths(finding.definition, |path| dead_paths.contains(&path))
     });
+}
+
+type ContainmentIdentity<'a> = (
+    &'a str,
+    &'a str,
+    DefinitionKind,
+    Option<&'a Span>,
+    Option<&'a ExpansionSpan>,
+);
+
+fn protected_containing_definitions<'a>(
+    production_fragments: &'a [Fragment],
+    test_fragments: &'a [Fragment],
+    retained_definitions: &[&Definition],
+) -> FxHashSet<ContainmentIdentity<'a>> {
+    let retained: FxHashSet<_> = retained_definitions
+        .iter()
+        .map(|definition| containment_identity(definition))
+        .collect();
+    let mut protected = FxHashSet::default();
+    if retained.is_empty() {
+        return protected;
+    }
+
+    for fragment in production_fragments.iter().chain(test_fragments) {
+        let mut pending: Vec<_> = fragment
+            .definitions
+            .iter()
+            .filter(|definition| retained.contains(&containment_identity(definition)))
+            .map(|definition| definition.id)
+            .collect();
+        if pending.is_empty() {
+            continue;
+        }
+        let definitions: FxHashMap<_, _> = fragment
+            .definitions
+            .iter()
+            .map(|definition| (definition.id, definition))
+            .collect();
+        let mut parents: FxHashMap<DefinitionId, Vec<DefinitionId>> = FxHashMap::default();
+        for edge in &fragment.edges {
+            let Some(child) = definitions.get(&edge.from) else {
+                continue;
+            };
+            let Some(parent) = definitions.get(&edge.to) else {
+                continue;
+            };
+            if is_containment_edge(edge.kind, child, parent) {
+                parents.entry(edge.from).or_default().push(edge.to);
+            }
+        }
+        let mut visited = FxHashSet::default();
+        while let Some(child) = pending.pop() {
+            if !visited.insert(child) {
+                continue;
+            }
+            for parent in parents.get(&child).into_iter().flatten() {
+                protected.insert(containment_identity(definitions[parent]));
+                pending.push(*parent);
+            }
+        }
+    }
+    protected
+}
+
+fn containment_identity(definition: &Definition) -> ContainmentIdentity<'_> {
+    (
+        definition.crate_name.as_str(),
+        definition.name.as_str(),
+        definition.kind,
+        definition.span.as_ref(),
+        definition.expansion_span.as_ref(),
+    )
+}
+
+fn is_containment_edge(kind: EdgeKind, child: &Definition, parent: &Definition) -> bool {
+    if child.crate_name != parent.crate_name
+        || child
+            .name
+            .strip_prefix(parent.name.as_str())
+            .is_none_or(|suffix| !suffix.starts_with("::"))
+    {
+        return false;
+    }
+
+    match kind {
+        EdgeKind::VisibilityParent => parent.kind == DefinitionKind::Module,
+        EdgeKind::Interface => matches!(
+            (child.kind, parent.kind),
+            (
+                DefinitionKind::Field,
+                DefinitionKind::Struct | DefinitionKind::Union
+            ) | (DefinitionKind::EnumVariant, DefinitionKind::Enum)
+                | (
+                    DefinitionKind::InherentMethod | DefinitionKind::InherentAssociatedConstant,
+                    DefinitionKind::Struct | DefinitionKind::Union | DefinitionKind::Enum
+                )
+        ),
+        _ => false,
+    }
 }
 
 fn visit_containing_paths<'a>(
@@ -1825,6 +1919,207 @@ mod tests {
                 ]
             );
         }
+    }
+
+    #[test]
+    fn retained_cfg_alternative_fields_only_protect_their_actual_parent() {
+        for (dead_kind, alternative_kind, dead_child_kind, dead_edge_kind) in [
+            (
+                DefinitionKind::Struct,
+                DefinitionKind::Union,
+                DefinitionKind::Field,
+                EdgeKind::Interface,
+            ),
+            (
+                DefinitionKind::Module,
+                DefinitionKind::Struct,
+                DefinitionKind::Function,
+                EdgeKind::VisibilityParent,
+            ),
+        ] {
+            let dead = source(typed_node("Alternative", "lib", true, dead_kind), 1);
+            let dead_child = source(
+                typed_node("Alternative::production_dead", "lib", true, dead_child_kind),
+                2,
+            );
+            let mut alternative =
+                source(typed_node("Alternative", "lib", true, alternative_kind), 5);
+            alternative.id = test_id("alternative_parent");
+            let field = source(
+                typed_node("Alternative::test_live", "lib", true, DefinitionKind::Field),
+                6,
+            );
+            let input = fragments(
+                vec![dead, dead_child, alternative, field],
+                vec![
+                    Edge {
+                        from: test_id("Alternative::production_dead"),
+                        to: test_id("Alternative"),
+                        kind: dead_edge_kind,
+                    },
+                    Edge {
+                        from: test_id("Alternative::test_live"),
+                        to: test_id("alternative_parent"),
+                        kind: EdgeKind::Interface,
+                    },
+                ],
+            );
+            let mut findings = vec![
+                Finding {
+                    kind: FindingKind::DeadPublic,
+                    definition: &input[1].definitions[0],
+                    test_only: false,
+                    test_compiled_only: false,
+                },
+                Finding {
+                    kind: FindingKind::DeadPublic,
+                    definition: &input[1].definitions[1],
+                    test_only: false,
+                    test_compiled_only: false,
+                },
+                Finding {
+                    kind: FindingKind::UnnecessaryPublic,
+                    definition: &input[1].definitions[2],
+                    test_only: true,
+                    test_compiled_only: true,
+                },
+            ];
+
+            suppress_dead_public_descendants(
+                &input,
+                &[],
+                &[&input[1].definitions[3]],
+                &mut findings,
+            );
+
+            assert_eq!(
+                finding_summaries(findings),
+                vec![
+                    (FindingKind::DeadPublic, "Alternative".into(), false, false),
+                    (
+                        FindingKind::DeadPublic,
+                        "Alternative::production_dead".into(),
+                        false,
+                        false,
+                    ),
+                    (
+                        FindingKind::UnnecessaryPublic,
+                        "Alternative".into(),
+                        true,
+                        true,
+                    ),
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn retained_inherent_members_protect_their_receiver_and_enclosing_module() {
+        let input = fragments(
+            vec![
+                typed_node("dead", "lib", true, DefinitionKind::Module),
+                typed_node("dead::Retained", "lib", true, DefinitionKind::Struct),
+                typed_node(
+                    "dead::Retained::method",
+                    "lib",
+                    true,
+                    DefinitionKind::InherentMethod,
+                ),
+                typed_node(
+                    "dead::Retained::VALUE",
+                    "lib",
+                    true,
+                    DefinitionKind::InherentAssociatedConstant,
+                ),
+            ],
+            vec![
+                Edge {
+                    from: test_id("dead::Retained"),
+                    to: test_id("dead"),
+                    kind: EdgeKind::VisibilityParent,
+                },
+                Edge {
+                    from: test_id("dead::Retained::method"),
+                    to: test_id("dead::Retained"),
+                    kind: EdgeKind::Interface,
+                },
+                Edge {
+                    from: test_id("dead::Retained::method"),
+                    to: test_id("dead"),
+                    kind: EdgeKind::VisibilityParent,
+                },
+                Edge {
+                    from: test_id("dead::Retained::VALUE"),
+                    to: test_id("dead::Retained"),
+                    kind: EdgeKind::Interface,
+                },
+                Edge {
+                    from: test_id("dead::Retained::VALUE"),
+                    to: test_id("dead"),
+                    kind: EdgeKind::VisibilityParent,
+                },
+            ],
+        );
+        let mut findings = vec![
+            Finding {
+                kind: FindingKind::DeadPublic,
+                definition: &input[1].definitions[0],
+                test_only: false,
+                test_compiled_only: false,
+            },
+            Finding {
+                kind: FindingKind::DeadPublic,
+                definition: &input[1].definitions[1],
+                test_only: false,
+                test_compiled_only: false,
+            },
+            Finding {
+                kind: FindingKind::DeadPublic,
+                definition: &input[1].definitions[3],
+                test_only: false,
+                test_compiled_only: false,
+            },
+        ];
+
+        suppress_dead_public_descendants(&input, &[], &[&input[1].definitions[2]], &mut findings);
+
+        assert_eq!(
+            finding_summaries(findings),
+            vec![(
+                FindingKind::DeadPublic,
+                "dead::Retained::VALUE".into(),
+                false,
+                false,
+            )]
+        );
+    }
+
+    #[test]
+    fn arbitrary_interface_edges_do_not_protect_dead_public_findings() {
+        let input = fragments(
+            vec![
+                typed_node("Dead", "lib", true, DefinitionKind::Struct),
+                typed_node("Other::field", "lib", true, DefinitionKind::Field),
+            ],
+            vec![Edge {
+                from: test_id("Other::field"),
+                to: test_id("Dead"),
+                kind: EdgeKind::Interface,
+            }],
+        );
+        let mut findings = vec![Finding {
+            kind: FindingKind::DeadPublic,
+            definition: &input[1].definitions[0],
+            test_only: false,
+            test_compiled_only: false,
+        }];
+
+        suppress_dead_public_descendants(&input, &[], &[&input[1].definitions[1]], &mut findings);
+
+        assert_eq!(
+            finding_summaries(findings),
+            vec![(FindingKind::DeadPublic, "Dead".into(), false, false)]
+        );
     }
 
     #[test]
