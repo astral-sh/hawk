@@ -626,7 +626,7 @@ fn field_group_identity(definition: &Definition) -> Option<&Span> {
 pub fn suppress_dead_public_descendants(
     production_fragments: &[Fragment],
     test_fragments: &[Fragment],
-    retained_dead_definitions: &[&Definition],
+    retained_definitions: &[&Definition],
     findings: &mut Vec<Finding<'_>>,
 ) {
     if !findings
@@ -635,134 +635,111 @@ pub fn suppress_dead_public_descendants(
     {
         return;
     }
-    let definitions: FxHashMap<DefinitionId, &Definition> = production_fragments
+    let dead_paths: FxHashSet<_> = findings
+        .iter()
+        .filter(|finding| finding.kind == FindingKind::DeadPublic)
+        .map(|finding| {
+            (
+                finding.definition.crate_name.as_str(),
+                finding.definition.name.as_str(),
+                finding.definition.kind,
+            )
+        })
+        .collect();
+    let mut sources = FxHashMap::default();
+    let mut ambiguous_paths = FxHashSet::default();
+    for definition in production_fragments
         .iter()
         .chain(test_fragments)
         .flat_map(|fragment| &fragment.definitions)
-        .map(|definition| (definition.id, definition))
-        .collect();
-    let definition_compilation_ids: FxHashMap<DefinitionId, usize> = production_fragments
-        .iter()
-        .chain(test_fragments)
-        .enumerate()
-        .flat_map(|(compilation_id, fragment)| {
-            fragment
-                .definitions
-                .iter()
-                .map(move |definition| (definition.id, compilation_id))
-        })
-        .collect();
-    let definition_fragments: FxHashMap<DefinitionId, &Fragment> = production_fragments
-        .iter()
-        .chain(test_fragments)
-        .flat_map(|fragment| {
-            fragment
-                .definitions
-                .iter()
-                .map(move |definition| (definition.id, fragment))
-        })
-        .collect();
-    let edges: Vec<&Edge> = production_fragments
-        .iter()
-        .chain(test_fragments)
-        .flat_map(|fragment| &fragment.edges)
-        .collect();
-    let (equivalents, _) = equivalent_definitions(
-        &definitions,
-        &definition_compilation_ids,
-        &definition_fragments,
-    );
-
-    suppress_dead_public_descendants_with_graph(
-        findings,
-        retained_dead_definitions,
-        &definitions,
-        &edges,
-        &equivalents,
-    );
-}
-
-fn suppress_dead_public_descendants_with_graph(
-    findings: &mut Vec<Finding<'_>>,
-    retained_dead_definitions: &[&Definition],
-    definitions: &FxHashMap<DefinitionId, &Definition>,
-    edges: &[&Edge],
-    equivalents: &EquivalenceGroups,
-) {
-    let mut children: FxHashMap<DefinitionId, Vec<DefinitionId>> = FxHashMap::default();
-    let mut parents: FxHashMap<DefinitionId, Vec<DefinitionId>> = FxHashMap::default();
-    for edge in edges {
-        let Some(child) = definitions.get(&edge.from) else {
+    {
+        let path = (
+            definition.crate_name.as_str(),
+            definition.name.as_str(),
+            definition.kind,
+        );
+        if !dead_paths.contains(&path) {
             continue;
-        };
-        let Some(parent) = definitions.get(&edge.to) else {
-            continue;
-        };
-        if is_containment_edge(edge.kind, child, parent) {
-            children.entry(edge.to).or_default().push(edge.from);
-            parents.entry(edge.from).or_default().push(edge.to);
+        }
+        let source = (definition.span.as_ref(), definition.expansion_span.as_ref());
+        // Cfg alternatives can share a logical path while containing
+        // different declarations; do not collapse across distinct sources.
+        if sources
+            .insert(path, source)
+            .is_some_and(|previous| previous != source)
+        {
+            ambiguous_paths.insert(path);
         }
     }
-
-    let protected = reachable(
-        retained_dead_definitions.iter().flat_map(|definition| {
-            std::iter::once(definition.id).chain(equivalents.group(definition.id).iter().copied())
-        }),
-        &parents,
-    );
+    let mut protected_paths = FxHashSet::default();
+    for definition in retained_definitions {
+        visit_containing_paths(definition, |path| {
+            protected_paths.insert(path);
+            false
+        });
+    }
     findings.retain(|finding| {
         finding.kind != FindingKind::DeadPublic
-            || !std::iter::once(finding.definition.id)
-                .chain(equivalents.group(finding.definition.id).iter().copied())
-                .any(|id| protected.contains(&id))
+            || !protected_paths.contains(&(
+                finding.definition.crate_name.as_str(),
+                finding.definition.name.as_str(),
+                finding.definition.kind,
+            ))
     });
-    let dead: FxHashSet<_> = findings
+    let dead_paths: FxHashSet<_> = findings
         .iter()
         .filter(|finding| finding.kind == FindingKind::DeadPublic)
-        .flat_map(|finding| {
-            std::iter::once(finding.definition.id)
-                .chain(equivalents.group(finding.definition.id).iter().copied())
+        .filter(|finding| {
+            !ambiguous_paths.contains(&(
+                finding.definition.crate_name.as_str(),
+                finding.definition.name.as_str(),
+                finding.definition.kind,
+            ))
+        })
+        .map(|finding| {
+            (
+                finding.definition.crate_name.as_str(),
+                finding.definition.name.as_str(),
+                finding.definition.kind,
+            )
         })
         .collect();
-
-    let descendants = reachable(
-        children
-            .iter()
-            .filter(|(parent, _)| dead.contains(parent))
-            .flat_map(|(_, children)| children.iter().copied()),
-        &children,
-    );
     findings.retain(|finding| {
-        finding.kind != FindingKind::DeadPublic
-            || !std::iter::once(finding.definition.id)
-                .chain(equivalents.group(finding.definition.id).iter().copied())
-                .any(|id| descendants.contains(&id))
+        !visit_containing_paths(finding.definition, |path| dead_paths.contains(&path))
     });
 }
 
-fn is_containment_edge(kind: EdgeKind, child: &Definition, parent: &Definition) -> bool {
-    // Interface edges also point at types mentioned by fields and method
-    // signatures, so the diagnostic path must identify the actual parent.
-    if child.crate_name != parent.crate_name
-        || child
-            .name
-            .strip_prefix(parent.name.as_str())
-            .is_none_or(|suffix| !suffix.starts_with("::"))
-    {
+fn visit_containing_paths<'a>(
+    child: &'a Definition,
+    mut visit: impl FnMut((&'a str, &'a str, DefinitionKind)) -> bool,
+) -> bool {
+    if matches!(
+        child.kind,
+        DefinitionKind::InherentMethod | DefinitionKind::InherentAssociatedConstant
+    ) {
         return false;
     }
 
-    match kind {
-        EdgeKind::VisibilityParent => parent.kind == DefinitionKind::Module,
-        EdgeKind::Interface => matches!(
-            (child.kind, parent.kind),
-            (
-                DefinitionKind::Field,
-                DefinitionKind::Struct | DefinitionKind::Union
-            ) | (DefinitionKind::EnumVariant, DefinitionKind::Enum)
-        ),
-        _ => false,
+    let mut path = child.name.as_str();
+    while let Some((parent, _)) = path.rsplit_once("::") {
+        if visit((child.crate_name.as_str(), parent, DefinitionKind::Module)) {
+            return true;
+        }
+        let kinds: &[DefinitionKind] = match child.kind {
+            DefinitionKind::Field => &[DefinitionKind::Struct, DefinitionKind::Union],
+            DefinitionKind::EnumVariant => &[DefinitionKind::Enum],
+            _ => &[],
+        };
+        if kinds
+            .iter()
+            .copied()
+            .any(|kind| visit((child.crate_name.as_str(), parent, kind)))
+        {
+            return true;
+        }
+        path = parent;
     }
+    false
 }
 
 fn suppress_uniform_field_visibility_findings<'a>(
@@ -1693,6 +1670,85 @@ mod tests {
         assert_eq!(
             finding_summaries(findings),
             vec![(FindingKind::DeadPublic, "dead".into(), false, false)]
+        );
+    }
+
+    #[test]
+    fn dead_modules_suppress_restricted_visibility_descendants() {
+        let mut helper = node("dead::helper", "lib", false);
+        helper.restricted_visible_api = true;
+        helper.crate_visible_api = true;
+        helper.module_scope = vec!["dead".into()];
+        let input = fragments(
+            vec![
+                typed_node("dead", "lib", true, DefinitionKind::Module),
+                helper,
+            ],
+            vec![Edge {
+                from: test_id("dead::helper"),
+                to: test_id("dead"),
+                kind: EdgeKind::VisibilityParent,
+            }],
+        );
+
+        let mut findings = analyze(&input, &HashSet::new());
+        assert!(findings.iter().any(|finding| {
+            finding.kind == FindingKind::UnnecessaryRestrictedVisibility
+                && finding.definition.name == "dead::helper"
+        }));
+        suppress_dead_public_descendants(&input, &[], &[], &mut findings);
+
+        assert_eq!(
+            finding_summaries(findings),
+            vec![(FindingKind::DeadPublic, "dead".into(), false, false)]
+        );
+    }
+
+    #[test]
+    fn dead_modules_do_not_suppress_cfg_alternative_descendants() {
+        let mut dead = typed_node("dead", "lib", true, DefinitionKind::Module);
+        dead.span = Some(Span {
+            file: "lib.rs".into(),
+            line: 1,
+            column: 1,
+        });
+        let mut alternative = typed_node("dead", "lib", true, DefinitionKind::Module);
+        alternative.id = test_id("alternative_dead");
+        alternative.span = Some(Span {
+            file: "lib.rs".into(),
+            line: 5,
+            column: 1,
+        });
+        let helper = node("dead::helper", "lib", false);
+        let input = fragments(vec![dead, alternative, helper], vec![]);
+        let mut findings = vec![
+            Finding {
+                kind: FindingKind::DeadPublic,
+                definition: &input[1].definitions[0],
+                test_only: false,
+                test_compiled_only: false,
+            },
+            Finding {
+                kind: FindingKind::UnnecessaryRestrictedVisibility,
+                definition: &input[1].definitions[2],
+                test_only: false,
+                test_compiled_only: false,
+            },
+        ];
+
+        suppress_dead_public_descendants(&input, &[], &[], &mut findings);
+
+        assert_eq!(
+            finding_summaries(findings),
+            vec![
+                (FindingKind::DeadPublic, "dead".into(), false, false),
+                (
+                    FindingKind::UnnecessaryRestrictedVisibility,
+                    "dead::helper".into(),
+                    false,
+                    false,
+                ),
+            ]
         );
     }
 

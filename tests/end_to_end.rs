@@ -982,6 +982,74 @@ impl DeadInherent {
 }
 
 #[test]
+fn collapses_restricted_visibility_descendants_beneath_dead_modules() {
+    let context = HawkTestContext::new("basic");
+    let library_path = context.workspace().join("library/src/lib.rs");
+    let mut library = fs::read_to_string(&library_path).expect("read library source");
+    library.push_str(
+        r"
+
+pub mod dead_with_restricted_helper {
+    pub(crate) fn helper() {}
+}
+",
+    );
+    fs::write(library_path, library).expect("write library source");
+    let output = context.run(&[]);
+
+    context.assert_success(&output);
+    let stdout = context.normalized_stdout(&output);
+    assert!(stdout.contains("`dead_with_restricted_helper`"));
+    assert!(!stdout.contains("`dead_with_restricted_helper::helper`"));
+}
+
+#[test]
+fn configured_restricted_descendant_protects_its_dead_module() {
+    let context = HawkTestContext::new("basic");
+    let library_path = context.workspace().join("library/src/lib.rs");
+    let mut library = fs::read_to_string(&library_path).expect("read library source");
+    library.push_str(
+        r"
+
+pub mod retained_with_restricted_helper {
+    pub(crate) fn helper() {}
+}
+",
+    );
+    fs::write(library_path, library).expect("write library source");
+    let configuration = tempfile::NamedTempFile::new().expect("temporary configuration");
+    fs::write(
+        configuration.path(),
+        r#"
+[[production]]
+package = "app"
+bin = "app"
+reason = "test binary product"
+
+[[override]]
+lint = "hawk::unnecessary_restricted_visibility"
+crate = "library"
+item = "retained_with_restricted_helper::helper"
+level = "expect"
+reason = "helper is intentionally retained"
+"#,
+    )
+    .expect("write temporary configuration");
+    let output = context
+        .command()
+        .arg("--config")
+        .arg(configuration.path())
+        .output()
+        .expect("run cargo-hawk");
+
+    context.assert_success(&output);
+    let stdout = context.normalized_stdout(&output);
+    assert!(!stdout.contains("`retained_with_restricted_helper`"));
+    assert!(!stdout.contains("`retained_with_restricted_helper::helper`"));
+    assert!(!stdout.contains("hawk::unfulfilled_expectation"));
+}
+
+#[test]
 fn applies_visibility_fixes_through_cargo_fix() {
     let context = HawkTestContext::new("basic");
     let output = context.run(&["--fix", "--allow-no-vcs"]);

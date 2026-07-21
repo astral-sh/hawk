@@ -600,14 +600,14 @@ impl Config {
             .filter(|entry| entry.applies_to(target))
             .filter(|entry| known_items.iter().any(|item| entry.identifies(item)))
             .collect::<Vec<_>>();
-        let mut retained_dead_definitions = Vec::new();
+        let mut retained_definitions = Vec::new();
         let mut findings = findings
             .into_iter()
             .filter(|finding| {
                 let suppressed = active_overrides.iter().any(|entry| entry.matches(finding))
                     || active_exclusions.iter().any(|entry| entry.matches(finding));
-                if suppressed && finding.kind == FindingKind::DeadPublic {
-                    retained_dead_definitions.push(finding.definition);
+                if suppressed {
+                    retained_definitions.push(finding.definition);
                 }
                 !suppressed
             })
@@ -615,7 +615,7 @@ impl Config {
         suppress_dead_public_descendants(
             production_fragments,
             test_fragments,
-            &retained_dead_definitions,
+            &retained_definitions,
             &mut findings,
         );
         AppliedFindings {
@@ -1424,7 +1424,7 @@ reason = "not actually a module"
             analyze(&fragments, &[], &candidate_crates(), &HashSet::new()),
         );
 
-        assert_eq!(applied.findings.len(), 4);
+        assert_eq!(applied.findings.len(), 3);
     }
 
     #[test]
@@ -1494,7 +1494,7 @@ reason = "generated only on Windows"
             &[],
             analyze(&fragments, &[], &candidate_crates(), &HashSet::new()),
         );
-        assert_eq!(unix.findings.len(), 4);
+        assert_eq!(unix.findings.len(), 3);
     }
 
     #[test]
