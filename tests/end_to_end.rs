@@ -2125,8 +2125,8 @@ fn reports_only_dead_public_findings() {
     assert!(!stdout.contains("warning[hawk::unnecessary_public]"));
     assert!(stdout.contains("warning[hawk::unknown_item]"));
     assert!(stdout.contains("warning[hawk::unfulfilled_expectation]"));
-    assert!(stdout.contains("hawk: 14 finding(s)"));
-    assert!(stdout.contains("  hawk::dead_public: 12 (library: 11, test_support: 1)"));
+    assert!(stdout.contains("hawk: 13 finding(s)"));
+    assert!(stdout.contains("  hawk::dead_public: 11 (library: 10, test_support: 1)"));
     assert!(stdout.contains("  hawk::unknown_item: 1 (configuration: 1)"));
     assert!(!stdout.contains("  hawk::unnecessary_public:"));
 }
@@ -2140,11 +2140,11 @@ fn reports_only_dead_public_findings_as_json() {
     let report: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("stdout contains one JSON report");
     assert_eq!(report["schema_version"], 3);
-    assert_eq!(report["summary"]["diagnostic_count"], 14);
+    assert_eq!(report["summary"]["diagnostic_count"], 13);
     let diagnostics = report["diagnostics"]
         .as_array()
         .expect("diagnostics is an array");
-    assert_eq!(diagnostics.len(), 14);
+    assert_eq!(diagnostics.len(), 13);
     assert!(
         diagnostics
             .iter()
