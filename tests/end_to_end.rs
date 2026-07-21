@@ -978,7 +978,7 @@ reason = "retain the module parent for JSON child-span coverage"
     let report: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("stdout contains one JSON report");
     assert_eq!(report["schema_version"], 3);
-    assert_eq!(report["summary"]["diagnostic_count"], 38);
+    assert_eq!(report["summary"]["diagnostic_count"], 37);
     assert_eq!(
         report["summary"]["production"],
         serde_json::json!([{"package": "app", "binary": "app"}])
@@ -997,7 +997,7 @@ reason = "retain the module parent for JSON child-span coverage"
     let diagnostics = report["diagnostics"]
         .as_array()
         .expect("diagnostics is an array");
-    assert_eq!(diagnostics.len(), 38);
+    assert_eq!(diagnostics.len(), 37);
 
     let dead_entry = diagnostics
         .iter()
@@ -1522,6 +1522,65 @@ fn json_returns_a_normal_cargo_failure_when_stderr_is_closed() {
     assert_eq!(output.status.code(), Some(1));
     assert!(output.stdout.is_empty());
     assert!(output.stderr.is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn json_closes_inherited_cargo_output_after_analysis() {
+    use std::time::{Duration, Instant};
+
+    let context = HawkTestContext::new("dead_public_fixes");
+    let shim_directory = tempfile::tempdir().expect("temporary Cargo shim directory");
+    let shim = shim_directory.path().join("cargo");
+    let shim_source = shim_directory.path().join("cargo.rs");
+    let helper_done = shim_directory.path().join("helper-done");
+    fs::write(
+        &shim_source,
+        format!(
+            "use std::env;\nuse std::io::Write as _;\nuse std::process::{{Command, Stdio}};\nuse std::time::{{Duration, Instant}};\nfn main() {{\n    let mut args = env::args_os().skip(1);\n    if args.next().as_deref() == Some(std::ffi::OsStr::new(\"--hawk-test-helper\")) {{\n        let deadline = Instant::now() + Duration::from_secs(10);\n        let mut stderr = std::io::stderr().lock();\n        while Instant::now() < deadline {{\n            match stderr.write_all(b\"BACKGROUND-CARGO-HELPER-WRITE-0123456789abcdefghijklmnopqrstuvwxyz\\n\") {{\n                Ok(()) => {{}},\n                Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => {{\n                    std::fs::write({:?}, \"closed\").unwrap();\n                    return;\n                }}\n                Err(error) => panic!(\"unexpected helper output error: {{error}}\"),\n            }}\n        }}\n        std::fs::write({:?}, \"timed-out\").unwrap();\n        return;\n    }}\n    let args = env::args_os().skip(1).collect::<Vec<_>>();\n    let status = Command::new({:?}).args(&args).status().unwrap();\n    if env::var_os(\"HAWK_OUTPUT_DIR\").is_some() && args.iter().any(|argument| argument == \"--bin\") {{\n        eprintln!(\"EXPECTED-CARGO-RELAY-OUTPUT: {{}}\", \"x\".repeat(20_000));\n        Command::new(env::current_exe().unwrap()).arg(\"--hawk-test-helper\").stdin(Stdio::null()).spawn().unwrap();\n    }}\n    std::process::exit(status.code().unwrap_or(1));\n}}\n",
+            helper_done,
+            helper_done,
+            env!("CARGO")
+        ),
+    )
+    .expect("write Cargo shim source");
+    let compiler = Command::new("rustc")
+        .arg(&shim_source)
+        .arg("--edition=2024")
+        .arg("-o")
+        .arg(&shim)
+        .output()
+        .expect("compile Cargo shim");
+    assert!(
+        compiler.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compiler.stderr)
+    );
+
+    let mut paths = vec![shim_directory.path().to_path_buf()];
+    paths.extend(std::env::split_paths(
+        &std::env::var_os("PATH").expect("PATH is set"),
+    ));
+    let output = context
+        .command()
+        .arg("--output-format=json")
+        .env("PATH", std::env::join_paths(paths).expect("construct PATH"))
+        .output()
+        .expect("run cargo-hawk");
+
+    context.assert_success(&output);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("EXPECTED-CARGO-RELAY-OUTPUT:"), "{stderr}");
+    serde_json::from_slice::<serde_json::Value>(&output.stdout)
+        .expect("stdout contains one JSON report");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !helper_done.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    assert_eq!(
+        fs::read_to_string(&helper_done).expect("background Cargo helper finished"),
+        "closed"
+    );
 }
 
 #[cfg(unix)]

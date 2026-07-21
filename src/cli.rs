@@ -4,9 +4,10 @@ use std::ffi::{OsStr, OsString};
 use std::fmt::Write as _;
 use std::fs::{self, File};
 use std::hash::{Hash, Hasher};
-use std::io::{BufReader, Read as _, Write as _};
+use std::io::{BufReader, PipeReader, Read as _, Write as _};
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode, Stdio};
+use std::process::{Command, ExitCode, ExitStatus, Stdio};
+use std::time::Duration;
 
 use anstyle::Style;
 use anyhow::{Context, Result, bail};
@@ -946,7 +947,112 @@ struct ConfiguredCargoCommand {
     command: Command,
     subcommand: &'static str,
     capture_output: bool,
-    cargo_output: Option<NamedTempFile>,
+    cargo_output: Option<CargoOutputCapture>,
+}
+
+struct CargoOutputCapture {
+    output: NamedTempFile,
+    reader: PipeReader,
+}
+
+impl CargoOutputCapture {
+    fn new(command: &mut Command) -> Result<Self> {
+        let output = NamedTempFile::new().context("create temporary Cargo output file")?;
+        let (reader, writer) = std::io::pipe().context("create Cargo output pipe")?;
+        command.stdout(
+            writer
+                .try_clone()
+                .context("duplicate Cargo output pipe for stdout")?,
+        );
+        command.stderr(writer);
+        Ok(Self { output, reader })
+    }
+
+    fn run(
+        mut self,
+        mut command: Command,
+        subcommand: &str,
+    ) -> Result<(ExitStatus, NamedTempFile)> {
+        let mut child = command
+            .spawn()
+            .with_context(|| format!("run instrumented Cargo {subcommand}"))?;
+        drop(command);
+
+        let status = loop {
+            let status = child
+                .try_wait()
+                .with_context(|| format!("poll instrumented Cargo {subcommand}"))?;
+            let mut pending =
+                cargo_output_pending(&self.reader).context("inspect pending Cargo output")?;
+            let mut buffer = [0_u8; 16 * 1024];
+            while pending != 0 {
+                let requested = pending.min(buffer.len());
+                let read = self
+                    .reader
+                    .read(&mut buffer[..requested])
+                    .with_context(|| format!("read captured Cargo {subcommand} output"))?;
+                if read == 0 {
+                    bail!("Cargo output pipe closed while draining pending output");
+                }
+                self.output
+                    .as_file_mut()
+                    .write_all(&buffer[..read])
+                    .context("write temporary Cargo output file")?;
+                pending -= read;
+            }
+            if let Some(status) = status {
+                break status;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        };
+
+        drop(self.reader);
+        self.output
+            .as_file_mut()
+            .flush()
+            .context("flush temporary Cargo output file")?;
+        Ok((status, self.output))
+    }
+}
+
+#[cfg(unix)]
+fn cargo_output_pending(reader: &PipeReader) -> std::io::Result<usize> {
+    usize::try_from(rustix::io::ioctl_fionread(reader)?)
+        .map_err(|_| std::io::Error::other("pending Cargo output exceeds usize"))
+}
+
+#[cfg(windows)]
+#[expect(unsafe_code, reason = "Windows pipe inspection requires PeekNamedPipe")]
+fn cargo_output_pending(reader: &PipeReader) -> std::io::Result<usize> {
+    use std::os::windows::io::AsRawHandle as _;
+    use windows_sys::Win32::Foundation::{ERROR_BROKEN_PIPE, ERROR_NO_DATA};
+    use windows_sys::Win32::System::Pipes::PeekNamedPipe;
+
+    let mut pending = 0_u32;
+    // SAFETY: the pipe handle is valid for the duration of this call, and all
+    // output pointers are either null or point to initialized local storage.
+    let result = unsafe {
+        PeekNamedPipe(
+            reader.as_raw_handle(),
+            std::ptr::null_mut(),
+            0,
+            std::ptr::null_mut(),
+            &mut pending,
+            std::ptr::null_mut(),
+        )
+    };
+    if result == 0 {
+        let error = std::io::Error::last_os_error();
+        let code = error
+            .raw_os_error()
+            .and_then(|code| u32::try_from(code).ok());
+        if matches!(code, Some(ERROR_BROKEN_PIPE | ERROR_NO_DATA)) {
+            return Ok(0);
+        }
+        return Err(error);
+    }
+    usize::try_from(pending)
+        .map_err(|_| std::io::Error::other("pending Cargo output exceeds usize"))
 }
 
 struct CollectedFragments {
@@ -1098,17 +1204,7 @@ impl InstrumentedCargo<'_> {
             }
         }
         let cargo_output = if self.args.output_format == OutputFormat::Json {
-            let output = NamedTempFile::new().context("create temporary Cargo output file")?;
-            let writer = output
-                .reopen()
-                .context("open temporary Cargo output file for writing")?;
-            command.stdout(
-                writer
-                    .try_clone()
-                    .context("duplicate temporary Cargo output file for stdout")?,
-            );
-            command.stderr(writer);
-            Some(output)
+            Some(CargoOutputCapture::new(&mut command)?)
         } else {
             None
         };
@@ -1133,7 +1229,25 @@ impl InstrumentedCargo<'_> {
             capture_output,
             cargo_output,
         } = self.command(run_id, graph_dir, invocation, feature_profile)?;
-        let status = if capture_output {
+        let status = if let Some(cargo_output) = cargo_output {
+            let (status, cargo_output) = cargo_output.run(command, subcommand)?;
+            let length = cargo_output
+                .as_file()
+                .metadata()
+                .context("inspect temporary Cargo output file")?
+                .len();
+            let reader = cargo_output
+                .reopen()
+                .context("open temporary Cargo output file for reading")?;
+            match std::io::copy(&mut reader.take(length), &mut std::io::stderr()) {
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => {}
+                Err(error) => {
+                    return Err(error).context("write captured Cargo output to stderr");
+                }
+            }
+            status
+        } else if capture_output {
             let output = command
                 .output()
                 .with_context(|| format!("run instrumented Cargo {subcommand}"))?;
@@ -1151,23 +1265,6 @@ impl InstrumentedCargo<'_> {
                 .status()
                 .with_context(|| format!("run instrumented Cargo {subcommand}"))?
         };
-        if let Some(cargo_output) = cargo_output {
-            let length = cargo_output
-                .as_file()
-                .metadata()
-                .context("inspect temporary Cargo output file")?
-                .len();
-            let reader = cargo_output
-                .reopen()
-                .context("open temporary Cargo output file for reading")?;
-            match std::io::copy(&mut reader.take(length), &mut std::io::stderr()) {
-                Ok(_) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => {}
-                Err(error) => {
-                    return Err(error).context("write captured Cargo output to stderr");
-                }
-            }
-        }
         if !status.success() {
             bail!("instrumented Cargo {subcommand} failed with {status}");
         }
