@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -149,11 +149,6 @@ impl TargetFragments<'_> {
                     logical_item_identity(fragment.package_name.as_str(), definition)
                 })
             })
-    }
-
-    fn contains(&self, identity: KnownItemIdentity<'_>) -> bool {
-        self.definitions()
-            .any(|definition| known_item_identity(definition) == identity)
     }
 }
 
@@ -588,11 +583,16 @@ impl Config {
         targets: &[TargetFragments<'_>],
         findings: Vec<Finding<'findings>>,
     ) -> AppliedFindings<'findings, 'config> {
-        let known_items: HashSet<KnownItemIdentity<'_>> = targets
-            .iter()
-            .flat_map(TargetFragments::definitions)
-            .map(known_item_identity)
-            .collect();
+        let mut target_indices_by_identity: HashMap<KnownItemIdentity<'_>, Vec<usize>> =
+            HashMap::new();
+        for (target_index, target) in targets.iter().enumerate() {
+            for identity in target.definitions().map(known_item_identity) {
+                let target_indices = target_indices_by_identity.entry(identity).or_default();
+                if target_indices.last() != Some(&target_index) {
+                    target_indices.push(target_index);
+                }
+            }
+        }
         let mut config_diagnostics = Vec::new();
         let mut active_overrides = Vec::new();
         for entry in self
@@ -624,7 +624,16 @@ impl Config {
             }
             active_overrides.push(entry);
             if entry.level == OverrideLevel::Expect
-                && !findings.iter().any(|finding| entry.matches(finding))
+                && !findings.iter().any(|finding| {
+                    entry.matches(finding)
+                        && target_indices_by_identity
+                            .get(&known_item_identity(finding.definition))
+                            .is_some_and(|target_indices| {
+                                target_indices.iter().any(|target_index| {
+                                    entry.applies_to(targets[*target_index].target)
+                                })
+                            })
+                })
             {
                 config_diagnostics.push(ConfigDiagnostic {
                     kind: ConfigDiagnosticKind::UnfulfilledExpectation,
@@ -636,30 +645,28 @@ impl Config {
             .exclusions
             .iter()
             .filter(|entry| targets.iter().any(|target| entry.applies_to(target.target)))
-            .filter(|entry| known_items.iter().any(|item| entry.identifies(item)))
+            .filter(|entry| {
+                target_indices_by_identity
+                    .keys()
+                    .any(|item| entry.identifies(item))
+            })
             .collect::<Vec<_>>();
         let findings = findings
             .into_iter()
             .filter(|finding| {
-                let identity = known_item_identity(finding.definition);
-                let applies_to_all_instances = |applies_to: &dyn Fn(&AnalysisTarget) -> bool| {
-                    let mut found = false;
-                    let applies = targets
-                        .iter()
-                        .filter(|target| target.contains(identity))
-                        .all(|target| {
-                            found = true;
-                            applies_to(target.target)
-                        });
-                    found && applies
-                };
-                !active_overrides.iter().any(|entry| {
-                    entry.matches(finding)
-                        && applies_to_all_instances(&|target| entry.applies_to(target))
-                }) && !active_exclusions.iter().any(|entry| {
-                    entry.matches(finding)
-                        && applies_to_all_instances(&|target| entry.applies_to(target))
-                })
+                !target_indices_by_identity
+                    .get(&known_item_identity(finding.definition))
+                    .is_some_and(|target_indices| {
+                        target_indices.iter().all(|target_index| {
+                            let target = targets[*target_index].target;
+                            active_overrides
+                                .iter()
+                                .any(|entry| entry.matches(finding) && entry.applies_to(target))
+                                || active_exclusions
+                                    .iter()
+                                    .any(|entry| entry.matches(finding) && entry.applies_to(target))
+                        })
+                    })
             })
             .collect();
         AppliedFindings {
@@ -1544,6 +1551,131 @@ reason = "retain Windows compatibility surface"
             applied.config_diagnostics[0].kind,
             ConfigDiagnosticKind::UnknownItem
         );
+    }
+
+    #[test]
+    fn target_scoped_expectation_is_not_fulfilled_by_another_cfg_alternative() {
+        let directory = tempfile::tempdir().expect("temporary configuration directory");
+        let path = directory.path().join("hawk.toml");
+        std::fs::write(
+            &path,
+            r#"
+[[override]]
+lint = "hawk::dead_public"
+crate = "library"
+item = "unused"
+level = "expect"
+target = "cfg(windows)"
+reason = "expect the Windows declaration to be dead"
+"#,
+        )
+        .expect("write configuration");
+        let config = Config::load(directory.path(), Some(&path)).expect("load configuration");
+        let mut unix_fragment = fragment();
+        unix_fragment.definitions[0].id = test_id("unix-unused");
+        unix_fragment.definitions[0].span = Some(Span {
+            file: "library/src/lib.rs".into(),
+            line: 1,
+            column: 1,
+        });
+        let mut windows_fragment = fragment();
+        windows_fragment.definitions[0].id = test_id("windows-unused");
+        windows_fragment.definitions[0].span = Some(Span {
+            file: "library/src/lib.rs".into(),
+            line: 4,
+            column: 1,
+        });
+        windows_fragment
+            .required_public_roots
+            .push(test_id("windows-unused"));
+        let unix_fragments = vec![unix_fragment];
+        let windows_fragments = vec![windows_fragment];
+        let all_fragments = unix_fragments
+            .iter()
+            .chain(&windows_fragments)
+            .cloned()
+            .collect::<Vec<_>>();
+        let unix = target("aarch64-apple-darwin", &["unix"]);
+        let windows = target("x86_64-pc-windows-msvc", &["windows"]);
+
+        let applied = config.apply_targets(
+            &[
+                TargetFragments {
+                    target: &unix,
+                    production: &unix_fragments,
+                    non_production: &[],
+                },
+                TargetFragments {
+                    target: &windows,
+                    production: &windows_fragments,
+                    non_production: &[],
+                },
+            ],
+            analyze(&all_fragments, &[], &candidate_crates(), &HashSet::new()),
+        );
+
+        assert_eq!(applied.findings.len(), 1);
+        assert_eq!(applied.config_diagnostics.len(), 1);
+        assert_eq!(
+            applied.config_diagnostics[0].kind,
+            ConfigDiagnosticKind::UnfulfilledExpectation
+        );
+    }
+
+    #[test]
+    fn complementary_target_scoped_overrides_cover_every_compilation() {
+        let directory = tempfile::tempdir().expect("temporary configuration directory");
+        let path = directory.path().join("hawk.toml");
+        std::fs::write(
+            &path,
+            r#"
+[[override]]
+lint = "hawk::dead_public"
+crate = "library"
+item = "unused"
+level = "allow"
+target = "cfg(unix)"
+reason = "retain the Unix declaration"
+
+[[override]]
+lint = "hawk::dead_public"
+crate = "library"
+item = "unused"
+level = "allow"
+target = "cfg(windows)"
+reason = "retain the Windows declaration"
+"#,
+        )
+        .expect("write configuration");
+        let config = Config::load(directory.path(), Some(&path)).expect("load configuration");
+        let unix_fragments = vec![fragment()];
+        let windows_fragments = vec![fragment()];
+        let all_fragments = unix_fragments
+            .iter()
+            .chain(&windows_fragments)
+            .cloned()
+            .collect::<Vec<_>>();
+        let unix = target("aarch64-apple-darwin", &["unix"]);
+        let windows = target("x86_64-pc-windows-msvc", &["windows"]);
+
+        let applied = config.apply_targets(
+            &[
+                TargetFragments {
+                    target: &unix,
+                    production: &unix_fragments,
+                    non_production: &[],
+                },
+                TargetFragments {
+                    target: &windows,
+                    production: &windows_fragments,
+                    non_production: &[],
+                },
+            ],
+            analyze(&all_fragments, &[], &candidate_crates(), &HashSet::new()),
+        );
+
+        assert!(applied.findings.is_empty());
+        assert!(applied.config_diagnostics.is_empty());
     }
 
     #[test]
