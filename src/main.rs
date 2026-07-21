@@ -22,7 +22,12 @@ fn main() -> std::process::ExitCode {
         Err(error)
             if error
                 .downcast_ref::<std::io::Error>()
-                .is_some_and(|error| error.kind() == std::io::ErrorKind::BrokenPipe) =>
+                .is_some_and(|error| error.kind() == std::io::ErrorKind::BrokenPipe)
+                || error
+                    .downcast_ref::<serde_json::Error>()
+                    .is_some_and(|error| {
+                        error.io_error_kind() == Some(std::io::ErrorKind::BrokenPipe)
+                    }) =>
         {
             std::process::ExitCode::SUCCESS
         }

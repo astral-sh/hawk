@@ -253,17 +253,23 @@ fn rejects_incomplete_driver_protocol_environment() {
 #[test]
 fn exits_successfully_when_diagnostic_output_is_closed() {
     let context = HawkTestContext::new("basic");
-    let mut child = context
-        .command()
-        .arg("-A")
-        .arg("warnings")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn cargo-hawk");
-    drop(child.stdout.take());
+    for output_format in ["text", "json"] {
+        let mut child = context
+            .command()
+            .arg(format!("--output-format={output_format}"))
+            .arg("-A")
+            .arg("warnings")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn cargo-hawk");
+        drop(child.stdout.take());
 
-    assert!(child.wait().expect("wait for cargo-hawk").success());
+        let output = child.wait_with_output().expect("wait for cargo-hawk");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{output_format}: {stderr}");
+        assert!(!stderr.contains("Broken pipe"), "{output_format}: {stderr}");
+    }
 }
 
 #[test]
