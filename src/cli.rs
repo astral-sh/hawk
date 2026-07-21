@@ -758,6 +758,7 @@ fn json_finding(
     })
 }
 
+/// Builds a target-independent finding identity from length-prefixed semantic and source components.
 fn stable_finding_id(definition: &Definition, package: Option<&str>) -> String {
     let source = definition
         .span
@@ -950,6 +951,7 @@ struct ConfiguredCargoCommand {
     cargo_output: Option<CargoOutputCapture>,
 }
 
+/// Captures Cargo's combined output without allowing inherited writers to keep analysis alive.
 struct CargoOutputCapture {
     output: NamedTempFile,
     reader: PipeReader,
@@ -968,6 +970,7 @@ impl CargoOutputCapture {
         Ok(Self { output, reader })
     }
 
+    /// Drains output while Cargo runs, then closes the reader before returning the captured bytes.
     fn run(
         mut self,
         mut command: Command,
@@ -978,13 +981,13 @@ impl CargoOutputCapture {
             .with_context(|| format!("run instrumented Cargo {subcommand}"))?;
         drop(command);
 
+        let mut buffer = [0_u8; 16 * 1024];
         let status = loop {
             let status = child
                 .try_wait()
                 .with_context(|| format!("poll instrumented Cargo {subcommand}"))?;
             let mut pending =
                 cargo_output_pending(&self.reader).context("inspect pending Cargo output")?;
-            let mut buffer = [0_u8; 16 * 1024];
             while pending != 0 {
                 let requested = pending.min(buffer.len());
                 let read = self
@@ -1015,12 +1018,14 @@ impl CargoOutputCapture {
     }
 }
 
+/// Returns the bytes immediately readable from Cargo's pipe without waiting for inherited writers.
 #[cfg(unix)]
 fn cargo_output_pending(reader: &PipeReader) -> std::io::Result<usize> {
     usize::try_from(rustix::io::ioctl_fionread(reader)?)
         .map_err(|_| std::io::Error::other("pending Cargo output exceeds usize"))
 }
 
+/// Returns the bytes immediately readable from Cargo's pipe without waiting for inherited writers.
 #[cfg(windows)]
 #[expect(unsafe_code, reason = "Windows pipe inspection requires PeekNamedPipe")]
 fn cargo_output_pending(reader: &PipeReader) -> std::io::Result<usize> {
@@ -1231,15 +1236,10 @@ impl InstrumentedCargo<'_> {
         } = self.command(run_id, graph_dir, invocation, feature_profile)?;
         let status = if let Some(cargo_output) = cargo_output {
             let (status, cargo_output) = cargo_output.run(command, subcommand)?;
-            let length = cargo_output
-                .as_file()
-                .metadata()
-                .context("inspect temporary Cargo output file")?
-                .len();
-            let reader = cargo_output
+            let mut reader = cargo_output
                 .reopen()
                 .context("open temporary Cargo output file for reading")?;
-            match std::io::copy(&mut reader.take(length), &mut std::io::stderr()) {
+            match std::io::copy(&mut reader, &mut std::io::stderr()) {
                 Ok(_) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => {}
                 Err(error) => {

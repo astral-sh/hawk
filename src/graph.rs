@@ -182,6 +182,7 @@ pub struct Span {
     pub column: usize,
 }
 
+/// A complete source declaration range with zero-based UTF-8 offsets and one-based positions.
 #[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct DeclarationSpan {

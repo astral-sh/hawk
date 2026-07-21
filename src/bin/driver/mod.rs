@@ -1156,6 +1156,9 @@ fn expansion_span(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Option<ExpansionSpan> 
     })
 }
 
+/// Returns a complete, deletable source range, including outer attributes and trailing separators.
+///
+/// Returns `None` when an expansion or parsed attribute cannot be safely mapped back to source.
 fn declaration_span(
     tcx: TyCtxt<'_>,
     def_id: LocalDefId,

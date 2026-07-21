@@ -940,33 +940,6 @@ fn ordered_lint_levels_control_severity_and_exit_status() {
 #[test]
 fn emits_versioned_json_diagnostics_and_keeps_cargo_output_on_stderr() {
     let context = HawkTestContext::new("basic");
-    let config_path = context.workspace().join("hawk.toml");
-    let mut config = fs::read_to_string(&config_path).expect("read Hawk configuration");
-    config.push_str(
-        r#"
-[[override]]
-lint = "hawk::dead_public"
-crate = "library"
-item = "DeadFields"
-level = "allow"
-reason = "retain the field parent for JSON child-span coverage"
-
-[[override]]
-lint = "hawk::dead_public"
-crate = "library"
-item = "DeadUnion"
-level = "allow"
-reason = "retain the union parent for JSON child-span coverage"
-
-[[override]]
-lint = "hawk::dead_public"
-crate = "library"
-item = "dead_outer"
-level = "allow"
-reason = "retain the module parent for JSON child-span coverage"
-"#,
-    );
-    fs::write(config_path, config).expect("write Hawk configuration");
     let output = context.run(&[
         "--output-format=json",
         "-D",
@@ -984,7 +957,7 @@ reason = "retain the module parent for JSON child-span coverage"
     let report: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("stdout contains one JSON report");
     assert_eq!(report["schema_version"], 3);
-    assert_eq!(report["summary"]["diagnostic_count"], 37);
+    assert_eq!(report["summary"]["diagnostic_count"], 41);
     assert_eq!(
         report["summary"]["production"],
         serde_json::json!([{"package": "app", "binary": "app"}])
@@ -1003,7 +976,7 @@ reason = "retain the module parent for JSON child-span coverage"
     let diagnostics = report["diagnostics"]
         .as_array()
         .expect("diagnostics is an array");
-    assert_eq!(diagnostics.len(), 37);
+    assert_eq!(diagnostics.len(), 41);
 
     let dead_entry = diagnostics
         .iter()
@@ -1328,29 +1301,6 @@ fn json_locations_include_grouped_reexport_separators() {
 #[test]
 fn json_locations_include_separators_after_trivia_and_can_be_deleted() {
     let context = HawkTestContext::new("dead_public_fixes");
-    fs::write(
-        context.workspace().join("hawk.toml"),
-        r#"[[production]]
-package = "app"
-bin = "app"
-reason = "binary product under analysis"
-
-[[override]]
-lint = "hawk::dead_public"
-crate = "library"
-item = "DeadFields"
-level = "allow"
-reason = "retain the field parent for JSON child-span coverage"
-
-[[override]]
-lint = "hawk::dead_public"
-crate = "library"
-item = "DeadEnum"
-level = "allow"
-reason = "retain the enum parent for JSON child-span coverage"
-"#,
-    )
-    .expect("write Hawk configuration");
     let library_path = context.workspace().join("library/src/lib.rs");
     let mut source = "pub struct DeadFields {\n    pub unused: u8 // field separator\n    ,\n    pub remaining: u8,\n}\n\npub enum DeadEnum {\n    Unused /* variant separator */ ,\n    Remaining,\n}\n\nmod exports {\n    pub struct Unused;\n    pub struct Remaining;\n}\n\npub use exports::{Unused /* re-export separator */ , Remaining};\n".to_string();
     fs::write(&library_path, &source).expect("write declarations with separated commas");
@@ -1415,22 +1365,6 @@ reason = "retain the enum parent for JSON child-span coverage"
 #[test]
 fn json_byte_offsets_delete_unicode_declarations() {
     let context = HawkTestContext::new("dead_public_fixes");
-    fs::write(
-        context.workspace().join("hawk.toml"),
-        r#"[[production]]
-package = "app"
-bin = "app"
-reason = "binary product under analysis"
-
-[[override]]
-lint = "hawk::dead_public"
-crate = "library"
-item = "DeadFields"
-level = "allow"
-reason = "retain the field parent for JSON child-span coverage"
-"#,
-    )
-    .expect("write Hawk configuration");
     let library_path = context.workspace().join("library/src/lib.rs");
     let mut source =
         "\u{feff}pub struct DeadFields {\r\n    /* 😀é */ pub unused: u8 /* 😀é */ ,\r\n    pub remaining: u8,\r\n}\r\n"
