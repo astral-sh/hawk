@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
@@ -1273,7 +1274,11 @@ reason = "struct field is intentionally retained"
 fn retained_definitions_keep_their_dependency_closure_compilable() {
     let context = HawkTestContext::new("dead_public_fixes");
     let library_path = context.workspace().join("library/src/lib.rs");
-    let source = r"pub struct BodyDependency;
+    let source = r"#![allow(non_local_definitions)]
+
+extern crate self as local;
+
+pub struct BodyDependency;
 
 pub fn retained_body() {
     let _ = BodyDependency;
@@ -1306,11 +1311,183 @@ impl receiver_alias::Alias {
     pub const RETAINED: u8 = 1;
 }
 
+pub struct AliasReceiver;
+pub type InnerReceiver = AliasReceiver;
+pub mod type_receiver_alias {
+    pub use super::InnerReceiver as Alias;
+}
+
+impl type_receiver_alias::Alias {
+    pub const TYPE_ALIAS: u8 = 1;
+}
+
+pub struct SelfReceiver;
+pub mod self_receiver_alias {
+    pub use super::SelfReceiver as Alias;
+}
+
+impl local::self_receiver_alias::Alias {
+    pub const SELF_ALIAS: u8 = 1;
+}
+
+pub struct SuperReceiver;
+pub mod super_receiver {
+    pub mod receiver_alias {
+        pub use super::super::SuperReceiver as Alias;
+    }
+    pub mod implementation {
+        impl super::receiver_alias::Alias {
+            pub const SUPER_ALIAS: u8 = 1;
+        }
+    }
+}
+
+pub mod module_receiver {
+    pub struct ModuleReceiver;
+}
+pub use module_receiver as receiver_module_alias;
+
+impl receiver_module_alias::ModuleReceiver {
+    pub const MODULE_ALIAS: u8 = 1;
+}
+
+pub mod export_module {
+    pub struct ModuleExportDependency;
+}
+pub use export_module as export_module_alias;
+pub use export_module_alias::ModuleExportDependency as RetainedModuleExport;
+
+pub struct GenericReceiver<T>(T);
+pub type GenericInner<T> = GenericReceiver<T>;
+pub mod generic_receiver_alias {
+    pub use super::GenericInner as Alias;
+}
+
+impl<T> generic_receiver_alias::Alias<T> {
+    pub const GENERIC: u8 = 1;
+}
+
+pub struct GlobReceiver;
+pub mod glob_source {
+    pub use super::GlobReceiver as Alias;
+}
+pub mod glob_receiver_alias {
+    pub use super::glob_source::*;
+}
+
+impl glob_receiver_alias::Alias {
+    pub const GLOB: u8 = 1;
+}
+
+pub struct PrivateReceiver;
+pub mod private_receiver_alias {
+    pub use super::PrivateReceiver as First;
+    use self::First as Alias;
+
+    impl Alias {
+        pub const PRIVATE: u8 = 1;
+    }
+}
+
+pub struct BlockReceiver;
+pub type BlockInner = BlockReceiver;
+pub mod block_receiver_alias {
+    pub use super::BlockInner as Alias;
+}
+
+pub fn block_defined() {
+    use block_receiver_alias::Alias as BlockAlias;
+
+    impl BlockAlias {
+        pub const BLOCK: u8 = 1;
+    }
+}
+
+pub struct BlockChainReceiver;
+pub mod block_chain_receiver {
+    pub use super::BlockChainReceiver as Alias;
+}
+
+pub fn block_chain() {
+    use block_chain_receiver::Alias as First;
+    use First as Second;
+
+    impl Second {
+        pub const BLOCK_CHAIN: u8 = 1;
+    }
+}
+
+pub struct BlockGlobReceiver;
+pub mod block_glob_receiver {
+    pub use super::BlockGlobReceiver as Alias;
+}
+
+pub fn block_glob() {
+    use block_glob_receiver::*;
+
+    impl Alias {
+        pub const BLOCK_GLOB: u8 = 1;
+    }
+}
+
 pub mod unrelated_receiver_alias {
     pub use super::UseReceiver as Alias;
 }
 
 pub struct Removable;
+pub struct SignatureTarget;
+pub mod signature_receiver {
+    pub use super::SignatureTarget as Alias;
+}
+
+pub fn kept_signature(_: signature_receiver::Alias) {}
+
+pub struct BodyTarget;
+pub mod body_receiver {
+    pub use super::BodyTarget as Alias;
+}
+
+pub fn kept_body() {
+    let _ = body_receiver::Alias;
+}
+
+pub struct TransitiveTarget;
+pub mod transitive_receiver {
+    pub use super::TransitiveTarget as Alias;
+}
+
+pub fn kept_transitive() {
+    private_callee();
+}
+
+fn private_callee() {
+    let _ = transitive_receiver::Alias;
+}
+
+pub struct ClosureTarget;
+pub mod closure_receiver {
+    pub use super::ClosureTarget as Alias;
+}
+
+pub struct AsyncTarget;
+pub mod async_receiver {
+    pub use super::AsyncTarget as Alias;
+}
+
+pub struct ConstTarget;
+pub mod const_receiver {
+    pub use super::ConstTarget as Alias;
+}
+
+pub fn kept_nested_bodies() {
+    (|| {
+        let _ = closure_receiver::Alias;
+    })();
+    let _future = async {
+        let _ = async_receiver::Alias;
+    };
+    let _ = const { const_receiver::Alias };
+}
 ";
     fs::write(&library_path, source).expect("write retained dependency fixture");
     let configuration = tempfile::NamedTempFile::new().expect("temporary configuration");
@@ -1361,6 +1538,126 @@ item = "UseReceiver::RETAINED"
 kind = "inherent_associated_constant"
 level = "allow"
 reason = "re-export receiver constant is intentionally retained"
+
+[[override]]
+lint = "hawk::dead_public"
+crate = "library"
+item = "AliasReceiver::TYPE_ALIAS"
+kind = "inherent_associated_constant"
+level = "allow"
+reason = "re-exported type-alias receiver constant is intentionally retained"
+
+[[override]]
+lint = "hawk::dead_public"
+crate = "library"
+item = "SelfReceiver::SELF_ALIAS"
+kind = "inherent_associated_constant"
+level = "allow"
+reason = "self-crate alias receiver constant is intentionally retained"
+
+[[override]]
+lint = "hawk::dead_public"
+crate = "library"
+item = "super_receiver::implementation::<impl SuperReceiver>::SUPER_ALIAS"
+kind = "inherent_associated_constant"
+level = "allow"
+reason = "super-path receiver constant is intentionally retained"
+
+[[override]]
+lint = "hawk::dead_public"
+crate = "library"
+item = "<impl module_receiver::ModuleReceiver>::MODULE_ALIAS"
+kind = "inherent_associated_constant"
+level = "allow"
+reason = "module-alias receiver constant is intentionally retained"
+
+[[override]]
+lint = "hawk::dead_public"
+crate = "library"
+item = "RetainedModuleExport"
+kind = "reexport"
+level = "allow"
+reason = "module-alias re-export is intentionally retained"
+
+[[override]]
+lint = "hawk::dead_public"
+crate = "library"
+item = "GenericReceiver::<T>::GENERIC"
+kind = "inherent_associated_constant"
+level = "allow"
+reason = "generic receiver constant is intentionally retained"
+
+[[override]]
+lint = "hawk::dead_public"
+crate = "library"
+item = "GlobReceiver::GLOB"
+kind = "inherent_associated_constant"
+level = "allow"
+reason = "glob re-export receiver constant is intentionally retained"
+
+[[override]]
+lint = "hawk::dead_public"
+crate = "library"
+item = "private_receiver_alias::<impl PrivateReceiver>::PRIVATE"
+kind = "inherent_associated_constant"
+level = "allow"
+reason = "private intermediate receiver constant is intentionally retained"
+
+[[override]]
+lint = "hawk::dead_public"
+crate = "library"
+item = "block_defined::<impl BlockReceiver>::BLOCK"
+kind = "inherent_associated_constant"
+level = "allow"
+reason = "block-local receiver constant is intentionally retained"
+
+[[override]]
+lint = "hawk::dead_public"
+crate = "library"
+item = "block_chain::<impl BlockChainReceiver>::BLOCK_CHAIN"
+kind = "inherent_associated_constant"
+level = "allow"
+reason = "block-local alias chain receiver constant is intentionally retained"
+
+[[override]]
+lint = "hawk::dead_public"
+crate = "library"
+item = "block_glob::<impl BlockGlobReceiver>::BLOCK_GLOB"
+kind = "inherent_associated_constant"
+level = "allow"
+reason = "block-local glob receiver constant is intentionally retained"
+
+[[override]]
+lint = "hawk::dead_public"
+crate = "library"
+item = "kept_signature"
+kind = "function"
+level = "allow"
+reason = "source signature is intentionally retained"
+
+[[override]]
+lint = "hawk::dead_public"
+crate = "library"
+item = "kept_body"
+kind = "function"
+level = "allow"
+reason = "source body is intentionally retained"
+
+[[override]]
+lint = "hawk::dead_public"
+crate = "library"
+item = "kept_transitive"
+kind = "function"
+level = "allow"
+reason = "transitive source body is intentionally retained"
+
+[[override]]
+lint = "hawk::dead_public"
+crate = "library"
+item = "kept_nested_bodies"
+kind = "function"
+level = "allow"
+reason = "nested source bodies are intentionally retained"
 "#,
     )
     .expect("write temporary configuration");
@@ -1375,6 +1672,16 @@ reason = "re-export receiver constant is intentionally retained"
     let stdout = context.normalized_stdout(&output);
     assert!(stdout.contains("`Removable` is public but is not reachable"));
     assert!(stdout.contains("public re-export `unrelated_receiver_alias::Alias`"));
+    assert_eq!(
+        stdout.matches("warning[hawk::dead_public]").count(),
+        2,
+        "{stdout}"
+    );
+    assert!(!stdout.contains("hawk::unknown_item"), "{stdout}");
+    assert!(
+        !stdout.contains("hawk::unfulfilled_expectation"),
+        "{stdout}"
+    );
     for item in [
         "BodyDependency",
         "InterfaceDependency",
@@ -1386,6 +1693,48 @@ reason = "re-export receiver constant is intentionally retained"
         "ReceiverAlias",
         "UseReceiver",
         "receiver_alias",
+        "AliasReceiver",
+        "InnerReceiver",
+        "type_receiver_alias",
+        "SelfReceiver",
+        "self_receiver_alias",
+        "SuperReceiver",
+        "super_receiver",
+        "module_receiver",
+        "receiver_module_alias",
+        "export_module",
+        "export_module_alias",
+        "RetainedModuleExport",
+        "GenericReceiver",
+        "GenericInner",
+        "generic_receiver_alias",
+        "GlobReceiver",
+        "glob_source",
+        "glob_receiver_alias",
+        "PrivateReceiver",
+        "private_receiver_alias",
+        "BlockReceiver",
+        "BlockInner",
+        "block_receiver_alias",
+        "block_defined",
+        "BlockChainReceiver",
+        "block_chain_receiver",
+        "block_chain",
+        "BlockGlobReceiver",
+        "block_glob_receiver",
+        "block_glob",
+        "SignatureTarget",
+        "signature_receiver",
+        "BodyTarget",
+        "body_receiver",
+        "TransitiveTarget",
+        "transitive_receiver",
+        "ClosureTarget",
+        "closure_receiver",
+        "AsyncTarget",
+        "async_receiver",
+        "ConstTarget",
+        "const_receiver",
     ] {
         assert!(!stdout.contains(&format!("`{item}`")), "{stdout}");
     }
@@ -1409,6 +1758,98 @@ reason = "re-export receiver constant is intentionally retained"
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[test]
+fn collects_many_same_target_imports_without_redundant_findings() {
+    let context = HawkTestContext::new("dead_public_fixes");
+    let library_path = context.workspace().join("library/src/lib.rs");
+    let mut source = String::from("pub struct Target;\n");
+    for index in 0..1_000 {
+        writeln!(
+            source,
+            "mod import_{index} {{ use super::Target as Alias; pub fn keep(_: Alias) {{}} }}"
+        )
+        .expect("append same-target import");
+    }
+    source.push_str("pub fn root() {\n");
+    for index in 0..1_000 {
+        writeln!(source, "    import_{index}::keep(Target);")
+            .expect("append same-target import use");
+    }
+    source.push_str("}\n");
+    fs::write(&library_path, source).expect("write same-target imports fixture");
+    fs::write(
+        context.workspace().join("app/src/main.rs"),
+        "fn main() { library::root(); }\n",
+    )
+    .expect("write same-target imports consumer");
+
+    let output = context.run(&["-A", "warnings"]);
+
+    context.assert_success(&output);
+    assert!(
+        context
+            .normalized_stdout(&output)
+            .contains("hawk: 0 finding(s)"),
+        "{}",
+        context.normalized_stdout(&output)
+    );
+}
+
+#[test]
+fn collects_many_block_globs_without_redundant_findings() {
+    let context = HawkTestContext::new("dead_public_fixes");
+    let library_path = context.workspace().join("library/src/lib.rs");
+    let mut source = String::from("#![allow(non_local_definitions)]\n");
+    for index in 0..200 {
+        writeln!(source, "pub struct Target{index};").expect("append block-glob target");
+    }
+    source.push_str("pub mod exports {\n");
+    for index in 0..200 {
+        writeln!(source, "    pub use super::Target{index} as Alias{index};")
+            .expect("append block-glob re-export");
+    }
+    source.push_str("}\n");
+    for index in 0..200 {
+        writeln!(
+            source,
+            "pub fn block{index}() {{ use exports::*; impl Alias{index} {{ pub const KEEP{index}: u8 = 1; }} }}"
+        )
+        .expect("append block-glob receiver");
+    }
+    source.push_str("pub struct Removable;\n");
+    fs::write(&library_path, source).expect("write block-glob fixture");
+
+    let configuration = tempfile::NamedTempFile::new().expect("temporary configuration");
+    let mut contents = String::from(
+        "[[production]]\npackage = \"app\"\nbin = \"app\"\nreason = \"test binary product\"\n",
+    );
+    for index in 0..200 {
+        writeln!(
+            contents,
+            "\n[[override]]\nlint = \"hawk::dead_public\"\ncrate = \"library\"\nitem = \"block{index}::<impl Target{index}>::KEEP{index}\"\nkind = \"inherent_associated_constant\"\nlevel = \"allow\"\nreason = \"block-glob receiver is intentionally retained\""
+        )
+        .expect("append block-glob override");
+    }
+    fs::write(configuration.path(), contents).expect("write block-glob configuration");
+
+    let output = context
+        .command()
+        .arg("--config")
+        .arg(configuration.path())
+        .output()
+        .expect("run cargo-hawk");
+
+    context.assert_success(&output);
+    let stdout = context.normalized_stdout(&output);
+    assert!(stdout.contains("`Removable` is public but is not reachable"));
+    assert_eq!(
+        stdout.matches("warning[hawk::dead_public]").count(),
+        1,
+        "{stdout}"
+    );
+    assert!(!stdout.contains("hawk::unknown_item"), "{stdout}");
 }
 
 #[test]

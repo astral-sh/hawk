@@ -26,7 +26,8 @@ use rustc_session::lint::Level;
 use rustc_span::Symbol;
 use rustc_span::def_id::LOCAL_CRATE;
 use rustc_span::hygiene::{ExpnKind, MacroKind};
-use rustc_span::{BytePos, FileName, Pos};
+use rustc_span::symbol::kw;
+use rustc_span::{BytePos, FileName, Ident, Pos};
 
 use crate::protocol;
 use cargo_hawk_internal::graph::{
@@ -653,49 +654,160 @@ fn collect_fragment(
         to: id(tcx, adt.to_def_id()),
         kind: EdgeKind::Interface,
     }));
-    let mut reexports_by_target = HashMap::<DefinitionId, Vec<DefinitionId>>::new();
-    let mut reexport_targets_by_source = HashMap::<DefinitionId, Vec<DefinitionId>>::new();
-    for edge in edges.iter().filter(|edge| edge.kind == EdgeKind::Reexport) {
-        reexports_by_target
-            .entry(edge.to)
-            .or_default()
-            .push(edge.from);
-        reexport_targets_by_source
-            .entry(edge.from)
-            .or_default()
-            .push(edge.to);
+    let mut reexports_by_child = HashMap::<(DefinitionId, Ident, DefinitionId), Vec<_>>::new();
+    // Name resolution retains the actual import chain for each module child.
+    // Linking only the first two local imports keeps long alias ladders linear;
+    // the intermediate binding supplies the next edge in the chain.
+    for module in std::iter::once(CRATE_DEF_ID).chain(
+        crate_items
+            .owners()
+            .map(|owner| owner.def_id)
+            .filter(|def_id| *def_id != CRATE_DEF_ID && tcx.def_kind(*def_id) == DefKind::Mod),
+    ) {
+        let module_id = id(tcx, module.to_def_id());
+        for child in tcx.module_children_local(module) {
+            let Some(target) = child.res.opt_def_id() else {
+                continue;
+            };
+            let mut chain = child
+                .reexport_chain
+                .iter()
+                .filter_map(|reexport| reexport.id())
+                .filter_map(DefId::as_local)
+                .filter(|def_id| defined.contains(def_id))
+                .map(|def_id| id(tcx, def_id.to_def_id()));
+            let Some(first) = chain.next() else {
+                continue;
+            };
+            let target = id(tcx, target);
+            reexports_by_child
+                .entry((module_id, child.ident.normalize_to_macros_2_0(), target))
+                .or_default()
+                .push(first);
+            if let Some(second) = chain.next() {
+                edges.push(Edge {
+                    from: first,
+                    to: second,
+                    kind: EdgeKind::Interface,
+                });
+            }
+        }
     }
-    let definitions_by_id: HashMap<_, _> = definitions
-        .iter()
-        .map(|definition| (definition.id, definition))
-        .collect();
+    let mut block_reexports_by_child = HashMap::<(hir::HirId, Ident, DefinitionId), Vec<_>>::new();
+    let mut block_globs = HashMap::<hir::HirId, Vec<(DefinitionId, DefinitionId)>>::new();
     for owner in crate_items.owners() {
         let def_id = owner.def_id;
         if tcx.def_kind(def_id) != DefKind::Use {
             continue;
         }
-        let Some(source_name) = reexport_source_name(tcx, def_id) else {
+        let Node::Item(item) = tcx.hir_node_by_def_id(def_id) else {
             continue;
         };
-        let reexport_id = id(tcx, def_id.to_def_id());
-        for target in reexport_targets_by_source
-            .get(&reexport_id)
-            .into_iter()
-            .flatten()
-        {
-            for source in reexports_by_target.get(target).into_iter().flatten() {
-                if *source == reexport_id {
-                    continue;
+        let hir::ItemKind::Use(path, use_kind) = item.kind else {
+            continue;
+        };
+        let Some(block) = enclosing_blocks(tcx, def_id).next() else {
+            continue;
+        };
+        match use_kind {
+            hir::UseKind::Single(alias) => {
+                for target in path.res.iter().flatten().filter_map(Res::opt_def_id) {
+                    block_reexports_by_child
+                        .entry((block, alias.normalize_to_macros_2_0(), id(tcx, target)))
+                        .or_default()
+                        .push(id(tcx, def_id.to_def_id()));
                 }
-                let Some(source_definition) = definitions_by_id.get(source) else {
-                    continue;
-                };
-                if source_definition.name == source_name {
-                    edges.push(Edge {
-                        from: reexport_id,
-                        to: *source,
+            }
+            hir::UseKind::Glob => {
+                block_globs.entry(block).or_default().extend(
+                    path.res
+                        .iter()
+                        .flatten()
+                        .filter_map(Res::opt_def_id)
+                        .filter_map(DefId::as_local)
+                        .filter(|def_id| tcx.def_kind(*def_id) == DefKind::Mod)
+                        .map(|module| (id(tcx, module.to_def_id()), id(tcx, def_id.to_def_id()))),
+                );
+            }
+            hir::UseKind::ListStem => {}
+        }
+    }
+    for owner in crate_items.owners() {
+        let def_id = owner.def_id;
+        if tcx.def_kind(def_id) != DefKind::Use {
+            continue;
+        }
+        let Node::Item(item) = tcx.hir_node_by_def_id(def_id) else {
+            continue;
+        };
+        let hir::ItemKind::Use(path, use_kind) = item.kind else {
+            continue;
+        };
+        let module = extend_reexport_path_edges(
+            tcx,
+            def_id,
+            def_id,
+            path.segments,
+            &reexports_by_child,
+            EdgeKind::Interface,
+            &mut edges,
+        );
+        let hir::UseKind::Single(_) = use_kind else {
+            continue;
+        };
+        let Some(source) = path.segments.last() else {
+            continue;
+        };
+        for target in path.res.iter().flatten().filter_map(Res::opt_def_id) {
+            edges.extend(
+                reexports_by_child
+                    .get(&(
+                        id(tcx, module.to_def_id()),
+                        source.ident.normalize_to_macros_2_0(),
+                        id(tcx, target),
+                    ))
+                    .into_iter()
+                    .flatten()
+                    .map(|reexport| Edge {
+                        from: id(tcx, def_id.to_def_id()),
+                        to: *reexport,
                         kind: EdgeKind::Interface,
-                    });
+                    }),
+            );
+            for block in enclosing_blocks(tcx, def_id) {
+                edges.extend(
+                    block_reexports_by_child
+                        .get(&(
+                            block,
+                            source.ident.normalize_to_macros_2_0(),
+                            id(tcx, target),
+                        ))
+                        .into_iter()
+                        .flatten()
+                        .filter(|reexport| **reexport != id(tcx, def_id.to_def_id()))
+                        .map(|reexport| Edge {
+                            from: id(tcx, def_id.to_def_id()),
+                            to: *reexport,
+                            kind: EdgeKind::Interface,
+                        }),
+                );
+                for (module, glob) in block_globs.get(&block).into_iter().flatten() {
+                    if let Some(reexports) = reexports_by_child.get(&(
+                        *module,
+                        source.ident.normalize_to_macros_2_0(),
+                        id(tcx, target),
+                    )) {
+                        edges.push(Edge {
+                            from: id(tcx, def_id.to_def_id()),
+                            to: *glob,
+                            kind: EdgeKind::Interface,
+                        });
+                        edges.extend(reexports.iter().map(|reexport| Edge {
+                            from: id(tcx, def_id.to_def_id()),
+                            to: *reexport,
+                            kind: EdgeKind::Interface,
+                        }));
+                    }
                 }
             }
         }
@@ -709,32 +821,89 @@ fn collect_fragment(
             continue;
         }
         let impl_def_id = tcx.local_parent(def_id);
-        let Some(receiver_name) = inherent_receiver_name(tcx, impl_def_id) else {
+        let Node::Item(item) = tcx.hir_node_by_def_id(impl_def_id) else {
             continue;
         };
-        let ty::Adt(adt, _) = tcx
-            .type_of(impl_def_id)
-            .instantiate_identity()
-            .skip_norm_wip()
-            .kind()
-        else {
+        let hir::ItemKind::Impl(implementation) = item.kind else {
             continue;
         };
-        for reexport in reexports_by_target
-            .get(&id(tcx, adt.did()))
-            .into_iter()
-            .flatten()
-        {
-            let Some(reexport_definition) = definitions_by_id.get(reexport) else {
-                continue;
-            };
-            if reexport_definition.name == receiver_name {
-                edges.push(Edge {
-                    from: id(tcx, def_id.to_def_id()),
-                    to: *reexport,
-                    kind: EdgeKind::Interface,
-                });
+        let hir::TyKind::Path(hir::QPath::Resolved(_, path)) = implementation.self_ty.kind else {
+            continue;
+        };
+        extend_reexport_path_edges(
+            tcx,
+            def_id,
+            impl_def_id,
+            path.segments,
+            &reexports_by_child,
+            EdgeKind::Interface,
+            &mut edges,
+        );
+        let receiver = path.segments.last().map(|segment| segment.ident);
+        let receiver_target = path.res.opt_def_id();
+        let mut parent = tcx.local_parent(impl_def_id);
+        while parent != CRATE_DEF_ID && tcx.def_kind(parent) != DefKind::Mod {
+            edges.push(Edge {
+                from: id(tcx, def_id.to_def_id()),
+                to: id(tcx, parent.to_def_id()),
+                kind: EdgeKind::Interface,
+            });
+            parent = tcx.local_parent(parent);
+        }
+        if let (Some(receiver), Some(target)) = (receiver, receiver_target) {
+            for block in enclosing_blocks(tcx, impl_def_id) {
+                edges.extend(
+                    block_reexports_by_child
+                        .get(&(block, receiver.normalize_to_macros_2_0(), id(tcx, target)))
+                        .into_iter()
+                        .flatten()
+                        .map(|reexport| Edge {
+                            from: id(tcx, def_id.to_def_id()),
+                            to: *reexport,
+                            kind: EdgeKind::Interface,
+                        }),
+                );
+                for (module, glob) in block_globs.get(&block).into_iter().flatten() {
+                    if let Some(reexports) = reexports_by_child.get(&(
+                        *module,
+                        receiver.normalize_to_macros_2_0(),
+                        id(tcx, target),
+                    )) {
+                        edges.push(Edge {
+                            from: id(tcx, def_id.to_def_id()),
+                            to: *glob,
+                            kind: EdgeKind::Interface,
+                        });
+                        edges.extend(reexports.iter().map(|reexport| Edge {
+                            from: id(tcx, def_id.to_def_id()),
+                            to: *reexport,
+                            kind: EdgeKind::Interface,
+                        }));
+                    }
+                }
             }
+        }
+    }
+    // Retained source declarations can reach re-exports from both their
+    // interfaces and bodies, including through otherwise-dead private
+    // callees. Preserve the written path alongside rustc's resolved target.
+    for owner in crate_items.owners() {
+        let def_id = owner.def_id;
+        let mut visitor = ReexportPathVisitor {
+            tcx,
+            source: def_id,
+            reexports_by_child: &reexports_by_child,
+            block_reexports_by_child: &block_reexports_by_child,
+            block_globs: &block_globs,
+            edge_kind: EdgeKind::Interface,
+            traverse_bodies: false,
+            edges: &mut edges,
+        };
+        visitor.visit_node(tcx.hir_node_by_def_id(def_id));
+        if let Some(body) = tcx.hir_maybe_body_owned_by(def_id) {
+            visitor.edge_kind = EdgeKind::Body;
+            visitor.traverse_bodies = true;
+            visitor.visit_body(body);
         }
     }
     source_item_fields.sort_by_key(|(file_start, item_start, _)| (*file_start, *item_start));
@@ -1196,54 +1365,61 @@ fn enclosing_module(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Option<LocalDefId> {
     (parent != CRATE_DEF_ID && tcx.def_kind(parent) == DefKind::Mod).then_some(parent)
 }
 
-fn inherent_receiver_name(tcx: TyCtxt<'_>, impl_def_id: LocalDefId) -> Option<String> {
-    let Node::Item(item) = tcx.hir_node_by_def_id(impl_def_id) else {
-        return None;
-    };
-    let hir::ItemKind::Impl(implementation) = item.kind else {
-        return None;
-    };
-    let hir::TyKind::Path(hir::QPath::Resolved(_, path)) = implementation.self_ty.kind else {
-        return None;
-    };
-    Some(local_path_name(
-        tcx,
-        impl_def_id,
-        path.segments.iter().map(|segment| segment.ident.name),
-    ))
-}
-
-fn reexport_source_name(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Option<String> {
-    let Node::Item(item) = tcx.hir_node_by_def_id(def_id) else {
-        return None;
-    };
-    let hir::ItemKind::Use(path, _) = item.kind else {
-        return None;
-    };
-    Some(local_path_name(
-        tcx,
-        def_id,
-        path.segments.iter().map(|segment| segment.ident.name),
-    ))
-}
-
-fn local_path_name(
+fn extend_reexport_path_edges(
     tcx: TyCtxt<'_>,
-    def_id: LocalDefId,
-    segments: impl Iterator<Item = Symbol>,
-) -> String {
-    let mut scope = module_scope(tcx, def_id);
+    source: LocalDefId,
+    path_owner: LocalDefId,
+    segments: &[hir::PathSegment<'_>],
+    reexports_by_child: &HashMap<(DefinitionId, Ident, DefinitionId), Vec<DefinitionId>>,
+    edge_kind: EdgeKind,
+    edges: &mut Vec<Edge>,
+) -> LocalDefId {
+    let mut module = path_owner;
+    while module != CRATE_DEF_ID && tcx.def_kind(module) != DefKind::Mod {
+        module = tcx.local_parent(module);
+    }
+    let mut parent_module = module;
     for segment in segments {
-        match segment.as_str() {
-            "crate" => scope.clear(),
-            "self" => {}
-            "super" => {
-                scope.pop();
+        parent_module = module;
+        match segment.ident.name {
+            kw::PathRoot | kw::Crate | kw::DollarCrate => {
+                module = CRATE_DEF_ID;
+                continue;
             }
-            name => scope.push(name.to_owned()),
+            kw::SelfLower => continue,
+            kw::Super => {
+                module = enclosing_module(tcx, module).unwrap_or(CRATE_DEF_ID);
+                continue;
+            }
+            _ => {}
+        }
+        let Some(target) = segment.res.opt_def_id() else {
+            continue;
+        };
+        if let Some(reexports) = reexports_by_child.get(&(
+            id(tcx, module.to_def_id()),
+            segment.ident.normalize_to_macros_2_0(),
+            id(tcx, target),
+        )) {
+            edges.extend(reexports.iter().map(|reexport| Edge {
+                from: id(tcx, source.to_def_id()),
+                to: *reexport,
+                kind: edge_kind,
+            }));
+        }
+        if tcx.def_kind(target) == DefKind::Mod {
+            let Some(local) = target.as_local() else {
+                break;
+            };
+            module = local;
         }
     }
-    scope.join("::")
+    parent_module
+}
+
+fn enclosing_blocks(tcx: TyCtxt<'_>, def_id: LocalDefId) -> impl Iterator<Item = hir::HirId> + '_ {
+    tcx.hir_parent_iter(tcx.local_def_id_to_hir_id(def_id))
+        .filter_map(|(hir_id, node)| matches!(node, Node::Block(_)).then_some(hir_id))
 }
 
 fn module_scope(tcx: TyCtxt<'_>, mut def_id: LocalDefId) -> Vec<String> {
@@ -1326,6 +1502,97 @@ struct ReferenceVisitor<'tcx> {
     typeck_results: Option<&'tcx ty::TypeckResults<'tcx>>,
     traverse_bodies: bool,
     targets: HashSet<DefId>,
+}
+
+struct ReexportPathVisitor<'a, 'tcx> {
+    tcx: TyCtxt<'tcx>,
+    source: LocalDefId,
+    reexports_by_child: &'a HashMap<(DefinitionId, Ident, DefinitionId), Vec<DefinitionId>>,
+    block_reexports_by_child: &'a HashMap<(hir::HirId, Ident, DefinitionId), Vec<DefinitionId>>,
+    block_globs: &'a HashMap<hir::HirId, Vec<(DefinitionId, DefinitionId)>>,
+    edge_kind: EdgeKind,
+    traverse_bodies: bool,
+    edges: &'a mut Vec<Edge>,
+}
+
+impl<'tcx> ReexportPathVisitor<'_, 'tcx> {
+    fn visit_node(&mut self, node: Node<'tcx>) {
+        match node {
+            Node::Item(item) => self.visit_item(item),
+            Node::ImplItem(item) => self.visit_impl_item(item),
+            Node::TraitItem(item) => self.visit_trait_item(item),
+            Node::ForeignItem(item) => self.visit_foreign_item(item),
+            _ => {}
+        }
+    }
+}
+
+impl<'tcx> Visitor<'tcx> for ReexportPathVisitor<'_, 'tcx> {
+    fn visit_nested_body(&mut self, body_id: hir::BodyId) {
+        if self.traverse_bodies {
+            self.visit_body(self.tcx.hir_body(body_id));
+        }
+    }
+
+    fn visit_path(&mut self, path: &hir::Path<'tcx>, hir_id: hir::HirId) {
+        extend_reexport_path_edges(
+            self.tcx,
+            self.source,
+            self.source,
+            path.segments,
+            self.reexports_by_child,
+            self.edge_kind,
+            self.edges,
+        );
+        let Some(receiver) = path.segments.last().map(|segment| segment.ident) else {
+            intravisit::walk_path(self, path);
+            return;
+        };
+        let Some(target) = path.res.opt_def_id() else {
+            intravisit::walk_path(self, path);
+            return;
+        };
+        for (block, _) in self
+            .tcx
+            .hir_parent_iter(hir_id)
+            .filter(|(_, node)| matches!(node, Node::Block(_)))
+        {
+            self.edges.extend(
+                self.block_reexports_by_child
+                    .get(&(
+                        block,
+                        receiver.normalize_to_macros_2_0(),
+                        id(self.tcx, target),
+                    ))
+                    .into_iter()
+                    .flatten()
+                    .map(|reexport| Edge {
+                        from: id(self.tcx, self.source.to_def_id()),
+                        to: *reexport,
+                        kind: self.edge_kind,
+                    }),
+            );
+            for (module, glob) in self.block_globs.get(&block).into_iter().flatten() {
+                if let Some(reexports) = self.reexports_by_child.get(&(
+                    *module,
+                    receiver.normalize_to_macros_2_0(),
+                    id(self.tcx, target),
+                )) {
+                    self.edges.push(Edge {
+                        from: id(self.tcx, self.source.to_def_id()),
+                        to: *glob,
+                        kind: self.edge_kind,
+                    });
+                    self.edges.extend(reexports.iter().map(|reexport| Edge {
+                        from: id(self.tcx, self.source.to_def_id()),
+                        to: *reexport,
+                        kind: self.edge_kind,
+                    }));
+                }
+            }
+        }
+        intravisit::walk_path(self, path);
+    }
 }
 
 impl<'tcx> ReferenceVisitor<'tcx> {
