@@ -222,7 +222,11 @@ reason = "non-Windows compatibility surface"
 An entry is validated when its selector applies to at least one analyzed
 compilation target. This avoids stale-expectation failures for declarations
 that are not compiled on any selected target. A target-scoped override or
-exclusion cannot suppress a declaration compiled for an unmatched target.
+exclusion cannot suppress a declaration compiled for an unmatched target. An
+`expect` override is evaluated against findings from the selected targets,
+even when the same declaration is live on another target.
+An override matching the aggregate lint also suppresses that aggregate finding
+when target-local classifications differ.
 
 ## External library boundaries
 

@@ -930,7 +930,59 @@ fn compilation_targets_union_reachability_across_architectures() {
     assert!(!stdout.contains("`aarch64_api` is public"));
     assert!(!stdout.contains("`x86_64_api` is public"));
     assert!(stdout.contains("`unused_api` is public"));
+    assert!(stdout.contains("hawk::unnecessary_public]: `repeated_a::shared_api`"));
+    assert!(!stdout.contains("hawk::dead_public]: `repeated_a::shared_api`"));
+    assert!(stdout.contains("hawk::dead_public]: `impossible_target_path`"));
+    assert!(!stdout.contains("hawk::unnecessary_public]: `impossible_target_path`"));
+    assert!(!stdout.contains("hawk::unfulfilled_expectation"));
     assert!(stdout.contains(&format!("on targets `{host}`, `{other}`")));
+
+    let reverse = combined
+        .command()
+        .arg("--target")
+        .arg(other)
+        .arg("--target")
+        .arg(host)
+        .output()
+        .expect("run cargo-hawk with reversed compilation targets");
+    combined.assert_success(&reverse);
+    let reverse_stdout = combined.normalized_stdout(&reverse);
+    assert!(reverse_stdout.contains("hawk::unnecessary_public]: `repeated_a::shared_api`"));
+    assert!(!reverse_stdout.contains("hawk::dead_public]: `repeated_a::shared_api`"));
+    assert!(reverse_stdout.contains("hawk::dead_public]: `impossible_target_path`"));
+    assert!(!reverse_stdout.contains("hawk::unnecessary_public]: `impossible_target_path`"));
+    assert!(!reverse_stdout.contains("hawk::unfulfilled_expectation"));
+
+    let configuration_path = combined.workspace().join("hawk.toml");
+    let mut configuration =
+        fs::read_to_string(&configuration_path).expect("read compilation-target configuration");
+    configuration.push_str(
+        r#"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "library"
+item = "repeated_a::shared_api"
+kind = "function"
+level = "expect"
+reason = "retain the aggregate finding"
+"#,
+    );
+    fs::write(&configuration_path, configuration).expect("write compilation-target configuration");
+    for [first, second] in [[host, other], [other, host]] {
+        let output = combined
+            .command()
+            .arg("--target")
+            .arg(first)
+            .arg("--target")
+            .arg(second)
+            .output()
+            .expect("run cargo-hawk with aggregate lint override");
+        combined.assert_success(&output);
+        let stdout = combined.normalized_stdout(&output);
+        assert!(!stdout.contains("`repeated_a::shared_api` is public"));
+        assert!(!stdout.contains("hawk::unfulfilled_expectation"));
+    }
 
     let run_dir = fs::read_dir(graph_dir.path())
         .expect("read graph directory")

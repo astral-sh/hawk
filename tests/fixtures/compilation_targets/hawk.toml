@@ -2,3 +2,12 @@
 package = "app"
 bin = "app"
 reason = "compilation-target fixture product"
+
+[[override]]
+lint = "hawk::dead_public"
+crate = "library"
+item = "expected_dead_on_x86"
+kind = "function"
+level = "expect"
+target = "cfg(target_arch = \"x86_64\")"
+reason = "the declaration is intentionally dead on x86"

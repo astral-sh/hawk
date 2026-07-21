@@ -658,15 +658,22 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
             }
         })
         .collect::<Vec<_>>();
-    let findings = config.apply_targets(
+    let target_findings = analysis_targets
+        .iter()
+        .map(|target| {
+            analyze_with_options(
+                target.production,
+                target.non_production,
+                &candidate_crates,
+                &excluded,
+                config.preserve_uniform_field_visibility(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let findings = config.apply_aggregated_targets(
         &analysis_targets,
-        analyze_with_options(
-            &production_fragments,
-            &test_fragments,
-            &candidate_crates,
-            &excluded,
-            config.preserve_uniform_field_visibility(),
-        ),
+        &target_findings,
+        aggregate_target_findings(&analysis_targets, &target_findings),
     );
     let mut renderer = DiagnosticRenderer::new(&workspace_root);
     let mut diagnostic_count = 0;
@@ -1164,6 +1171,95 @@ fn compilation_target_summary(target_graphs: &[CompilationTargetGraph<'_>]) -> S
         || "the host target".to_owned(),
         |target| format!("target `{target}`"),
     )
+}
+
+fn aggregate_target_findings<'a>(
+    targets: &[TargetFragments<'a>],
+    target_findings: &[Vec<Finding<'a>>],
+) -> Vec<Finding<'a>> {
+    struct AggregatedFinding<'a> {
+        finding: Finding<'a>,
+        target_indices: Vec<usize>,
+        live_test_only: Option<bool>,
+    }
+
+    fn identity(definition: &Definition) -> DefinitionIdentity<'_> {
+        DefinitionIdentity::new(
+            &definition.crate_name,
+            &definition.name,
+            definition.kind,
+            definition.span.as_ref(),
+        )
+    }
+
+    fn finding_rank(kind: FindingKind) -> u8 {
+        match kind {
+            FindingKind::DeadPublic => 0,
+            FindingKind::UnnecessaryRestrictedVisibility => 1,
+            FindingKind::UnnecessaryCrateVisibility => 2,
+            FindingKind::UnnecessaryPublic => 3,
+        }
+    }
+
+    debug_assert_eq!(targets.len(), target_findings.len());
+    let mut definition_targets: HashMap<DefinitionIdentity<'_>, Vec<usize>> = HashMap::new();
+    for (target_index, target) in targets.iter().enumerate() {
+        for definition in target.definitions() {
+            let target_indices = definition_targets.entry(identity(definition)).or_default();
+            if target_indices.last() != Some(&target_index) {
+                target_indices.push(target_index);
+            }
+        }
+    }
+
+    let mut aggregated: HashMap<DefinitionIdentity<'_>, AggregatedFinding<'a>> = HashMap::new();
+    for (target_index, findings) in target_findings.iter().enumerate() {
+        for finding in findings {
+            let entry = aggregated
+                .entry(identity(finding.definition))
+                .or_insert_with(|| AggregatedFinding {
+                    finding: finding.clone(),
+                    target_indices: Vec::new(),
+                    live_test_only: None,
+                });
+            if entry.target_indices.last() != Some(&target_index) {
+                entry.target_indices.push(target_index);
+            }
+            if finding_rank(finding.kind) > finding_rank(entry.finding.kind) {
+                entry.finding.kind = finding.kind;
+            }
+            entry.finding.test_compiled_only &= finding.test_compiled_only;
+            if finding.kind != FindingKind::DeadPublic {
+                entry.live_test_only =
+                    Some(entry.live_test_only.map_or(finding.test_only, |test_only| {
+                        test_only && finding.test_only
+                    }));
+            }
+        }
+    }
+
+    let mut findings = aggregated
+        .into_iter()
+        .filter_map(|(identity, mut aggregated)| {
+            (definition_targets.get(&identity) == Some(&aggregated.target_indices)).then(|| {
+                aggregated.finding.test_only = aggregated.live_test_only.unwrap_or(false);
+                aggregated.finding
+            })
+        })
+        .collect::<Vec<_>>();
+    findings.sort_by_key(|finding| {
+        let span = finding.definition.span.as_ref();
+        (
+            span.map(|span| span.file.as_str()).unwrap_or(""),
+            span.map(|span| span.line).unwrap_or(0),
+            span.map(|span| span.column).unwrap_or(0),
+            finding.definition.crate_name.as_str(),
+            finding.definition.name.as_str(),
+            finding.definition.kind,
+            finding.kind,
+        )
+    });
+    findings
 }
 
 fn doctest_rustdoc_flags(executable: &Path) -> OsString {

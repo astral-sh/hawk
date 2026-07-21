@@ -133,7 +133,7 @@ pub(crate) struct TargetFragments<'a> {
 }
 
 impl TargetFragments<'_> {
-    fn definitions(&self) -> impl Iterator<Item = &Definition> {
+    pub(crate) fn definitions(&self) -> impl Iterator<Item = &Definition> {
         self.production
             .iter()
             .chain(self.non_production)
@@ -583,7 +583,28 @@ impl Config {
         targets: &[TargetFragments<'_>],
         findings: Vec<Finding<'findings>>,
     ) -> AppliedFindings<'findings, 'config> {
+        self.apply_targets_impl(targets, None, findings)
+    }
+
+    pub(crate) fn apply_aggregated_targets<'findings, 'config>(
+        &'config self,
+        targets: &[TargetFragments<'_>],
+        target_findings: &[Vec<Finding<'findings>>],
+        findings: Vec<Finding<'findings>>,
+    ) -> AppliedFindings<'findings, 'config> {
+        debug_assert_eq!(targets.len(), target_findings.len());
+        self.apply_targets_impl(targets, Some(target_findings), findings)
+    }
+
+    fn apply_targets_impl<'findings, 'config>(
+        &'config self,
+        targets: &[TargetFragments<'_>],
+        target_findings: Option<&[Vec<Finding<'findings>>]>,
+        findings: Vec<Finding<'findings>>,
+    ) -> AppliedFindings<'findings, 'config> {
         let mut target_indices_by_identity: HashMap<KnownItemIdentity<'_>, Vec<usize>> =
+            HashMap::new();
+        let mut target_indices_by_logical_identity: HashMap<LogicalItemIdentity<'_>, Vec<usize>> =
             HashMap::new();
         for (target_index, target) in targets.iter().enumerate() {
             for identity in target.definitions().map(known_item_identity) {
@@ -592,6 +613,59 @@ impl Config {
                     target_indices.push(target_index);
                 }
             }
+            for identity in target.logical_items() {
+                let target_indices = target_indices_by_logical_identity
+                    .entry(identity)
+                    .or_default();
+                if target_indices.last() != Some(&target_index) {
+                    target_indices.push(target_index);
+                }
+            }
+        }
+        let mut logical_items_by_name: LogicalItemsByName<'_> = HashMap::new();
+        for (identity, target_indices) in target_indices_by_logical_identity {
+            logical_items_by_name
+                .entry((identity.crate_name, identity.item))
+                .or_default()
+                .push((identity, target_indices));
+        }
+        let mut finding_targets_by_name: FindingTargetsByName<'_> = HashMap::new();
+        if let Some(target_findings) = target_findings {
+            for (target_index, findings) in target_findings.iter().enumerate() {
+                for finding in findings {
+                    finding_targets_by_name
+                        .entry((
+                            finding.definition.crate_name.as_str(),
+                            finding.definition.name.as_str(),
+                        ))
+                        .or_default()
+                        .insert((finding.kind, finding.definition.kind, target_index));
+                }
+            }
+        } else {
+            for finding in &findings {
+                let Some(target_indices) =
+                    target_indices_by_identity.get(&known_item_identity(finding.definition))
+                else {
+                    continue;
+                };
+                finding_targets_by_name
+                    .entry((
+                        finding.definition.crate_name.as_str(),
+                        finding.definition.name.as_str(),
+                    ))
+                    .or_default()
+                    .extend(target_indices.iter().map(|target_index| {
+                        (finding.kind, finding.definition.kind, *target_index)
+                    }));
+            }
+        }
+        let mut known_items_by_crate: HashMap<&str, Vec<&KnownItemIdentity<'_>>> = HashMap::new();
+        for identity in target_indices_by_identity.keys() {
+            known_items_by_crate
+                .entry(identity.crate_name)
+                .or_default()
+                .push(identity);
         }
         let mut config_diagnostics = Vec::new();
         let mut active_overrides = Vec::new();
@@ -600,13 +674,16 @@ impl Config {
             .iter()
             .filter(|entry| targets.iter().any(|target| entry.applies_to(target.target)))
         {
-            let matching_items = targets
-                .iter()
-                .filter(|target| entry.applies_to(target.target))
-                .flat_map(TargetFragments::logical_items)
-                .collect::<HashSet<_>>()
+            let matching_items = logical_items_by_name
+                .get(&(entry.crate_name.as_str(), entry.item.as_str()))
                 .into_iter()
-                .filter(|item| entry.identifies(item))
+                .flatten()
+                .filter(|(item, target_indices)| {
+                    entry.identifies(item)
+                        && target_indices
+                            .iter()
+                            .any(|target_index| entry.applies_to(targets[*target_index].target))
+                })
                 .count();
             if matching_items == 0 {
                 config_diagnostics.push(ConfigDiagnostic {
@@ -624,16 +701,17 @@ impl Config {
             }
             active_overrides.push(entry);
             if entry.level == OverrideLevel::Expect
-                && !findings.iter().any(|finding| {
-                    entry.matches(finding)
-                        && target_indices_by_identity
-                            .get(&known_item_identity(finding.definition))
-                            .is_some_and(|target_indices| {
-                                target_indices.iter().any(|target_index| {
-                                    entry.applies_to(targets[*target_index].target)
-                                })
-                            })
-                })
+                && !finding_targets_by_name
+                    .get(&(entry.crate_name.as_str(), entry.item.as_str()))
+                    .into_iter()
+                    .flatten()
+                    .any(|(lint, definition_kind, target_index)| {
+                        entry.lint == *lint
+                            && entry
+                                .definition_kind
+                                .is_none_or(|kind| kind == *definition_kind)
+                            && entry.applies_to(targets[*target_index].target)
+                    })
             {
                 config_diagnostics.push(ConfigDiagnostic {
                     kind: ConfigDiagnosticKind::UnfulfilledExpectation,
@@ -646,11 +724,29 @@ impl Config {
             .iter()
             .filter(|entry| targets.iter().any(|target| entry.applies_to(target.target)))
             .filter(|entry| {
-                target_indices_by_identity
-                    .keys()
+                known_items_by_crate
+                    .get(entry.crate_name.as_str())
+                    .into_iter()
+                    .flatten()
                     .any(|item| entry.identifies(item))
             })
             .collect::<Vec<_>>();
+        let mut active_overrides_by_name: HashMap<(&str, &str), Vec<&LintOverride>> =
+            HashMap::new();
+        for entry in &active_overrides {
+            active_overrides_by_name
+                .entry((entry.crate_name.as_str(), entry.item.as_str()))
+                .or_default()
+                .push(entry);
+        }
+        let mut active_exclusions_by_crate: HashMap<&str, Vec<&DiagnosticExclusion>> =
+            HashMap::new();
+        for entry in &active_exclusions {
+            active_exclusions_by_crate
+                .entry(entry.crate_name.as_str())
+                .or_default()
+                .push(entry);
+        }
         let findings = findings
             .into_iter()
             .filter(|finding| {
@@ -659,11 +755,37 @@ impl Config {
                     .is_some_and(|target_indices| {
                         target_indices.iter().all(|target_index| {
                             let target = targets[*target_index].target;
-                            active_overrides
-                                .iter()
-                                .any(|entry| entry.matches(finding) && entry.applies_to(target))
-                                || active_exclusions
-                                    .iter()
+                            active_overrides_by_name
+                                .get(&(
+                                    finding.definition.crate_name.as_str(),
+                                    finding.definition.name.as_str(),
+                                ))
+                                .into_iter()
+                                .flatten()
+                                .any(|entry| {
+                                    entry.applies_to(target)
+                                        && (entry.matches(finding)
+                                            || target_findings.is_some()
+                                                && entry.definition_kind.is_none_or(|kind| {
+                                                    kind == finding.definition.kind
+                                                })
+                                                && finding_targets_by_name
+                                                    .get(&(
+                                                        finding.definition.crate_name.as_str(),
+                                                        finding.definition.name.as_str(),
+                                                    ))
+                                                    .is_some_and(|findings| {
+                                                        findings.contains(&(
+                                                            entry.lint,
+                                                            finding.definition.kind,
+                                                            *target_index,
+                                                        ))
+                                                    }))
+                                })
+                                || active_exclusions_by_crate
+                                    .get(finding.definition.crate_name.as_str())
+                                    .into_iter()
+                                    .flatten()
                                     .any(|entry| entry.matches(finding) && entry.applies_to(target))
                         })
                     })
@@ -701,6 +823,11 @@ struct LogicalItemIdentity<'a> {
     item: &'a str,
     kind: DefinitionKind,
 }
+
+type LogicalItemsByName<'a> =
+    HashMap<(&'a str, &'a str), Vec<(LogicalItemIdentity<'a>, Vec<usize>)>>;
+type FindingTargetsByName<'a> =
+    HashMap<(&'a str, &'a str), HashSet<(FindingKind, DefinitionKind, usize)>>;
 
 fn logical_item_identity<'a>(
     package_name: &'a str,
@@ -1623,6 +1750,66 @@ reason = "expect the Windows declaration to be dead"
     }
 
     #[test]
+    fn target_scoped_expectation_uses_target_local_findings() {
+        let directory = tempfile::tempdir().expect("temporary configuration directory");
+        let path = directory.path().join("hawk.toml");
+        std::fs::write(
+            &path,
+            r#"
+[[override]]
+lint = "hawk::dead_public"
+crate = "library"
+item = "unused"
+level = "expect"
+target = "cfg(windows)"
+reason = "expect the Windows declaration to be dead"
+"#,
+        )
+        .expect("write configuration");
+        let config = Config::load(directory.path(), Some(&path)).expect("load configuration");
+        let mut unix_fragment = fragment();
+        unix_fragment.definitions[0].id = test_id("unix-unused");
+        unix_fragment
+            .required_public_roots
+            .push(test_id("unix-unused"));
+        let mut windows_fragment = fragment();
+        windows_fragment.definitions[0].id = test_id("windows-unused");
+        let unix_fragments = vec![unix_fragment];
+        let windows_fragments = vec![windows_fragment];
+        let target_findings = vec![
+            analyze(&unix_fragments, &[], &candidate_crates(), &HashSet::new()),
+            analyze(
+                &windows_fragments,
+                &[],
+                &candidate_crates(),
+                &HashSet::new(),
+            ),
+        ];
+        let unix = target("aarch64-apple-darwin", &["unix"]);
+        let windows = target("x86_64-pc-windows-msvc", &["windows"]);
+
+        let applied = config.apply_aggregated_targets(
+            &[
+                TargetFragments {
+                    target: &unix,
+                    production: &unix_fragments,
+                    non_production: &[],
+                },
+                TargetFragments {
+                    target: &windows,
+                    production: &windows_fragments,
+                    non_production: &[],
+                },
+            ],
+            &target_findings,
+            Vec::new(),
+        );
+
+        assert!(applied.findings.is_empty());
+        assert!(applied.config_diagnostics.is_empty());
+    }
+
+    #[test]
     fn complementary_target_scoped_overrides_cover_every_compilation() {
         let directory = tempfile::tempdir().expect("temporary configuration directory");
         let path = directory.path().join("hawk.toml");
@@ -1672,6 +1859,134 @@ reason = "retain the Windows declaration"
                 },
             ],
             analyze(&all_fragments, &[], &candidate_crates(), &HashSet::new()),
+        );
+
+        assert!(applied.findings.is_empty());
+        assert!(applied.config_diagnostics.is_empty());
+    }
+
+    #[test]
+    fn complementary_target_scoped_overrides_match_target_local_lints() {
+        let directory = tempfile::tempdir().expect("temporary configuration directory");
+        let path = directory.path().join("hawk.toml");
+        std::fs::write(
+            &path,
+            r#"
+[[override]]
+lint = "hawk::dead_public"
+crate = "library"
+item = "unused"
+level = "allow"
+target = "cfg(unix)"
+reason = "retain the dead Unix declaration"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "library"
+item = "unused"
+level = "allow"
+target = "cfg(windows)"
+reason = "retain the live Windows declaration"
+"#,
+        )
+        .expect("write configuration");
+        let config = Config::load(directory.path(), Some(&path)).expect("load configuration");
+        let mut unix_fragment = fragment();
+        unix_fragment.definitions[0].id = test_id("unix-unused");
+        let mut windows_fragment = fragment();
+        windows_fragment.definitions[0].id = test_id("windows-unused");
+        windows_fragment
+            .conservative_roots
+            .push(test_id("windows-unused"));
+        let unix_fragments = vec![unix_fragment];
+        let windows_fragments = vec![windows_fragment];
+        let target_findings = vec![
+            analyze(&unix_fragments, &[], &candidate_crates(), &HashSet::new()),
+            analyze(
+                &windows_fragments,
+                &[],
+                &candidate_crates(),
+                &HashSet::new(),
+            ),
+        ];
+        let unix = target("aarch64-apple-darwin", &["unix"]);
+        let windows = target("x86_64-pc-windows-msvc", &["windows"]);
+
+        let applied = config.apply_aggregated_targets(
+            &[
+                TargetFragments {
+                    target: &unix,
+                    production: &unix_fragments,
+                    non_production: &[],
+                },
+                TargetFragments {
+                    target: &windows,
+                    production: &windows_fragments,
+                    non_production: &[],
+                },
+            ],
+            &target_findings,
+            target_findings[1].clone(),
+        );
+
+        assert!(applied.findings.is_empty());
+        assert!(applied.config_diagnostics.is_empty());
+    }
+
+    #[test]
+    fn aggregate_lint_override_suppresses_mixed_target_classifications() {
+        let directory = tempfile::tempdir().expect("temporary configuration directory");
+        let path = directory.path().join("hawk.toml");
+        std::fs::write(
+            &path,
+            r#"
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "library"
+item = "unused"
+kind = "function"
+level = "expect"
+reason = "retain the aggregate finding"
+"#,
+        )
+        .expect("write configuration");
+        let config = Config::load(directory.path(), Some(&path)).expect("load configuration");
+        let mut unix_fragment = fragment();
+        unix_fragment.definitions[0].id = test_id("unix-unused");
+        let mut windows_fragment = fragment();
+        windows_fragment.definitions[0].id = test_id("windows-unused");
+        windows_fragment
+            .conservative_roots
+            .push(test_id("windows-unused"));
+        let unix_fragments = vec![unix_fragment];
+        let windows_fragments = vec![windows_fragment];
+        let target_findings = vec![
+            analyze(&unix_fragments, &[], &candidate_crates(), &HashSet::new()),
+            analyze(
+                &windows_fragments,
+                &[],
+                &candidate_crates(),
+                &HashSet::new(),
+            ),
+        ];
+        let unix = target("aarch64-apple-darwin", &["unix"]);
+        let windows = target("x86_64-pc-windows-msvc", &["windows"]);
+
+        let applied = config.apply_aggregated_targets(
+            &[
+                TargetFragments {
+                    target: &unix,
+                    production: &unix_fragments,
+                    non_production: &[],
+                },
+                TargetFragments {
+                    target: &windows,
+                    production: &windows_fragments,
+                    non_production: &[],
+                },
+            ],
+            &target_findings,
+            target_findings[1].clone(),
         );
 
         assert!(applied.findings.is_empty());

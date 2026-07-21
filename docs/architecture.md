@@ -221,8 +221,10 @@ merges identities by physical source span and item kind, including a path
 module compiled into different crates; declarations without source spans use
 their diagnostic paths instead.
 
-The analysis combines fragments from every selected compilation target and
-feature profile, then computes two reachability closures:
+For each selected compilation target, the analysis combines fragments from
+every feature profile and computes two reachability closures. It then combines
+the target-local findings conservatively, so reachability never crosses between
+incompatible compilation targets:
 
 - **production live** begins at each configured production target entry point;
 - **non-production live** begins at executable entry points compiled for
