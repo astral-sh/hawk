@@ -22,8 +22,8 @@ use crate::toolchain::{
     RustToolchain, clear_protocol_environment, driver_executable, validate_driver_protocol,
 };
 use cargo_hawk_internal::graph::{
-    CollectionOptions, Definition, DefinitionIdentity, DefinitionKind, Finding, FindingKind,
-    FixPlan, FixTarget, Fragment, analyze_with_options,
+    CollectionOptions, Definition, DefinitionId, DefinitionIdentity, DefinitionKind, Finding,
+    FindingKind, FixPlan, FixTarget, Fragment, analyze_with_options,
 };
 
 #[derive(Debug, Parser)]
@@ -625,17 +625,17 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
     let mut renderer = DiagnosticRenderer::new(&workspace_root);
     let mut json_diagnostics = Vec::new();
     let mut diagnostic_count = 0;
-    let mut diagnostic_counts = BTreeMap::<String, BTreeMap<String, usize>>::new();
-    let definition_packages: HashMap<_, _> = production_fragments
+    let mut diagnostic_counts = (args.output_format == OutputFormat::Text)
+        .then(BTreeMap::<&str, BTreeMap<&str, usize>>::new);
+    let emitted_finding_ids: HashSet<_> = findings
+        .findings
         .iter()
-        .chain(&test_fragments)
-        .flat_map(|fragment| {
-            fragment
-                .definitions
-                .iter()
-                .map(|definition| (definition.id, fragment.package_name.as_str()))
-        })
+        .filter(|finding| args.only.is_none_or(|only| only.includes(finding.kind)))
+        .filter(|finding| lint_levels.level(finding.kind).is_emitted())
+        .map(|finding| finding.definition.id)
         .collect();
+    let definition_packages =
+        definition_packages(&production_fragments, &test_fragments, &emitted_finding_ids);
     let mut has_denied_diagnostic = false;
     let production_description = if production_products.len() == 1 {
         format!("binary `{}`", production_products[0].binary)
@@ -649,27 +649,20 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
         let level = lint_levels.level(finding.kind);
         if level.is_emitted() {
             diagnostic_count += 1;
-            *diagnostic_counts
-                .entry(finding.kind.code().to_owned())
-                .or_default()
-                .entry(
-                    definition_packages
-                        .get(&finding.definition.id)
-                        .copied()
-                        .unwrap_or(&finding.definition.crate_name)
-                        .to_owned(),
-                )
-                .or_default() += 1;
+            let package = definition_packages.get(&finding.definition.id).copied();
+            if let Some(diagnostic_counts) = &mut diagnostic_counts {
+                *diagnostic_counts
+                    .entry(finding.kind.code())
+                    .or_default()
+                    .entry(package.unwrap_or(&finding.definition.crate_name))
+                    .or_default() += 1;
+            }
             has_denied_diagnostic |= level == LintLevel::Deny;
             match args.output_format {
                 OutputFormat::Text => renderer
                     .write_diagnostic(finding, &production_description, level)
                     .expect("formatting diagnostics into a string cannot fail"),
-                OutputFormat::Json => json_diagnostics.push(json_finding(
-                    finding,
-                    level,
-                    definition_packages.get(&finding.definition.id).copied(),
-                )),
+                OutputFormat::Json => json_diagnostics.push(json_finding(finding, level, package)),
             }
         }
     }
@@ -677,11 +670,13 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
         let level = lint_levels.level(diagnostic.kind);
         if level.is_emitted() {
             diagnostic_count += 1;
-            *diagnostic_counts
-                .entry(diagnostic.kind.code().to_owned())
-                .or_default()
-                .entry("configuration".to_owned())
-                .or_default() += 1;
+            if let Some(diagnostic_counts) = &mut diagnostic_counts {
+                *diagnostic_counts
+                    .entry(diagnostic.kind.code())
+                    .or_default()
+                    .entry("configuration")
+                    .or_default() += 1;
+            }
             has_denied_diagnostic |= level == LintLevel::Deny;
             match args.output_format {
                 OutputFormat::Text => renderer
@@ -706,7 +701,9 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
             renderer
                 .write_summary(
                     diagnostic_count,
-                    &diagnostic_counts,
+                    diagnostic_counts
+                        .as_ref()
+                        .expect("text output collects diagnostic counts"),
                     &production_summary,
                     &compilation_target,
                 )
@@ -1449,6 +1446,28 @@ fn write_fix_plan(path: &Path, fix_plan: &FixPlan) -> Result<()> {
 
 type DefinitionIndex<'a> = HashMap<DefinitionIdentity<'a>, Vec<&'a Definition>>;
 
+fn definition_packages<'a>(
+    production_fragments: &'a [Fragment],
+    test_fragments: &'a [Fragment],
+    emitted_finding_ids: &HashSet<DefinitionId>,
+) -> HashMap<DefinitionId, &'a str> {
+    if emitted_finding_ids.is_empty() {
+        return HashMap::new();
+    }
+
+    production_fragments
+        .iter()
+        .chain(test_fragments)
+        .flat_map(|fragment| {
+            fragment.definitions.iter().filter_map(|definition| {
+                emitted_finding_ids
+                    .contains(&definition.id)
+                    .then_some((definition.id, fragment.package_name.as_str()))
+            })
+        })
+        .collect()
+}
+
 fn definition_index(fragments: &[Fragment]) -> DefinitionIndex<'_> {
     let mut definitions: DefinitionIndex<'_> = HashMap::new();
     for definition in fragments.iter().flat_map(|fragment| &fragment.definitions) {
@@ -1680,6 +1699,7 @@ fn clear_fragments(graph_dir: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
+    use std::collections::HashSet;
     use std::ffi::OsString;
     use std::path::{Path, PathBuf};
 
@@ -1688,8 +1708,8 @@ mod tests {
     use crate::config::ConfigDiagnosticKind;
     use crate::protocol::ConsumerMode;
     use cargo_hawk_internal::graph::{
-        Definition, DefinitionId, DefinitionKind, Finding, FindingKind, FixPlan, FixTarget, Span,
-        VisibilityReduction,
+        Definition, DefinitionId, DefinitionKind, Finding, FindingKind, FixPlan, FixTarget,
+        Fragment, Span, VisibilityReduction,
     };
 
     fn test_id(value: &str) -> DefinitionId {
@@ -1701,8 +1721,8 @@ mod tests {
 
     use super::{
         Args, CargoInvocation, DEFAULT_TARGET_DIR_COMPONENT_MAX_BYTES, DiagnosticRenderer,
-        LintLevel, LintLevels, ProductionSelection, default_target_dir, fix_plan_signature,
-        json_definition_kind, json_finding_kind,
+        LintLevel, LintLevels, ProductionSelection, default_target_dir, definition_packages,
+        fix_plan_signature, json_definition_kind, json_finding_kind,
     };
 
     fn render_diagnostic(finding: &Finding<'_>) -> String {
@@ -1846,6 +1866,71 @@ mod tests {
             fix_plan_signature(&forward, &empty).expect("serialize production fix plan"),
             fix_plan_signature(&empty, &forward).expect("serialize non-production fix plan")
         );
+    }
+
+    #[test]
+    fn definition_packages_only_indexes_emitted_findings() {
+        let definition = |id: &str, name: &str| Definition {
+            id: test_id(id),
+            crate_name: "renamed_library".into(),
+            name: name.into(),
+            kind: DefinitionKind::Function,
+            span: None,
+            declaration_span: None,
+            expansion_span: None,
+            public_api: true,
+            restricted_visible_api: false,
+            crate_visible_api: false,
+            visible_reexport_api: false,
+            module_scope: vec![],
+            uniform_field_group: None,
+            dead_code_allowed: false,
+        };
+        let fragment = |package_name: &str, definitions: Vec<Definition>| Fragment {
+            protocol_version: crate::protocol::ProtocolVersion,
+            package_name: package_name.into(),
+            crate_name: "renamed_library".into(),
+            crate_id: test_id(package_name),
+            crate_root: None,
+            is_product_root: false,
+            test_surface: false,
+            definitions,
+            edges: vec![],
+            roots: vec![],
+            conservative_roots: vec![],
+            required_public_roots: vec![],
+        };
+        let production = vec![fragment(
+            "library-package",
+            vec![
+                definition("production-emitted", "production_emitted"),
+                definition("production-suppressed", "production_suppressed"),
+            ],
+        )];
+        let tests = vec![fragment(
+            "test-package",
+            vec![
+                definition("test-emitted", "test_emitted"),
+                definition("test-suppressed", "test_suppressed"),
+            ],
+        )];
+        let emitted_finding_ids =
+            HashSet::from([test_id("production-emitted"), test_id("test-emitted")]);
+
+        let packages = definition_packages(&production, &tests, &emitted_finding_ids);
+
+        assert_eq!(packages.len(), 2);
+        assert_eq!(
+            packages.get(&test_id("production-emitted")),
+            Some(&"library-package")
+        );
+        assert_eq!(
+            packages.get(&test_id("test-emitted")),
+            Some(&"test-package")
+        );
+        assert!(!packages.contains_key(&test_id("production-suppressed")));
+        assert!(!packages.contains_key(&test_id("test-suppressed")));
+        assert!(definition_packages(&production, &tests, &HashSet::new()).is_empty());
     }
 
     #[test]

@@ -122,7 +122,7 @@ where
     pub(crate) fn write_summary(
         &mut self,
         diagnostic_count: usize,
-        diagnostic_counts: &BTreeMap<String, BTreeMap<String, usize>>,
+        diagnostic_counts: &BTreeMap<&str, BTreeMap<&str, usize>>,
         production_summary: &str,
         compilation_target: &str,
     ) -> std::fmt::Result {
