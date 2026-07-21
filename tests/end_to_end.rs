@@ -2139,7 +2139,7 @@ fn reports_only_dead_public_findings_as_json() {
     context.assert_success(&output);
     let report: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("stdout contains one JSON report");
-    assert_eq!(report["schema_version"], 2);
+    assert_eq!(report["schema_version"], 3);
     assert_eq!(report["summary"]["diagnostic_count"], 14);
     let diagnostics = report["diagnostics"]
         .as_array()
