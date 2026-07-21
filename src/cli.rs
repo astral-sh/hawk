@@ -625,8 +625,7 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
     let mut renderer = DiagnosticRenderer::new(&workspace_root);
     let mut json_diagnostics = Vec::new();
     let mut diagnostic_count = 0;
-    let mut diagnostic_counts = (args.output_format == OutputFormat::Text)
-        .then(BTreeMap::<&str, BTreeMap<&str, usize>>::new);
+    let mut diagnostic_counts = BTreeMap::<&str, BTreeMap<&str, usize>>::new();
     let emitted_finding_ids: HashSet<_> = findings
         .findings
         .iter()
@@ -650,7 +649,7 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
         if level.is_emitted() {
             diagnostic_count += 1;
             let package = definition_packages.get(&finding.definition.id).copied();
-            if let Some(diagnostic_counts) = &mut diagnostic_counts {
+            if args.output_format == OutputFormat::Text {
                 *diagnostic_counts
                     .entry(finding.kind.code())
                     .or_default()
@@ -670,7 +669,7 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
         let level = lint_levels.level(diagnostic.kind);
         if level.is_emitted() {
             diagnostic_count += 1;
-            if let Some(diagnostic_counts) = &mut diagnostic_counts {
+            if args.output_format == OutputFormat::Text {
                 *diagnostic_counts
                     .entry(diagnostic.kind.code())
                     .or_default()
@@ -701,9 +700,7 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
             renderer
                 .write_summary(
                     diagnostic_count,
-                    diagnostic_counts
-                        .as_ref()
-                        .expect("text output collects diagnostic counts"),
+                    &diagnostic_counts,
                     &production_summary,
                     &compilation_target,
                 )
@@ -1446,6 +1443,7 @@ fn write_fix_plan(path: &Path, fix_plan: &FixPlan) -> Result<()> {
 
 type DefinitionIndex<'a> = HashMap<DefinitionIdentity<'a>, Vec<&'a Definition>>;
 
+/// Maps emitted finding definitions to Cargo packages without indexing unrelated definitions.
 fn definition_packages<'a>(
     production_fragments: &'a [Fragment],
     test_fragments: &'a [Fragment],
