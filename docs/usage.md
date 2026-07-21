@@ -183,8 +183,12 @@ the ending line and column are exclusive. Nested findings are collapsed
 beneath their containing declaration. Hawk skips fields, enum variants,
 re-exports, macro-generated or cfg-dependent declarations, items
 whose attributes do not retain a complete source range, and declarations
-with remaining compiled callers. The preview reports how many findings were
-skipped for each reason. Configuration diagnostics remain visible.
+with remaining compiled callers, incomplete descendants, or explicitly
+retained descendants. Public
+declarations reachable from `#[used]` registrations or containing
+`#[allow(dead_code)]` or `#[expect(dead_code)]` declarations are retained. The preview
+reports how many findings were skipped for each reason. Configuration
+diagnostics remain visible.
 
 Pruning currently supports preview only. Applying a removal plan, formatting,
 and rechecking to a fixed point are not yet supported, so `--prune` without

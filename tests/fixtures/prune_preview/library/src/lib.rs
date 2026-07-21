@@ -42,3 +42,52 @@ pub fn cfg_dependent() {}
 
 #[cfg(test)]
 pub fn cfg_dependent() {}
+
+pub mod blocked_outer_with_dead_child {
+    pub(crate) fn called() {}
+    pub mod removable_inner {}
+}
+
+fn caller_outside_outer() {
+    blocked_outer_with_dead_child::called();
+}
+
+pub mod config_protected {
+    pub fn retained_child() {}
+}
+
+pub mod inner_cfg_module {
+    #![cfg(not(test))]
+    pub fn cfg_dependent_child() {}
+}
+
+pub mod inner_cfg_attr_module {
+    #![cfg_attr(test, allow(unused_variables))]
+    pub fn cfg_attr_dependent_child() {}
+}
+
+pub mod dead_out_of_line;
+
+pub mod cfg_out_of_line;
+
+pub mod registered_callbacks {
+    pub extern "C" fn callback() {}
+
+    #[used]
+    static CALLBACK: extern "C" fn() = callback;
+}
+
+pub fn contains_used_static() {
+    #[used]
+    static KEEP: [u8; 1] = [1];
+}
+
+pub fn contains_allowed_function() {
+    #[allow(dead_code)]
+    fn keep() {}
+}
+
+pub fn contains_expected_function() {
+    #[expect(dead_code)]
+    fn keep() {}
+}

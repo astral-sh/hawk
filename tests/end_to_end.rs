@@ -1002,15 +1002,60 @@ fn prune_preview_reports_complete_outermost_declarations_without_editing_source(
 
     context.assert_success(&output);
     insta::assert_snapshot!(context.normalized_stdout(&output), @r###"
-    hawk: prune preview: 3 removable declaration candidate(s)
+    hawk: prune preview: 5 removable declaration candidate(s)
       library/src/lib.rs:3:1-5:28: `library::documented_dead`
       library/src/lib.rs:7:1-9:2: `library::DeadParent`
       library/src/lib.rs:11:1-13:2: `library::dead_outer`
-    hawk: prune preview: skipped 9 finding(s) (2 contained, 1 field/variant/re-export, 2 without a complete source range, 4 with remaining uses)
+      library/src/lib.rs:48:5-48:31: `library::blocked_outer_with_dead_child::removable_inner`
+      library/src/lib.rs:69:1-69:26: `library::dead_out_of_line`
+    hawk: prune preview: skipped 21 finding(s) (4 contained, 1 field/variant/re-export, 7 without a complete source range, 9 with remaining uses or retained descendants)
     hawk: prune preview: no source files were modified
     "###);
     let after = fs::read_to_string(library_path).expect("read source after prune preview");
     assert_eq!(after, before);
+}
+
+#[test]
+fn ordinary_checks_do_not_collect_declaration_spans_or_diagnose_used_registrations() {
+    let context = HawkTestContext::new("prune_preview");
+    let graph_dir = tempfile::tempdir().expect("temporary graph directory");
+    let output = context
+        .command()
+        .arg("--graph-dir")
+        .arg(graph_dir.path())
+        .output()
+        .expect("run cargo-hawk");
+
+    context.assert_success(&output);
+    let stdout = context.normalized_stdout(&output);
+    assert!(!stdout.contains("warning[hawk::dead_public]: public module `registered_callbacks`"));
+    assert!(!stdout.contains("warning[hawk::dead_public]: `registered_callbacks::callback`"));
+
+    let run_dir = fs::read_dir(graph_dir.path())
+        .expect("read graph directory")
+        .map(|entry| entry.expect("read graph entry"))
+        .find(|entry| entry.file_type().expect("read graph entry type").is_dir())
+        .expect("retained graph run directory")
+        .path();
+    let production_dir = run_dir
+        .join("feature-profiles")
+        .join("0-all-features")
+        .join("production");
+    let fragments = fs::read_dir(&production_dir)
+        .expect("read production graph directory")
+        .map(|entry| entry.expect("read production graph entry").path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "json")
+        })
+        .map(|path| fs::read_to_string(path).expect("read production fragment"))
+        .collect::<Vec<_>>();
+    assert!(!fragments.is_empty());
+    assert!(
+        fragments
+            .iter()
+            .all(|fragment| !fragment.contains("\"declaration_span\""))
+    );
 }
 
 #[test]

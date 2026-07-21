@@ -2,3 +2,10 @@
 package = "app"
 bin = "app"
 reason = "exercise prune preview"
+
+[[override]]
+lint = "hawk::dead_public"
+crate = "library"
+item = "config_protected::retained_child"
+level = "allow"
+reason = "retain the configured child during prune previews"

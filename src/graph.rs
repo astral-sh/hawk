@@ -9,15 +9,20 @@ use crate::protocol::ProtocolVersion;
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct CollectionOptions {
     preserve_uniform_field_visibility: bool,
+    collect_declaration_spans: bool,
 }
 
 impl CollectionOptions {
     const DEFAULT: &'static str = "default";
     const PRESERVE_UNIFORM_FIELD_VISIBILITY: &'static str = "preserve-uniform-field-visibility";
+    const COLLECT_DECLARATION_SPANS: &'static str = "collect-declaration-spans";
+    const PRESERVE_AND_COLLECT: &'static str =
+        "preserve-uniform-field-visibility,collect-declaration-spans";
 
     pub const fn new(preserve_uniform_field_visibility: bool) -> Self {
         Self {
             preserve_uniform_field_visibility,
+            collect_declaration_spans: false,
         }
     }
 
@@ -25,11 +30,25 @@ impl CollectionOptions {
         self.preserve_uniform_field_visibility
     }
 
+    #[must_use]
+    pub const fn with_declaration_spans(mut self) -> Self {
+        self.collect_declaration_spans = true;
+        self
+    }
+
+    pub const fn collect_declaration_spans(self) -> bool {
+        self.collect_declaration_spans
+    }
+
     pub const fn as_env_value(self) -> &'static str {
-        if self.preserve_uniform_field_visibility {
-            Self::PRESERVE_UNIFORM_FIELD_VISIBILITY
-        } else {
-            Self::DEFAULT
+        match (
+            self.preserve_uniform_field_visibility,
+            self.collect_declaration_spans,
+        ) {
+            (false, false) => Self::DEFAULT,
+            (true, false) => Self::PRESERVE_UNIFORM_FIELD_VISIBILITY,
+            (false, true) => Self::COLLECT_DECLARATION_SPANS,
+            (true, true) => Self::PRESERVE_AND_COLLECT,
         }
     }
 
@@ -37,6 +56,8 @@ impl CollectionOptions {
         match value {
             None | Some(Self::DEFAULT) => Some(Self::default()),
             Some(Self::PRESERVE_UNIFORM_FIELD_VISIBILITY) => Some(Self::new(true)),
+            Some(Self::COLLECT_DECLARATION_SPANS) => Some(Self::default().with_declaration_spans()),
+            Some(Self::PRESERVE_AND_COLLECT) => Some(Self::new(true).with_declaration_spans()),
             Some(_) => None,
         }
     }
@@ -86,6 +107,7 @@ pub struct Definition {
     pub name: String,
     pub kind: DefinitionKind,
     pub span: Option<Span>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub declaration_span: Option<DeclarationSpan>,
     pub expansion_span: Option<ExpansionSpan>,
     pub public_api: bool,

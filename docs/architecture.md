@@ -229,7 +229,7 @@ The analysis then computes two reachability closures:
 
 Both closures include conservative roots, currently used for trait-associated
 implementation code whose dispatch is not safely modeled by direct call
-edges.
+edges and exported or `#[used]` declarations whose execution may be indirect.
 
 Separately, Hawk computes the declarations whose public visibility is
 required. Any compiled cross-crate reference requires the referenced

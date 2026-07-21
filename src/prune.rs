@@ -22,11 +22,12 @@ struct PruneCandidate<'a> {
 impl<'a> PrunePlan<'a> {
     pub(crate) fn build(
         findings: &[&Finding<'a>],
+        retained_dead_definitions: &[&'a Definition],
         production_fragments: &'a [Fragment],
         test_fragments: &'a [Fragment],
     ) -> Self {
         let mut unsupported_definitions = Vec::new();
-        let mut incomplete_span = 0;
+        let mut incomplete_definitions = Vec::new();
         let mut candidates = Vec::new();
         for finding in findings {
             let definition = finding.definition;
@@ -38,11 +39,25 @@ impl<'a> PrunePlan<'a> {
                 continue;
             }
             let Some(span) = definition.declaration_span.as_ref() else {
-                incomplete_span += 1;
+                incomplete_definitions.push(definition);
                 continue;
             };
             candidates.push(PruneCandidate { definition, span });
         }
+
+        let incomplete_modules: Vec<_> = incomplete_definitions
+            .iter()
+            .copied()
+            .filter(|definition| definition.kind == DefinitionKind::Module)
+            .collect();
+        let mut incomplete_span = incomplete_definitions.len();
+        candidates.retain(|candidate| {
+            let contained = incomplete_modules
+                .iter()
+                .any(|module| module_contains(module, candidate.definition));
+            incomplete_span += usize::from(contained);
+            !contained
+        });
 
         candidates.sort_unstable_by(|left, right| {
             left.span
@@ -56,39 +71,13 @@ impl<'a> PrunePlan<'a> {
                 .then_with(|| left.definition.name.cmp(&right.definition.name))
         });
 
-        let mut outermost = Vec::new();
-        let mut contained = 0;
-        for candidate in candidates {
-            if outermost
-                .iter()
-                .any(|parent: &PruneCandidate<'_>| contains(parent.span, candidate.span))
-            {
-                contained += 1;
-            } else {
-                outermost.push(candidate);
-            }
-        }
-        let mut unsupported = 0;
-        for definition in unsupported_definitions {
-            let is_contained = definition.span.as_ref().is_some_and(|span| {
-                outermost
-                    .iter()
-                    .any(|candidate| contains_location(candidate.span, span))
-            });
-            if is_contained {
-                contained += 1;
-            } else {
-                unsupported += 1;
-            }
-        }
-
-        let candidate_by_identity: HashMap<_, _> = outermost
+        let candidate_by_identity: HashMap<_, _> = candidates
             .iter()
             .enumerate()
             .map(|(index, candidate)| (identity(candidate.definition), index))
             .collect();
         let mut candidates_by_file: HashMap<&str, Vec<usize>> = HashMap::new();
-        for (index, candidate) in outermost.iter().enumerate() {
+        for (index, candidate) in candidates.iter().enumerate() {
             candidates_by_file
                 .entry(&candidate.span.file)
                 .or_default()
@@ -106,15 +95,58 @@ impl<'a> PrunePlan<'a> {
             }
         }
 
-        let mut dependencies = vec![Vec::new(); outermost.len()];
-        let mut blocked = vec![false; outermost.len()];
+        let mut dependencies = vec![Vec::new(); candidates.len()];
+        for (child, candidate) in candidates.iter().enumerate() {
+            dependencies[child].extend(
+                candidates
+                    .iter()
+                    .enumerate()
+                    .filter(|(parent, parent_candidate)| {
+                        *parent != child && contains_candidate(parent_candidate, candidate)
+                    })
+                    .map(|(parent, _)| parent),
+            );
+        }
+        let mut blocked = vec![false; candidates.len()];
         let mut queue = VecDeque::new();
         let mut owner_cache = HashMap::new();
+        for definition in retained_dead_definitions {
+            for (index, candidate) in candidates.iter().enumerate() {
+                if contains_definition(candidate, definition) && !blocked[index] {
+                    blocked[index] = true;
+                    queue.push_back(index);
+                }
+            }
+        }
+        for definition in &incomplete_definitions {
+            for (index, candidate) in candidates.iter().enumerate() {
+                if contains_definition(candidate, definition) && !blocked[index] {
+                    blocked[index] = true;
+                    queue.push_back(index);
+                }
+            }
+        }
+        for root in fragments
+            .clone()
+            .flat_map(|fragment| &fragment.conservative_roots)
+        {
+            if let Some(index) = candidate_owner(
+                *root,
+                &candidates,
+                &candidate_by_id,
+                &definition_by_id,
+                &candidates_by_file,
+            ) && !blocked[index]
+            {
+                blocked[index] = true;
+                queue.push_back(index);
+            }
+        }
         for edge in fragments.clone().flat_map(|fragment| &fragment.edges) {
             let target = *owner_cache.entry(edge.to).or_insert_with(|| {
                 candidate_owner(
                     edge.to,
-                    &outermost,
+                    &candidates,
                     &candidate_by_id,
                     &definition_by_id,
                     &candidates_by_file,
@@ -126,7 +158,7 @@ impl<'a> PrunePlan<'a> {
             let source = *owner_cache.entry(edge.from).or_insert_with(|| {
                 candidate_owner(
                     edge.from,
-                    &outermost,
+                    &candidates,
                     &candidate_by_id,
                     &definition_by_id,
                     &candidates_by_file,
@@ -149,11 +181,44 @@ impl<'a> PrunePlan<'a> {
         }
 
         let remaining_uses = blocked.iter().filter(|blocked| **blocked).count();
-        let candidates = outermost
+        let unblocked = candidates
             .into_iter()
             .zip(blocked)
             .filter_map(|(candidate, blocked)| (!blocked).then_some(candidate))
-            .collect();
+            .collect::<Vec<_>>();
+        let mut contained = 0;
+        let candidates = unblocked
+            .iter()
+            .enumerate()
+            .filter_map(|(index, candidate)| {
+                let is_contained =
+                    unblocked
+                        .iter()
+                        .enumerate()
+                        .any(|(parent, parent_candidate)| {
+                            parent != index
+                                && contains_candidate(parent_candidate, candidate)
+                                && (!contains_candidate(candidate, parent_candidate)
+                                    || parent < index)
+                        });
+                contained += usize::from(is_contained);
+                (!is_contained).then_some(PruneCandidate {
+                    definition: candidate.definition,
+                    span: candidate.span,
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut unsupported = 0;
+        for definition in unsupported_definitions {
+            if candidates
+                .iter()
+                .any(|candidate| contains_definition(candidate, definition))
+            {
+                contained += 1;
+            } else {
+                unsupported += 1;
+            }
+        }
         Self {
             candidates,
             contained,
@@ -188,7 +253,7 @@ impl<'a> PrunePlan<'a> {
         if skipped > 0 {
             writeln!(
                 output,
-                "hawk: prune preview: skipped {skipped} finding(s) ({} contained, {} field/variant/re-export, {} without a complete source range, {} with remaining uses)",
+                "hawk: prune preview: skipped {skipped} finding(s) ({} contained, {} field/variant/re-export, {} without a complete source range, {} with remaining uses or retained descendants)",
                 self.contained, self.unsupported, self.incomplete_span, self.remaining_uses
             )?;
         }
@@ -215,14 +280,45 @@ fn candidate_owner(
     if let Some(index) = candidate_by_id.get(&id) {
         return Some(*index);
     }
-    let span = definition_by_id
-        .get(&id)
-        .and_then(|definition| definition.span.as_ref())?;
-    candidates_by_file
-        .get(span.file.as_str())?
-        .iter()
-        .copied()
-        .find(|index| contains_location(candidates[*index].span, span))
+    let span = definition_by_id.get(&id).copied()?;
+    let physical = span.span.as_ref().and_then(|span| {
+        candidates_by_file
+            .get(span.file.as_str())
+            .into_iter()
+            .flatten()
+            .copied()
+            .filter(|index| contains_location(candidates[*index].span, span))
+            .max_by_key(|index| candidates[*index].definition.name.matches("::").count())
+    });
+    physical.or_else(|| {
+        candidates
+            .iter()
+            .enumerate()
+            .filter(|(_, candidate)| module_contains(candidate.definition, span))
+            .max_by_key(|(_, candidate)| candidate.definition.name.matches("::").count())
+            .map(|(index, _)| index)
+    })
+}
+
+fn contains_candidate(parent: &PruneCandidate<'_>, child: &PruneCandidate<'_>) -> bool {
+    contains(parent.span, child.span) || module_contains(parent.definition, child.definition)
+}
+
+fn contains_definition(parent: &PruneCandidate<'_>, child: &Definition) -> bool {
+    child
+        .span
+        .as_ref()
+        .is_some_and(|span| contains_location(parent.span, span))
+        || module_contains(parent.definition, child)
+}
+
+fn module_contains(parent: &Definition, child: &Definition) -> bool {
+    parent.kind == DefinitionKind::Module
+        && parent.crate_name == child.crate_name
+        && child
+            .name
+            .strip_prefix(&parent.name)
+            .is_some_and(|suffix| suffix.starts_with("::"))
 }
 
 fn contains(parent: &DeclarationSpan, child: &DeclarationSpan) -> bool {

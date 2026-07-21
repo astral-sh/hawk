@@ -459,7 +459,12 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
         target_dir: &target_dir,
         driver: &driver,
         toolchain: &toolchain,
-        collection_options: CollectionOptions::new(config.preserve_uniform_field_visibility()),
+        collection_options: if args.prune {
+            CollectionOptions::new(config.preserve_uniform_field_visibility())
+                .with_declaration_spans()
+        } else {
+            CollectionOptions::new(config.preserve_uniform_field_visibility())
+        },
         doctest_packages: doctest_packages.as_deref(),
     };
     let mut production_fragments = Vec::new();
@@ -613,6 +618,7 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
             .any(|finding| lint_levels.level(finding.kind) == LintLevel::Deny);
         let plan = PrunePlan::build(
             &enabled_dead_findings,
+            &findings.retained_dead_definitions,
             &production_fragments,
             &test_fragments,
         );

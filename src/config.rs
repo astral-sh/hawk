@@ -123,6 +123,7 @@ pub(crate) struct ConfigDiagnostic<'a> {
 
 pub(crate) struct AppliedFindings<'findings, 'config> {
     pub(crate) findings: Vec<Finding<'findings>>,
+    pub(crate) retained_dead_definitions: Vec<&'findings Definition>,
     pub(crate) config_diagnostics: Vec<ConfigDiagnostic<'config>>,
 }
 
@@ -598,15 +599,21 @@ impl Config {
             .filter(|entry| entry.applies_to(target))
             .filter(|entry| known_items.iter().any(|item| entry.identifies(item)))
             .collect::<Vec<_>>();
+        let mut retained_dead_definitions = Vec::new();
         let findings = findings
             .into_iter()
             .filter(|finding| {
-                !active_overrides.iter().any(|entry| entry.matches(finding))
-                    && !active_exclusions.iter().any(|entry| entry.matches(finding))
+                let suppressed = active_overrides.iter().any(|entry| entry.matches(finding))
+                    || active_exclusions.iter().any(|entry| entry.matches(finding));
+                if suppressed && finding.kind == FindingKind::DeadPublic {
+                    retained_dead_definitions.push(finding.definition);
+                }
+                !suppressed
             })
             .collect();
         AppliedFindings {
             findings,
+            retained_dead_definitions,
             config_diagnostics,
         }
     }

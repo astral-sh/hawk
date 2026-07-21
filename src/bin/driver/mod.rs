@@ -17,6 +17,7 @@ use rustc_hir::def::{CtorOf, DefKind, Res};
 use rustc_hir::def_id::{CRATE_DEF_ID, DefId, LocalDefId};
 use rustc_hir::intravisit::{self, Visitor};
 use rustc_interface::interface;
+use rustc_lexer::{FrontmatterAllowed, TokenKind};
 use rustc_lint_defs::builtin::DEAD_CODE;
 use rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrFlags;
 use rustc_middle::ty::{self, TyCtxt};
@@ -460,6 +461,7 @@ fn collect_fragment(
             kind.unwrap_or(DefinitionKind::Other),
             public_api,
             visibility.as_deref(),
+            collection_options,
         ));
         defined.insert(def_id);
     }
@@ -506,6 +508,7 @@ fn collect_fragment(
                         DefinitionKind::Field,
                         public_api,
                         visibility.as_deref(),
+                        collection_options,
                     );
                     field_definition
                         .uniform_field_group
@@ -524,6 +527,7 @@ fn collect_fragment(
                         DefinitionKind::EnumVariant,
                         is_public_variant(tcx, variant.def_id, test_surface),
                         visibility_modifier(tcx, variant.def_id).as_deref(),
+                        collection_options,
                     ));
                     defined.insert(variant.def_id);
                     adt_members.push((variant.def_id, item.owner_id.def_id));
@@ -542,6 +546,7 @@ fn collect_fragment(
                 DefinitionKind::Other,
                 false,
                 visibility_modifier(tcx, def_id).as_deref(),
+                collection_options,
             ));
         }
     }
@@ -799,7 +804,11 @@ fn collect_fragment(
             })
             .filter(|def_id| {
                 let attrs = tcx.codegen_fn_attrs(def_id.to_def_id());
-                attrs.flags.contains(CodegenFnAttrFlags::NO_MANGLE) || attrs.symbol_name.is_some()
+                attrs.flags.intersects(
+                    CodegenFnAttrFlags::NO_MANGLE
+                        | CodegenFnAttrFlags::USED_COMPILER
+                        | CodegenFnAttrFlags::USED_LINKER,
+                ) || attrs.symbol_name.is_some()
             })
             .map(|def_id| id(tcx, def_id.to_def_id())),
     );
@@ -1015,6 +1024,7 @@ fn definition(
     kind: DefinitionKind,
     public_api: bool,
     visibility: Option<&str>,
+    collection_options: CollectionOptions,
 ) -> Definition {
     let has_explicit_visibility =
         visibility.is_some_and(|visibility| visibility.starts_with("pub"));
@@ -1030,7 +1040,9 @@ fn definition(
         name: definition_name(tcx, def_id, kind),
         kind,
         span: span(tcx, def_id),
-        declaration_span: declaration_span(tcx, def_id, kind),
+        declaration_span: (collection_options.collect_declaration_spans() && public_api)
+            .then(|| declaration_span(tcx, def_id, kind))
+            .flatten(),
         expansion_span: expansion_span(tcx, def_id),
         public_api,
         restricted_visible_api,
@@ -1040,10 +1052,11 @@ fn definition(
         visible_reexport_api: kind == DefinitionKind::Reexport && has_explicit_visibility,
         module_scope: module_scope(tcx, def_id),
         uniform_field_group: None,
-        dead_code_allowed: tcx
-            .lint_level_spec_at_node(DEAD_CODE, tcx.local_def_id_to_hir_id(def_id))
-            .level()
-            == Level::Allow,
+        dead_code_allowed: matches!(
+            tcx.lint_level_spec_at_node(DEAD_CODE, tcx.local_def_id_to_hir_id(def_id))
+                .level(),
+            Level::Allow | Level::Expect
+        ),
     }
 }
 
@@ -1185,11 +1198,14 @@ fn declaration_span(
     let span = item_span.with_lo(start);
     let source_map = tcx.sess.source_map();
     let source = source_map.span_to_snippet(span).ok()?;
-    let compact_source: String = source
-        .chars()
-        .filter(|character| !character.is_ascii_whitespace())
-        .collect();
-    if compact_source.contains("#[cfg") {
+    if contains_cfg_attribute(&source) {
+        return None;
+    }
+    if kind == DefinitionKind::Module
+        && let Node::Item(item) = tcx.hir_node_by_def_id(def_id)
+        && let hir::ItemKind::Mod(_, module) = item.kind
+        && contains_cfg_attribute(&source_map.span_to_snippet(module.spans.inner_span).ok()?)
+    {
         return None;
     }
     let start = source_map.lookup_char_pos(span.lo());
@@ -1206,6 +1222,31 @@ fn declaration_span(
         end_line: end.line,
         end_column: end.col.to_usize() + 1,
     })
+}
+
+fn contains_cfg_attribute(source: &str) -> bool {
+    let mut offset = 0;
+    let mut state = 0;
+    for token in rustc_lexer::tokenize(source, FrontmatterAllowed::No) {
+        let start = offset;
+        offset += token.len as usize;
+        if matches!(
+            token.kind,
+            TokenKind::Whitespace | TokenKind::LineComment { .. } | TokenKind::BlockComment { .. }
+        ) {
+            continue;
+        }
+        let text = &source[start..offset];
+        state = match (state, token.kind) {
+            (_, TokenKind::Pound) => 1,
+            (1, TokenKind::Bang) => 2,
+            (1 | 2, TokenKind::OpenBracket) => 3,
+            (3, TokenKind::Ident) if matches!(text, "cfg" | "cfg_attr") => return true,
+            (3, TokenKind::RawIdent) if matches!(text, "r#cfg" | "r#cfg_attr") => return true,
+            _ => 0,
+        };
+    }
+    false
 }
 
 fn source_span(tcx: TyCtxt<'_>, span: rustc_span::Span) -> Span {
@@ -1443,9 +1484,10 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        compact_visibility_modifier, normalize_source_path, parse_collection_options,
-        parse_consumer_mode, parse_run_id, source_item_at_or_after, type_alias_interface_targets,
-        uniform_field_group, validate_frontend_protocol_version, write_fragment,
+        compact_visibility_modifier, contains_cfg_attribute, normalize_source_path,
+        parse_collection_options, parse_consumer_mode, parse_run_id, source_item_at_or_after,
+        type_alias_interface_targets, uniform_field_group, validate_frontend_protocol_version,
+        write_fragment,
     };
     use cargo_hawk_internal::graph::{CollectionOptions, Edge, EdgeKind, Fragment};
 
@@ -1508,12 +1550,54 @@ mod tests {
             .expect("uniform field collection option")
             .preserve_uniform_field_visibility()
         );
+        let prune = parse_collection_options(Some(OsStr::new(
+            CollectionOptions::default()
+                .with_declaration_spans()
+                .as_env_value(),
+        )))
+        .expect("prune collection option");
+        assert!(prune.collect_declaration_spans());
+        assert!(!prune.preserve_uniform_field_visibility());
+        let combined = parse_collection_options(Some(OsStr::new(
+            CollectionOptions::new(true)
+                .with_declaration_spans()
+                .as_env_value(),
+        )))
+        .expect("combined collection options");
+        assert!(combined.collect_declaration_spans());
+        assert!(combined.preserve_uniform_field_visibility());
         insta::assert_snapshot!(
             parse_collection_options(Some(OsStr::new("unknown")))
                 .expect_err("unknown collection option")
                 .to_string(),
             @"unsupported HAWK_COLLECTION_OPTIONS value `unknown`"
         );
+    }
+
+    #[test]
+    fn cfg_attributes_are_detected_without_copying_the_declaration() {
+        for source in [
+            "#[cfg(test)] pub fn candidate() {}",
+            "# [ cfg_attr(test, allow(dead_code)) ] pub fn candidate() {}",
+            "# /* comment */ [cfg(test)] pub fn candidate() {}",
+            "#[r#cfg(test)] pub fn candidate() {}",
+            "#[r#cfg_attr(test, allow(dead_code))] pub fn candidate() {}",
+            "pub mod candidate { #![cfg(test)] pub fn child() {} }",
+            "pub mod candidate { # ! [ cfg_attr(test, allow(unused_variables)) ] pub fn child() {} }",
+            "pub mod candidate { #![r#cfg(test)] pub fn child() {} }",
+            "pub mod candidate { #![r#cfg_attr(test, allow(unused_variables))] pub fn child() {} }",
+        ] {
+            assert!(
+                contains_cfg_attribute(source),
+                "missed cfg attribute: {source}"
+            );
+        }
+        assert!(!contains_cfg_attribute(
+            "#[deprecated] pub fn candidate() {}"
+        ));
+        assert!(!contains_cfg_attribute(
+            "pub const TEXT: &str = \"#[cfg(test)]\";"
+        ));
     }
 
     #[test]
