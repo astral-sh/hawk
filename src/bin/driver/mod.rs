@@ -693,8 +693,15 @@ fn collect_fragment(
             }
         }
     }
+    let mut modules_by_child = HashMap::<(Ident, DefinitionId), Vec<_>>::new();
+    for (module, child, target) in reexports_by_child.keys() {
+        modules_by_child
+            .entry((*child, *target))
+            .or_default()
+            .push(*module);
+    }
     let mut block_reexports_by_child = HashMap::<(hir::HirId, Ident, DefinitionId), Vec<_>>::new();
-    let mut block_globs = HashMap::<hir::HirId, Vec<(DefinitionId, DefinitionId)>>::new();
+    let mut block_globs = HashMap::<(hir::HirId, DefinitionId), Vec<_>>::new();
     for owner in crate_items.owners() {
         let def_id = owner.def_id;
         if tcx.def_kind(def_id) != DefKind::Use {
@@ -719,18 +726,31 @@ fn collect_fragment(
                 }
             }
             hir::UseKind::Glob => {
-                block_globs.entry(block).or_default().extend(
-                    path.res
-                        .iter()
-                        .flatten()
-                        .filter_map(Res::opt_def_id)
-                        .filter_map(DefId::as_local)
-                        .filter(|def_id| tcx.def_kind(*def_id) == DefKind::Mod)
-                        .map(|module| (id(tcx, module.to_def_id()), id(tcx, def_id.to_def_id()))),
-                );
+                for module in path
+                    .res
+                    .iter()
+                    .flatten()
+                    .filter_map(Res::opt_def_id)
+                    .filter_map(DefId::as_local)
+                    .filter(|def_id| tcx.def_kind(*def_id) == DefKind::Mod)
+                {
+                    block_globs
+                        .entry((block, id(tcx, module.to_def_id())))
+                        .or_default()
+                        .push(id(tcx, def_id.to_def_id()));
+                }
             }
             hir::UseKind::ListStem => {}
         }
+    }
+    // Index the unique module keys so repeated identical globs do not inflate
+    // the candidate count used for shortest-side lookup.
+    let mut glob_modules_by_block = HashMap::<hir::HirId, Vec<_>>::new();
+    for (block, module) in block_globs.keys() {
+        glob_modules_by_block
+            .entry(*block)
+            .or_default()
+            .push(*module);
     }
     for owner in crate_items.owners() {
         let def_id = owner.def_id;
@@ -791,24 +811,18 @@ fn collect_fragment(
                             kind: EdgeKind::Interface,
                         }),
                 );
-                for (module, glob) in block_globs.get(&block).into_iter().flatten() {
-                    if let Some(reexports) = reexports_by_child.get(&(
-                        *module,
-                        source.ident.normalize_to_macros_2_0(),
-                        id(tcx, target),
-                    )) {
-                        edges.push(Edge {
-                            from: id(tcx, def_id.to_def_id()),
-                            to: *glob,
-                            kind: EdgeKind::Interface,
-                        });
-                        edges.extend(reexports.iter().map(|reexport| Edge {
-                            from: id(tcx, def_id.to_def_id()),
-                            to: *reexport,
-                            kind: EdgeKind::Interface,
-                        }));
-                    }
-                }
+                extend_block_glob_edges(
+                    id(tcx, def_id.to_def_id()),
+                    block,
+                    source.ident.normalize_to_macros_2_0(),
+                    id(tcx, target),
+                    &modules_by_child,
+                    &glob_modules_by_block,
+                    &block_globs,
+                    &reexports_by_child,
+                    EdgeKind::Interface,
+                    &mut edges,
+                );
             }
         }
     }
@@ -863,24 +877,18 @@ fn collect_fragment(
                             kind: EdgeKind::Interface,
                         }),
                 );
-                for (module, glob) in block_globs.get(&block).into_iter().flatten() {
-                    if let Some(reexports) = reexports_by_child.get(&(
-                        *module,
-                        receiver.normalize_to_macros_2_0(),
-                        id(tcx, target),
-                    )) {
-                        edges.push(Edge {
-                            from: id(tcx, def_id.to_def_id()),
-                            to: *glob,
-                            kind: EdgeKind::Interface,
-                        });
-                        edges.extend(reexports.iter().map(|reexport| Edge {
-                            from: id(tcx, def_id.to_def_id()),
-                            to: *reexport,
-                            kind: EdgeKind::Interface,
-                        }));
-                    }
-                }
+                extend_block_glob_edges(
+                    id(tcx, def_id.to_def_id()),
+                    block,
+                    receiver.normalize_to_macros_2_0(),
+                    id(tcx, target),
+                    &modules_by_child,
+                    &glob_modules_by_block,
+                    &block_globs,
+                    &reexports_by_child,
+                    EdgeKind::Interface,
+                    &mut edges,
+                );
             }
         }
     }
@@ -893,6 +901,8 @@ fn collect_fragment(
             tcx,
             source: def_id,
             reexports_by_child: &reexports_by_child,
+            modules_by_child: &modules_by_child,
+            glob_modules_by_block: &glob_modules_by_block,
             block_reexports_by_child: &block_reexports_by_child,
             block_globs: &block_globs,
             edge_kind: EdgeKind::Interface,
@@ -1417,6 +1427,49 @@ fn extend_reexport_path_edges(
     parent_module
 }
 
+fn extend_block_glob_edges(
+    source: DefinitionId,
+    block: hir::HirId,
+    child: Ident,
+    target: DefinitionId,
+    modules_by_child: &HashMap<(Ident, DefinitionId), Vec<DefinitionId>>,
+    glob_modules_by_block: &HashMap<hir::HirId, Vec<DefinitionId>>,
+    block_globs: &HashMap<(hir::HirId, DefinitionId), Vec<DefinitionId>>,
+    reexports_by_child: &HashMap<(DefinitionId, Ident, DefinitionId), Vec<DefinitionId>>,
+    edge_kind: EdgeKind,
+    edges: &mut Vec<Edge>,
+) {
+    let Some(exporting_modules) = modules_by_child.get(&(child, target)) else {
+        return;
+    };
+    let Some(glob_modules) = glob_modules_by_block.get(&block) else {
+        return;
+    };
+    let modules = if glob_modules.len() < exporting_modules.len() {
+        glob_modules
+    } else {
+        exporting_modules
+    };
+    for module in modules {
+        let Some(globs) = block_globs.get(&(block, *module)) else {
+            continue;
+        };
+        let Some(reexports) = reexports_by_child.get(&(*module, child, target)) else {
+            continue;
+        };
+        edges.extend(globs.iter().map(|glob| Edge {
+            from: source,
+            to: *glob,
+            kind: edge_kind,
+        }));
+        edges.extend(reexports.iter().map(|reexport| Edge {
+            from: source,
+            to: *reexport,
+            kind: edge_kind,
+        }));
+    }
+}
+
 fn enclosing_blocks(tcx: TyCtxt<'_>, def_id: LocalDefId) -> impl Iterator<Item = hir::HirId> + '_ {
     tcx.hir_parent_iter(tcx.local_def_id_to_hir_id(def_id))
         .filter_map(|(hir_id, node)| matches!(node, Node::Block(_)).then_some(hir_id))
@@ -1508,8 +1561,10 @@ struct ReexportPathVisitor<'a, 'tcx> {
     tcx: TyCtxt<'tcx>,
     source: LocalDefId,
     reexports_by_child: &'a HashMap<(DefinitionId, Ident, DefinitionId), Vec<DefinitionId>>,
+    modules_by_child: &'a HashMap<(Ident, DefinitionId), Vec<DefinitionId>>,
+    glob_modules_by_block: &'a HashMap<hir::HirId, Vec<DefinitionId>>,
     block_reexports_by_child: &'a HashMap<(hir::HirId, Ident, DefinitionId), Vec<DefinitionId>>,
-    block_globs: &'a HashMap<hir::HirId, Vec<(DefinitionId, DefinitionId)>>,
+    block_globs: &'a HashMap<(hir::HirId, DefinitionId), Vec<DefinitionId>>,
     edge_kind: EdgeKind,
     traverse_bodies: bool,
     edges: &'a mut Vec<Edge>,
@@ -1572,24 +1627,18 @@ impl<'tcx> Visitor<'tcx> for ReexportPathVisitor<'_, 'tcx> {
                         kind: self.edge_kind,
                     }),
             );
-            for (module, glob) in self.block_globs.get(&block).into_iter().flatten() {
-                if let Some(reexports) = self.reexports_by_child.get(&(
-                    *module,
-                    receiver.normalize_to_macros_2_0(),
-                    id(self.tcx, target),
-                )) {
-                    self.edges.push(Edge {
-                        from: id(self.tcx, self.source.to_def_id()),
-                        to: *glob,
-                        kind: self.edge_kind,
-                    });
-                    self.edges.extend(reexports.iter().map(|reexport| Edge {
-                        from: id(self.tcx, self.source.to_def_id()),
-                        to: *reexport,
-                        kind: self.edge_kind,
-                    }));
-                }
-            }
+            extend_block_glob_edges(
+                id(self.tcx, self.source.to_def_id()),
+                block,
+                receiver.normalize_to_macros_2_0(),
+                id(self.tcx, target),
+                self.modules_by_child,
+                self.glob_modules_by_block,
+                self.block_globs,
+                self.reexports_by_child,
+                self.edge_kind,
+                self.edges,
+            );
         }
         intravisit::walk_path(self, path);
     }

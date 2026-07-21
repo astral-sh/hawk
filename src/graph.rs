@@ -734,9 +734,6 @@ fn protected_reachable_definitions<'a>(
         .map(|definition| containment_identity(definition))
         .collect();
     let mut protected = FxHashSet::default();
-    if retained.is_empty() {
-        return protected;
-    }
 
     let definitions: FxHashMap<_, _> = production_fragments
         .iter()
@@ -746,7 +743,12 @@ fn protected_reachable_definitions<'a>(
         .collect();
     let mut pending: Vec<_> = definitions
         .values()
-        .filter(|definition| retained.contains(&containment_identity(definition)))
+        .filter(|definition| {
+            retained.contains(&containment_identity(definition))
+                || (!definition.public_api
+                    && definition.expansion_span.is_some()
+                    && definition.kind != DefinitionKind::Other)
+        })
         .map(|definition| definition.id)
         .collect();
     let mut adjacency: FxHashMap<DefinitionId, Vec<DefinitionId>> = FxHashMap::default();
@@ -2141,6 +2143,65 @@ mod tests {
         assert_eq!(
             finding_summaries(findings),
             vec![(FindingKind::DeadPublic, "Removable".into(), false, false)]
+        );
+    }
+
+    #[test]
+    fn expansion_backed_definitions_protect_only_their_actual_dependencies() {
+        let mut generated_body = node("generated_body", "lib", false);
+        generated_body.expansion_span = Some(expansion(1, 10));
+        let mut generated_interface = node("generated_interface", "lib", false);
+        generated_interface.expansion_span = Some(expansion(2, 11));
+        let mut generated_member = typed_node(
+            "generated_member",
+            "lib",
+            false,
+            DefinitionKind::InherentAssociatedConstant,
+        );
+        generated_member.expansion_span = Some(expansion(3, 12));
+        let input = fragments(
+            vec![
+                typed_node("BodyAlias", "lib", true, DefinitionKind::Reexport),
+                typed_node("InterfaceAlias", "lib", true, DefinitionKind::Reexport),
+                typed_node("MemberAlias", "lib", true, DefinitionKind::Reexport),
+                typed_node("UnusedAlias", "lib", true, DefinitionKind::Reexport),
+                generated_body,
+                generated_interface,
+                generated_member,
+            ],
+            vec![
+                Edge {
+                    from: test_id("generated_body"),
+                    to: test_id("BodyAlias"),
+                    kind: EdgeKind::Body,
+                },
+                Edge {
+                    from: test_id("generated_interface"),
+                    to: test_id("InterfaceAlias"),
+                    kind: EdgeKind::Interface,
+                },
+                Edge {
+                    from: test_id("generated_member"),
+                    to: test_id("MemberAlias"),
+                    kind: EdgeKind::Interface,
+                },
+            ],
+        );
+        let mut findings = input[1].definitions[..4]
+            .iter()
+            .map(|definition| Finding {
+                kind: FindingKind::DeadPublic,
+                definition,
+                test_only: false,
+                test_compiled_only: false,
+            })
+            .collect();
+
+        suppress_dead_public_descendants(&input, &[], &[], &mut findings);
+
+        assert_eq!(
+            finding_summaries(findings),
+            vec![(FindingKind::DeadPublic, "UnusedAlias".into(), false, false)]
         );
     }
 

@@ -750,7 +750,7 @@ fn production_binary_named_like_a_library_does_not_suppress_its_findings() {
 }
 
 #[test]
-fn distinct_spanless_expansions_do_not_keep_a_library_item_live() {
+fn spanless_expansions_protect_their_compiled_dependencies() {
     for binary_name in [None, Some("same")] {
         let context = HawkTestContext::new("spanless_target_collision");
         let mut command = context.command();
@@ -763,7 +763,8 @@ fn distinct_spanless_expansions_do_not_keep_a_library_item_live() {
 
         context.assert_success(&output);
         let stdout = context.normalized_stdout(&output);
-        assert!(stdout.contains("warning[hawk::dead_public]: `dead_api`"));
+        assert!(stdout.contains("hawk: 0 finding(s)"), "{stdout}");
+        assert!(!stdout.contains("hawk::dead_public"), "{stdout}");
         assert!(!stdout.contains("hawk::unnecessary_public"));
     }
 }
@@ -1761,6 +1762,123 @@ reason = "nested source bodies are intentionally retained"
 }
 
 #[test]
+fn expanded_declarations_protect_only_their_actual_reexport_dependencies() {
+    let context = HawkTestContext::new("dead_public_fixes");
+    let library_path = context.workspace().join("library/src/lib.rs");
+    let source = r"pub struct BodyTarget;
+pub mod body_used {
+    pub use super::BodyTarget as Alias;
+}
+pub mod body_unused {
+    pub use super::BodyTarget as Alias;
+}
+
+macro_rules! define_body {
+    () => {
+        pub fn generated_body() {
+            let _ = $crate::body_used::Alias;
+        }
+    };
+}
+define_body!();
+
+pub struct InterfaceTarget;
+pub mod interface_used {
+    pub use super::InterfaceTarget as Alias;
+}
+pub mod interface_unused {
+    pub use super::InterfaceTarget as Alias;
+}
+
+macro_rules! define_interface {
+    () => {
+        pub fn generated_interface(_: $crate::interface_used::Alias) {}
+    };
+}
+define_interface!();
+
+pub struct ImplTarget;
+pub mod impl_used {
+    pub use super::ImplTarget as Alias;
+}
+pub mod impl_unused {
+    pub use super::ImplTarget as Alias;
+}
+
+macro_rules! define_impl {
+    () => {
+        impl $crate::impl_used::Alias {
+            pub const GENERATED: u8 = 1;
+        }
+    };
+}
+define_impl!();
+
+pub struct Removable;
+";
+    fs::write(&library_path, source).expect("write expanded dependency fixture");
+
+    let output = context.run(&[]);
+
+    context.assert_success(&output);
+    let stdout = context.normalized_stdout(&output);
+    for item in [
+        "body_unused::Alias",
+        "interface_unused::Alias",
+        "impl_unused::Alias",
+    ] {
+        assert!(
+            stdout.contains(&format!("public re-export `{item}`")),
+            "{stdout}"
+        );
+    }
+    assert!(stdout.contains("`Removable` is public but is not reachable"));
+    assert_eq!(
+        stdout.matches("warning[hawk::dead_public]").count(),
+        4,
+        "{stdout}"
+    );
+    for item in [
+        "BodyTarget",
+        "body_used::Alias",
+        "InterfaceTarget",
+        "interface_used::Alias",
+        "ImplTarget",
+        "impl_used::Alias",
+    ] {
+        assert!(!stdout.contains(&format!("`{item}`")), "{stdout}");
+    }
+
+    let remaining = source
+        .replace(
+            "pub mod body_unused {\n    pub use super::BodyTarget as Alias;\n}",
+            "pub mod body_unused {}",
+        )
+        .replace(
+            "pub mod interface_unused {\n    pub use super::InterfaceTarget as Alias;\n}",
+            "pub mod interface_unused {}",
+        )
+        .replace(
+            "pub mod impl_unused {\n    pub use super::ImplTarget as Alias;\n}",
+            "pub mod impl_unused {}",
+        )
+        .replace("\npub struct Removable;\n", "\n");
+    fs::write(&library_path, remaining).expect("remove reported expanded dependencies");
+    let output = context
+        .cargo()
+        .args(["check", "--workspace", "--locked"])
+        .arg("--target-dir")
+        .arg(context.target_dir())
+        .output()
+        .expect("compile workspace after removing reported declarations");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn collects_many_same_target_imports_without_redundant_findings() {
     let context = HawkTestContext::new("dead_public_fixes");
     let library_path = context.workspace().join("library/src/lib.rs");
@@ -1847,6 +1965,132 @@ fn collects_many_block_globs_without_redundant_findings() {
     assert_eq!(
         stdout.matches("warning[hawk::dead_public]").count(),
         1,
+        "{stdout}"
+    );
+    assert!(!stdout.contains("hawk::unknown_item"), "{stdout}");
+}
+
+#[test]
+fn collects_many_distinct_globs_in_one_block_without_redundant_findings() {
+    let context = HawkTestContext::new("dead_public_fixes");
+    let library_path = context.workspace().join("library/src/lib.rs");
+    let mut source = String::from("#![allow(non_local_definitions)]\n");
+    for index in 0..200 {
+        writeln!(
+            source,
+            "pub struct Target{index}; pub mod exports{index} {{ pub use super::Target{index} as Alias{index}; }}"
+        )
+        .expect("append distinct block-glob export");
+    }
+    source.push_str("pub fn block() {\n");
+    for index in 0..200 {
+        writeln!(source, "    use exports{index}::*;").expect("append distinct block-glob import");
+    }
+    for index in 0..200 {
+        writeln!(
+            source,
+            "    impl Alias{index} {{ pub const KEEP{index}: u8 = 1; }}"
+        )
+        .expect("append distinct block-glob receiver");
+    }
+    source.push_str("}\npub struct Removable;\n");
+    fs::write(&library_path, source).expect("write distinct block-glob fixture");
+
+    let configuration = tempfile::NamedTempFile::new().expect("temporary configuration");
+    let mut contents = String::from(
+        "[[production]]\npackage = \"app\"\nbin = \"app\"\nreason = \"test binary product\"\n",
+    );
+    for index in 0..200 {
+        writeln!(
+            contents,
+            "\n[[override]]\nlint = \"hawk::dead_public\"\ncrate = \"library\"\nitem = \"block::<impl Target{index}>::KEEP{index}\"\nkind = \"inherent_associated_constant\"\nlevel = \"allow\"\nreason = \"distinct block-glob receiver is intentionally retained\""
+        )
+        .expect("append distinct block-glob override");
+    }
+    fs::write(configuration.path(), contents).expect("write distinct block-glob configuration");
+
+    let output = context
+        .command()
+        .arg("--config")
+        .arg(configuration.path())
+        .output()
+        .expect("run cargo-hawk");
+
+    context.assert_success(&output);
+    let stdout = context.normalized_stdout(&output);
+    assert!(stdout.contains("`Removable` is public but is not reachable"));
+    assert_eq!(
+        stdout.matches("warning[hawk::dead_public]").count(),
+        1,
+        "{stdout}"
+    );
+    assert!(!stdout.contains("hawk::unknown_item"), "{stdout}");
+}
+
+#[test]
+fn collects_repeated_block_paths_with_many_matching_module_children() {
+    let context = HawkTestContext::new("dead_public_fixes");
+    let library_path = context.workspace().join("library/src/lib.rs");
+    let mut source = String::from("#![allow(unused_imports)]\npub struct Target;\n");
+    for index in 0..200 {
+        writeln!(
+            source,
+            "pub mod exports{index} {{ pub use super::Target as Alias; }}"
+        )
+        .expect("append matching module child");
+    }
+    source.push_str("pub fn retained_body() {\n    use exports0::*;\n    use exports0::*;\n");
+    for _ in 0..200 {
+        source.push_str("    let _ = Alias;\n");
+    }
+    source.push_str("}\npub struct Removable;\n");
+    fs::write(&library_path, source).expect("write matching module-child fixture");
+
+    let configuration = tempfile::NamedTempFile::new().expect("temporary configuration");
+    fs::write(
+        configuration.path(),
+        r#"
+[[production]]
+package = "app"
+bin = "app"
+reason = "test binary product"
+
+[[override]]
+lint = "hawk::dead_public"
+crate = "library"
+item = "retained_body"
+kind = "function"
+level = "allow"
+reason = "repeated block paths are intentionally retained"
+"#,
+    )
+    .expect("write matching module-child configuration");
+
+    let output = context
+        .command()
+        .arg("--config")
+        .arg(configuration.path())
+        .output()
+        .expect("run cargo-hawk");
+
+    context.assert_success(&output);
+    let stdout = context.normalized_stdout(&output);
+    assert!(
+        !stdout.contains("public re-export `exports0::Alias`"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("public re-export `exports1::Alias`"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("public re-export `exports199::Alias`"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("`Removable` is public but is not reachable"));
+    assert_eq!(
+        stdout.matches("warning[hawk::dead_public]").count(),
+        200,
         "{stdout}"
     );
     assert!(!stdout.contains("hawk::unknown_item"), "{stdout}");
