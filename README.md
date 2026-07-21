@@ -126,6 +126,10 @@ cargo hawk check \
 cargo hawk check \
   --manifest-path /path/to/workspace/Cargo.toml \
   --fix
+
+cargo hawk check \
+  --manifest-path /path/to/workspace/Cargo.toml \
+  --only dead-public
 ```
 
 ## Documentation

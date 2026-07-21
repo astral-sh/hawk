@@ -82,6 +82,10 @@ struct CheckArgs {
     #[arg(short = 'D', long = "deny", value_name = "LINT")]
     deny: Vec<String>,
 
+    /// Report only findings from the selected category.
+    #[arg(long, value_enum, value_name = "KIND")]
+    only: Option<OnlyFinding>,
+
     /// Automatically apply machine-applicable visibility fixes.
     #[arg(long)]
     fix: bool,
@@ -267,6 +271,17 @@ enum OutputFormat {
 
     /// Emit a versioned JSON diagnostic report.
     Json,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum OnlyFinding {
+    DeadPublic,
+}
+
+impl OnlyFinding {
+    const fn includes(self, kind: FindingKind) -> bool {
+        matches!((self, kind), (Self::DeadPublic, FindingKind::DeadPublic))
+    }
 }
 
 impl From<TerminalColor> for anstream::ColorChoice {
@@ -500,6 +515,7 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
             let fixable_findings: Vec<_> = initial_findings
                 .findings
                 .iter()
+                .filter(|finding| args.only.is_none_or(|only| only.includes(finding.kind)))
                 .filter(|finding| lint_levels.level(finding.kind).is_emitted())
                 // Restricting unreachable public surface to `pub(crate)` can
                 // make rustc's ordinary `dead_code` lint start firing. Such
@@ -623,6 +639,7 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
     };
     let mut json_diagnostics = Vec::new();
     let mut diagnostic_count = 0;
+    let mut diagnostic_counts = BTreeMap::<String, BTreeMap<String, usize>>::new();
     let mut has_denied_diagnostic = false;
     let production_description = if production_products.len() == 1 {
         format!("binary `{}`", production_products[0].binary)
@@ -630,9 +647,17 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
         "the configured production binaries".to_owned()
     };
     for finding in &findings.findings {
+        if args.only.is_some_and(|only| !only.includes(finding.kind)) {
+            continue;
+        }
         let level = lint_levels.level(finding.kind);
         if level.is_emitted() {
             diagnostic_count += 1;
+            *diagnostic_counts
+                .entry(finding.kind.code().to_owned())
+                .or_default()
+                .entry(finding.definition.crate_name.clone())
+                .or_default() += 1;
             has_denied_diagnostic |= level == LintLevel::Deny;
             match args.output_format {
                 OutputFormat::Text => renderer
@@ -650,6 +675,11 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
         let level = lint_levels.level(diagnostic.kind);
         if level.is_emitted() {
             diagnostic_count += 1;
+            *diagnostic_counts
+                .entry(diagnostic.kind.code().to_owned())
+                .or_default()
+                .entry("configuration".to_owned())
+                .or_default() += 1;
             has_denied_diagnostic |= level == LintLevel::Deny;
             match args.output_format {
                 OutputFormat::Text => renderer
@@ -672,7 +702,12 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
     match args.output_format {
         OutputFormat::Text => {
             renderer
-                .write_summary(diagnostic_count, &production_summary, &compilation_target)
+                .write_summary(
+                    diagnostic_count,
+                    &diagnostic_counts,
+                    &production_summary,
+                    &compilation_target,
+                )
                 .expect("formatting diagnostics into a string cannot fail");
             let diagnostics = renderer.into_output();
             anstream::AutoStream::new(std::io::stdout(), args.color.into())

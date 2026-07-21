@@ -170,6 +170,19 @@ The supported selectors are `warnings`, `hawk::dead_public`,
 are emitted as errors and cause a non-zero exit status. Invalid configuration
 and failed instrumented Cargo builds fail independently of lint levels.
 
+To focus on deletion candidates, pass `--only dead-public`. This suppresses
+visibility-reduction findings while preserving configuration diagnostics such
+as unknown items and unfulfilled expectations:
+
+```sh
+./target/debug/cargo-hawk check \
+  --manifest-path /path/to/workspace/Cargo.toml \
+  --only dead-public
+```
+
+The final summary groups emitted findings by lint and library crate. Hawk
+reports configuration diagnostics separately under `configuration`.
+
 `hawk::unnecessary_crate_visibility` is allow-by-default because preferring
 `pub(super)` over `pub(crate)` is a style choice. Enable it explicitly with
 `-W hawk::unnecessary_crate_visibility` or

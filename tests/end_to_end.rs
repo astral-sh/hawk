@@ -465,7 +465,7 @@ fn diagnoses_public_surface_of_a_binary_product() {
     assert!(unrelated_json.exists());
     let stdout = context.normalized_stdout(&output);
     let summary = format!(
-        "hawk: 42 finding(s) for `app --bin app --all-features` and workspace non-production targets on target `{host_target}`\n"
+        "hawk: 42 finding(s) for `app --bin app --all-features` and workspace non-production targets on target `{host_target}`\n  hawk::dead_public: 15 (library: 14, test_support: 1)\n  hawk::unfulfilled_expectation: 1 (configuration: 1)\n  hawk::unknown_item: 1 (configuration: 1)\n  hawk::unnecessary_public: 25 (library: 22, test_support: 1, unit_support: 2)\n"
     );
     let diagnostics = stdout
         .strip_suffix(&summary)
@@ -1748,6 +1748,23 @@ fn reports_operational_json_errors_on_stderr() {
             .normalized_stderr(&output)
             .contains("error: no applicable production binaries configured")
     );
+}
+
+#[test]
+fn reports_only_dead_public_findings() {
+    let context = HawkTestContext::new("basic");
+    let output = context.run(&["--only", "dead-public"]);
+
+    context.assert_success(&output);
+    let stdout = context.normalized_stdout(&output);
+    assert!(stdout.contains("warning[hawk::dead_public]"));
+    assert!(!stdout.contains("warning[hawk::unnecessary_public]"));
+    assert!(stdout.contains("warning[hawk::unknown_item]"));
+    assert!(stdout.contains("warning[hawk::unfulfilled_expectation]"));
+    assert!(stdout.contains("hawk: 17 finding(s)"));
+    assert!(stdout.contains("  hawk::dead_public: 15 (library: 14, test_support: 1)"));
+    assert!(stdout.contains("  hawk::unknown_item: 1 (configuration: 1)"));
+    assert!(!stdout.contains("  hawk::unnecessary_public:"));
 }
 
 #[test]
