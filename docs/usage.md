@@ -181,8 +181,9 @@ expectations:
   --only dead-public
 ```
 
-The final summary groups emitted findings by lint and Cargo package. Hawk
-reports configuration diagnostics separately under `configuration`.
+In text output, the final summary groups emitted findings by lint and Cargo
+package. Hawk reports configuration diagnostics separately under
+`configuration`.
 
 `hawk::unnecessary_crate_visibility` is allow-by-default because preferring
 `pub(super)` over `pub(crate)` is a style choice. Enable it explicitly with
