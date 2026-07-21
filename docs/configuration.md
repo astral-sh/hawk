@@ -221,7 +221,8 @@ reason = "non-Windows compatibility surface"
 
 An entry is validated when its selector applies to at least one analyzed
 compilation target. This avoids stale-expectation failures for declarations
-that are not compiled on any selected target.
+that are not compiled on any selected target. A target-scoped override or
+exclusion cannot suppress a declaration compiled for an unmatched target.
 
 ## External library boundaries
 

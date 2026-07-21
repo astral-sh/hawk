@@ -13,7 +13,9 @@ use anyhow::{Context, Result, bail};
 use cargo_metadata::{MetadataCommand, TargetKind};
 use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 
-use crate::config::{AnalysisTarget, Config, ConfigDiagnosticKind, FeatureProfile};
+use crate::config::{
+    AnalysisTarget, Config, ConfigDiagnosticKind, FeatureProfile, TargetFragments,
+};
 use crate::diagnostics::{DiagnosticRenderer, EMPHASIS, ERROR, WARNING, styled};
 use crate::protocol;
 use crate::toolchain::{
@@ -474,6 +476,7 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
     validate_driver_protocol(&driver, &toolchain)?;
     let mut production_fragments = Vec::new();
     let mut test_fragments = Vec::new();
+    let mut target_graph_ranges = Vec::new();
     for target_graph in &target_graphs {
         let cargo = InstrumentedCargo {
             args: &args,
@@ -486,6 +489,8 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
             collection_options: CollectionOptions::new(config.preserve_uniform_field_visibility()),
             doctest_packages: doctest_packages.as_deref(),
         };
+        let production_start = production_fragments.len();
+        let non_production_start = test_fragments.len();
         for profile_graph in &target_graph.profile_graphs {
             let (profile_production, profile_tests) = collect_profile_fragments(
                 &cargo,
@@ -496,6 +501,10 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
             production_fragments.extend(profile_production);
             test_fragments.extend(profile_tests);
         }
+        target_graph_ranges.push((
+            production_start..production_fragments.len(),
+            non_production_start..test_fragments.len(),
+        ));
     }
     let excluded: HashSet<String> = args.excluded_crates.iter().cloned().collect();
     if args.fix {
@@ -631,12 +640,26 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
     }
     let analysis_targets = target_graphs
         .iter()
-        .map(|target_graph| &target_graph.analysis_target)
+        .enumerate()
+        .map(|(index, target_graph)| {
+            let (production, non_production) = if target_graphs.len() == 1 {
+                (&production_fragments[..], &test_fragments[..])
+            } else {
+                let (production_range, non_production_range) = &target_graph_ranges[index];
+                (
+                    &production_fragments[production_range.clone()],
+                    &test_fragments[non_production_range.clone()],
+                )
+            };
+            TargetFragments {
+                target: &target_graph.analysis_target,
+                production,
+                non_production,
+            }
+        })
         .collect::<Vec<_>>();
     let findings = config.apply_targets(
         &analysis_targets,
-        &production_fragments,
-        &test_fragments,
         analyze_with_options(
             &production_fragments,
             &test_fragments,
@@ -1108,7 +1131,10 @@ fn compilation_targets(targets: &[String]) -> Vec<Option<&str>> {
 }
 
 fn compilation_target_directory(index: usize, target: &str) -> String {
-    let target = target
+    let mut hasher = DefaultHasher::new();
+    target.hash(&mut hasher);
+    let suffix = format!("-{:016x}", hasher.finish());
+    let mut target = target
         .chars()
         .map(|character| {
             if character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.') {
@@ -1118,7 +1144,10 @@ fn compilation_target_directory(index: usize, target: &str) -> String {
             }
         })
         .collect::<String>();
-    format!("{index}-{target}")
+    // Custom target specifications can be paths much longer than a single
+    // filesystem component. Keep the label readable while bounding its size.
+    target.truncate(160);
+    format!("{index}-{target}{suffix}")
 }
 
 fn compilation_target_summary(target_graphs: &[CompilationTargetGraph<'_>]) -> String {
@@ -1689,10 +1718,11 @@ mod tests {
 
     #[test]
     fn compilation_target_directories_do_not_treat_custom_targets_as_paths() {
-        assert_eq!(
-            compilation_target_directory(1, "../../targets/custom.json"),
-            "1-.._.._targets_custom.json"
-        );
+        let path = compilation_target_directory(1, "../../targets/custom.json");
+        assert!(path.starts_with("1-.._.._targets_custom.json-"));
+        assert!(!path.contains('/'));
+        let long = compilation_target_directory(1, &format!("targets/{}.json", "a".repeat(300)));
+        assert!(long.len() < 200);
     }
 
     #[test]

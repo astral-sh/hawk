@@ -126,6 +126,37 @@ pub(crate) struct AppliedFindings<'findings, 'config> {
     pub(crate) config_diagnostics: Vec<ConfigDiagnostic<'config>>,
 }
 
+pub(crate) struct TargetFragments<'a> {
+    pub(crate) target: &'a AnalysisTarget,
+    pub(crate) production: &'a [Fragment],
+    pub(crate) non_production: &'a [Fragment],
+}
+
+impl TargetFragments<'_> {
+    fn definitions(&self) -> impl Iterator<Item = &Definition> {
+        self.production
+            .iter()
+            .chain(self.non_production)
+            .flat_map(|fragment| &fragment.definitions)
+    }
+
+    fn logical_items(&self) -> impl Iterator<Item = LogicalItemIdentity<'_>> {
+        self.production
+            .iter()
+            .chain(self.non_production)
+            .flat_map(|fragment| {
+                fragment.definitions.iter().map(|definition| {
+                    logical_item_identity(fragment.package_name.as_str(), definition)
+                })
+            })
+    }
+
+    fn contains(&self, identity: KnownItemIdentity<'_>) -> bool {
+        self.definitions()
+            .any(|definition| known_item_identity(definition) == identity)
+    }
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawConfig {
@@ -542,40 +573,39 @@ impl Config {
         test_fragments: &[Fragment],
         findings: Vec<Finding<'findings>>,
     ) -> AppliedFindings<'findings, 'config> {
-        self.apply_targets(&[target], production_fragments, test_fragments, findings)
+        self.apply_targets(
+            &[TargetFragments {
+                target,
+                production: production_fragments,
+                non_production: test_fragments,
+            }],
+            findings,
+        )
     }
 
     pub(crate) fn apply_targets<'findings, 'config>(
         &'config self,
-        targets: &[&AnalysisTarget],
-        production_fragments: &[Fragment],
-        test_fragments: &[Fragment],
+        targets: &[TargetFragments<'_>],
         findings: Vec<Finding<'findings>>,
     ) -> AppliedFindings<'findings, 'config> {
-        let known_items: HashSet<KnownItemIdentity<'_>> = production_fragments
+        let known_items: HashSet<KnownItemIdentity<'_>> = targets
             .iter()
-            .chain(test_fragments)
-            .flat_map(|fragment| &fragment.definitions)
+            .flat_map(TargetFragments::definitions)
             .map(known_item_identity)
-            .collect();
-        let logical_items: HashSet<LogicalItemIdentity<'_>> = production_fragments
-            .iter()
-            .chain(test_fragments)
-            .flat_map(|fragment| {
-                fragment.definitions.iter().map(|definition| {
-                    logical_item_identity(fragment.package_name.as_str(), definition)
-                })
-            })
             .collect();
         let mut config_diagnostics = Vec::new();
         let mut active_overrides = Vec::new();
         for entry in self
             .overrides
             .iter()
-            .filter(|entry| targets.iter().any(|target| entry.applies_to(target)))
+            .filter(|entry| targets.iter().any(|target| entry.applies_to(target.target)))
         {
-            let matching_items = logical_items
+            let matching_items = targets
                 .iter()
+                .filter(|target| entry.applies_to(target.target))
+                .flat_map(TargetFragments::logical_items)
+                .collect::<HashSet<_>>()
+                .into_iter()
                 .filter(|item| entry.identifies(item))
                 .count();
             if matching_items == 0 {
@@ -605,14 +635,31 @@ impl Config {
         let active_exclusions = self
             .exclusions
             .iter()
-            .filter(|entry| targets.iter().any(|target| entry.applies_to(target)))
+            .filter(|entry| targets.iter().any(|target| entry.applies_to(target.target)))
             .filter(|entry| known_items.iter().any(|item| entry.identifies(item)))
             .collect::<Vec<_>>();
         let findings = findings
             .into_iter()
             .filter(|finding| {
-                !active_overrides.iter().any(|entry| entry.matches(finding))
-                    && !active_exclusions.iter().any(|entry| entry.matches(finding))
+                let identity = known_item_identity(finding.definition);
+                let applies_to_all_instances = |applies_to: &dyn Fn(&AnalysisTarget) -> bool| {
+                    let mut found = false;
+                    let applies = targets
+                        .iter()
+                        .filter(|target| target.contains(identity))
+                        .all(|target| {
+                            found = true;
+                            applies_to(target.target)
+                        });
+                    found && applies
+                };
+                !active_overrides.iter().any(|entry| {
+                    entry.matches(finding)
+                        && applies_to_all_instances(&|target| entry.applies_to(target))
+                }) && !active_exclusions.iter().any(|entry| {
+                    entry.matches(finding)
+                        && applies_to_all_instances(&|target| entry.applies_to(target))
+                })
             })
             .collect();
         AppliedFindings {
@@ -795,7 +842,7 @@ mod tests {
 
     use cargo_platform::Cfg;
 
-    use super::{AnalysisTarget, Config, ConfigDiagnosticKind};
+    use super::{AnalysisTarget, Config, ConfigDiagnosticKind, TargetFragments};
     use cargo_hawk_internal::graph::{
         Definition, DefinitionId, DefinitionKind, FindingKind, Fragment, Span, analyze,
     };
@@ -1371,7 +1418,7 @@ reason = "generated only on Windows"
     }
 
     #[test]
-    fn target_scoped_exclusion_applies_in_a_combined_target_matrix() {
+    fn target_scoped_exclusion_applies_to_matching_target_definitions() {
         let directory = tempfile::tempdir().expect("temporary configuration directory");
         let path = directory.path().join("hawk.toml");
         std::fs::write(
@@ -1386,18 +1433,117 @@ reason = "generated only on Windows"
         )
         .expect("write configuration");
         let config = Config::load(directory.path(), Some(&path)).expect("load configuration");
-        let fragments = vec![scoped_fragment()];
+        let windows_fragments = vec![scoped_fragment()];
         let unix = target("aarch64-apple-darwin", &["unix"]);
         let windows = target("x86_64-pc-windows-msvc", &["windows"]);
 
         let applied = config.apply_targets(
-            &[&unix, &windows],
-            &fragments,
-            &[],
-            analyze(&fragments, &[], &candidate_crates(), &HashSet::new()),
+            &[
+                TargetFragments {
+                    target: &unix,
+                    production: &[],
+                    non_production: &[],
+                },
+                TargetFragments {
+                    target: &windows,
+                    production: &windows_fragments,
+                    non_production: &[],
+                },
+            ],
+            analyze(
+                &windows_fragments,
+                &[],
+                &candidate_crates(),
+                &HashSet::new(),
+            ),
         );
 
         assert_eq!(applied.findings.len(), 2);
+    }
+
+    #[test]
+    fn target_scoped_exclusion_does_not_leak_to_another_target() {
+        let directory = tempfile::tempdir().expect("temporary configuration directory");
+        let path = directory.path().join("hawk.toml");
+        std::fs::write(
+            &path,
+            r#"
+[[exclude]]
+crate = "library"
+module = "generated"
+target = "cfg(windows)"
+reason = "generated only on Windows"
+"#,
+        )
+        .expect("write configuration");
+        let config = Config::load(directory.path(), Some(&path)).expect("load configuration");
+        let unix_fragments = vec![scoped_fragment()];
+        let unix = target("aarch64-apple-darwin", &["unix"]);
+        let windows = target("x86_64-pc-windows-msvc", &["windows"]);
+
+        let applied = config.apply_targets(
+            &[
+                TargetFragments {
+                    target: &unix,
+                    production: &unix_fragments,
+                    non_production: &[],
+                },
+                TargetFragments {
+                    target: &windows,
+                    production: &[],
+                    non_production: &[],
+                },
+            ],
+            analyze(&unix_fragments, &[], &candidate_crates(), &HashSet::new()),
+        );
+
+        assert_eq!(applied.findings.len(), 4);
+    }
+
+    #[test]
+    fn target_scoped_override_does_not_leak_to_another_target() {
+        let directory = tempfile::tempdir().expect("temporary configuration directory");
+        let path = directory.path().join("hawk.toml");
+        std::fs::write(
+            &path,
+            r#"
+[[override]]
+lint = "hawk::dead_public"
+crate = "library"
+item = "unused"
+level = "expect"
+target = "cfg(windows)"
+reason = "retain Windows compatibility surface"
+"#,
+        )
+        .expect("write configuration");
+        let config = Config::load(directory.path(), Some(&path)).expect("load configuration");
+        let unix_fragments = vec![fragment()];
+        let unix = target("aarch64-apple-darwin", &["unix"]);
+        let windows = target("x86_64-pc-windows-msvc", &["windows"]);
+
+        let applied = config.apply_targets(
+            &[
+                TargetFragments {
+                    target: &unix,
+                    production: &unix_fragments,
+                    non_production: &[],
+                },
+                TargetFragments {
+                    target: &windows,
+                    production: &[],
+                    non_production: &[],
+                },
+            ],
+            analyze(&unix_fragments, &[], &candidate_crates(), &HashSet::new()),
+        );
+
+        assert_eq!(applied.findings.len(), 1);
+        assert_eq!(applied.config_diagnostics.len(), 1);
+        assert_eq!(
+            applied.config_diagnostics[0].kind,
+            ConfigDiagnosticKind::UnknownItem
+        );
     }
 
     #[test]

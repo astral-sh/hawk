@@ -889,7 +889,9 @@ fn compilation_targets_union_reachability_across_architectures() {
         .expect("Rust compiler host target");
     let other = match host {
         "aarch64-apple-darwin" => "x86_64-apple-darwin",
+        "x86_64-apple-darwin" => "aarch64-apple-darwin",
         "x86_64-unknown-linux-gnu" => "aarch64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu" => "x86_64-unknown-linux-gnu",
         target => panic!("unsupported test host target `{target}`"),
     };
     let host_api = if host.starts_with("aarch64") {
@@ -937,10 +939,18 @@ fn compilation_targets_union_reachability_across_architectures() {
         .expect("retained graph run directory")
         .path();
     for (index, target) in [host, other].into_iter().enumerate() {
-        let production_dir = run_dir
-            .join("compilation-targets")
-            .join(format!("{index}-{target}"))
-            .join("feature-profiles/0-all-features/production");
+        let target_dir = fs::read_dir(run_dir.join("compilation-targets"))
+            .expect("read compilation-target directories")
+            .map(|entry| entry.expect("read compilation-target entry"))
+            .find(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.starts_with(&format!("{index}-{target}-")))
+            })
+            .expect("retained compilation-target directory")
+            .path();
+        let production_dir = target_dir.join("feature-profiles/0-all-features/production");
         assert!(
             fs::read_dir(&production_dir)
                 .expect("read compilation-target graph directory")
