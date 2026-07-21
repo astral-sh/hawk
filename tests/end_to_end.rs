@@ -1006,7 +1006,7 @@ fn prune_preview_reports_complete_outermost_declarations_without_editing_source(
       library/src/lib.rs:3:1-5:28: `library::documented_dead`
       library/src/lib.rs:7:1-9:2: `library::DeadParent`
       library/src/lib.rs:11:1-13:2: `library::dead_outer`
-    hawk: prune preview: skipped 7 finding(s) (2 contained, 1 field/variant/re-export, 2 without a complete source range, 2 with remaining uses)
+    hawk: prune preview: skipped 9 finding(s) (2 contained, 1 field/variant/re-export, 2 without a complete source range, 4 with remaining uses)
     hawk: prune preview: no source files were modified
     "###);
     let after = fs::read_to_string(library_path).expect("read source after prune preview");

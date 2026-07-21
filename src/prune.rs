@@ -109,13 +109,22 @@ impl<'a> PrunePlan<'a> {
         let mut dependencies = vec![Vec::new(); outermost.len()];
         let mut blocked = vec![false; outermost.len()];
         let mut queue = VecDeque::new();
-        let mut source_owner_cache = HashMap::new();
+        let mut owner_cache = HashMap::new();
         for edge in fragments.clone().flat_map(|fragment| &fragment.edges) {
-            let Some(&target) = candidate_by_id.get(&edge.to) else {
+            let target = *owner_cache.entry(edge.to).or_insert_with(|| {
+                candidate_owner(
+                    edge.to,
+                    &outermost,
+                    &candidate_by_id,
+                    &definition_by_id,
+                    &candidates_by_file,
+                )
+            });
+            let Some(target) = target else {
                 continue;
             };
-            let source = *source_owner_cache.entry(edge.from).or_insert_with(|| {
-                source_owner(
+            let source = *owner_cache.entry(edge.from).or_insert_with(|| {
+                candidate_owner(
                     edge.from,
                     &outermost,
                     &candidate_by_id,
@@ -196,18 +205,18 @@ fn identity(definition: &Definition) -> DefinitionIdentity<'_> {
     )
 }
 
-fn source_owner(
-    source: DefinitionId,
+fn candidate_owner(
+    id: DefinitionId,
     candidates: &[PruneCandidate<'_>],
     candidate_by_id: &HashMap<DefinitionId, usize>,
     definition_by_id: &HashMap<DefinitionId, &Definition>,
     candidates_by_file: &HashMap<&str, Vec<usize>>,
 ) -> Option<usize> {
-    if let Some(index) = candidate_by_id.get(&source) {
+    if let Some(index) = candidate_by_id.get(&id) {
         return Some(*index);
     }
     let span = definition_by_id
-        .get(&source)
+        .get(&id)
         .and_then(|definition| definition.span.as_ref())?;
     candidates_by_file
         .get(span.file.as_str())?
@@ -225,5 +234,5 @@ fn contains(parent: &DeclarationSpan, child: &DeclarationSpan) -> bool {
 fn contains_location(parent: &DeclarationSpan, child: &Span) -> bool {
     parent.file == child.file
         && (parent.start_line, parent.start_column) <= (child.line, child.column)
-        && (parent.end_line, parent.end_column) >= (child.line, child.column)
+        && (parent.end_line, parent.end_column) > (child.line, child.column)
 }

@@ -27,6 +27,16 @@ fn private_caller() {
     blocked_by_private_caller();
 }
 
+pub mod blocked_module {
+    pub(crate) fn nested_callee() {}
+}
+
+fn caller_outside_blocked_module() {
+    blocked_module::nested_callee();
+}
+
+pub fn blocked_at_end_boundary() {}fn caller_at_end_boundary() { blocked_at_end_boundary(); }
+
 #[cfg(not(test))]
 pub fn cfg_dependent() {}
 
