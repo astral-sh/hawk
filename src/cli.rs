@@ -4,7 +4,7 @@ use std::ffi::{OsStr, OsString};
 use std::fmt::Write as _;
 use std::fs::{self, File};
 use std::hash::{Hash, Hasher};
-use std::io::{BufReader, Read as _, Seek as _, Write as _};
+use std::io::{BufReader, Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 
@@ -12,6 +12,7 @@ use anstyle::Style;
 use anyhow::{Context, Result, bail};
 use cargo_metadata::{MetadataCommand, TargetKind};
 use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
+use tempfile::NamedTempFile;
 
 use crate::config::{AnalysisTarget, Config, ConfigDiagnosticKind, FeatureProfile};
 use crate::diagnostics::{DiagnosticRenderer, EMPHASIS, ERROR, WARNING, styled};
@@ -679,7 +680,7 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
         }
         OutputFormat::Json => {
             let output = serde_json::json!({
-                "schema_version": 1,
+                "schema_version": 2,
                 "summary": {
                     "diagnostic_count": diagnostic_count,
                     "target": args.target.as_deref().unwrap_or(toolchain.host()),
@@ -725,7 +726,8 @@ fn json_finding(
         "severity": level.severity(),
         "kind": json_finding_kind(finding.kind),
         "identity": {
-            "id": definition.id.to_string(),
+            "id": stable_finding_id(definition, package),
+            "compiler_id": definition.id.to_string(),
             "package": package,
             "crate": definition.crate_name,
             "item": definition.name,
@@ -751,6 +753,49 @@ fn json_finding(
         "test_only": finding.test_only,
         "test_compiled_only": finding.test_compiled_only,
     })
+}
+
+fn stable_finding_id(definition: &Definition, package: Option<&str>) -> String {
+    let source = definition
+        .span
+        .as_ref()
+        .map(|span| ("source", span.file.as_str(), span.line, span.column))
+        .or_else(|| {
+            definition.declaration_span.as_ref().map(|span| {
+                (
+                    "declaration",
+                    span.file.as_str(),
+                    span.start_line,
+                    span.start_column,
+                )
+            })
+        })
+        .or_else(|| {
+            definition.expansion_span.as_ref().map(|span| {
+                (
+                    "expansion-callsite",
+                    span.callsite.file.as_str(),
+                    span.callsite.line,
+                    span.callsite.column,
+                )
+            })
+        })
+        .unwrap_or(("none", "", 0, 0));
+    let mut id = String::from("v1");
+    for component in [
+        package.unwrap_or(""),
+        definition.crate_name.as_str(),
+        definition.name.as_str(),
+        json_definition_kind(definition.kind),
+        source.0,
+        source.1,
+    ] {
+        write!(id, "|{}:{component}", component.len())
+            .expect("formatting a stable diagnostic ID cannot fail");
+    }
+    write!(id, "|{}|{}", source.2, source.3)
+        .expect("formatting a stable diagnostic ID cannot fail");
+    id
 }
 
 fn json_config_diagnostic(
@@ -899,7 +944,7 @@ struct ConfiguredCargoCommand {
     command: Command,
     subcommand: &'static str,
     capture_output: bool,
-    cargo_output: Option<File>,
+    cargo_output: Option<NamedTempFile>,
 }
 
 struct CollectedFragments {
@@ -1040,28 +1085,27 @@ impl InstrumentedCargo<'_> {
         if doctests {
             command
                 .arg("--quiet")
-                .stdout(Stdio::null())
                 .env("RUSTC_BOOTSTRAP", "1")
                 .env(
                     "CARGO_ENCODED_RUSTDOCFLAGS",
                     doctest_rustdoc_flags(self.driver),
                 )
                 .env_remove("RUSTDOCFLAGS");
+            if self.args.output_format == OutputFormat::Text {
+                command.stdout(Stdio::null());
+            }
         }
         let cargo_output = if self.args.output_format == OutputFormat::Json {
-            let output = tempfile::tempfile().context("create temporary Cargo output file")?;
-            command.stderr(
-                output
+            let output = NamedTempFile::new().context("create temporary Cargo output file")?;
+            let writer = output
+                .reopen()
+                .context("open temporary Cargo output file for writing")?;
+            command.stdout(
+                writer
                     .try_clone()
-                    .context("duplicate temporary Cargo output file for stderr")?,
+                    .context("duplicate temporary Cargo output file for stdout")?,
             );
-            if !doctests {
-                command.stdout(
-                    output
-                        .try_clone()
-                        .context("duplicate temporary Cargo output file for stdout")?,
-                );
-            }
+            command.stderr(writer);
             Some(output)
         } else {
             None
@@ -1105,15 +1149,16 @@ impl InstrumentedCargo<'_> {
                 .status()
                 .with_context(|| format!("run instrumented Cargo {subcommand}"))?
         };
-        if let Some(mut cargo_output) = cargo_output {
+        if let Some(cargo_output) = cargo_output {
             let length = cargo_output
+                .as_file()
                 .metadata()
                 .context("inspect temporary Cargo output file")?
                 .len();
-            cargo_output
-                .rewind()
-                .context("rewind temporary Cargo output file")?;
-            std::io::copy(&mut cargo_output.take(length), &mut std::io::stderr())
+            let reader = cargo_output
+                .reopen()
+                .context("open temporary Cargo output file for reading")?;
+            std::io::copy(&mut reader.take(length), &mut std::io::stderr())
                 .context("write captured Cargo output to stderr")?;
         }
         if !status.success() {

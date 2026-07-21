@@ -934,6 +934,33 @@ fn ordered_lint_levels_control_severity_and_exit_status() {
 #[test]
 fn emits_versioned_json_diagnostics_and_keeps_cargo_output_on_stderr() {
     let context = HawkTestContext::new("basic");
+    let config_path = context.workspace().join("hawk.toml");
+    let mut config = fs::read_to_string(&config_path).expect("read Hawk configuration");
+    config.push_str(
+        r#"
+[[override]]
+lint = "hawk::dead_public"
+crate = "library"
+item = "DeadFields"
+level = "allow"
+reason = "retain the field parent for JSON child-span coverage"
+
+[[override]]
+lint = "hawk::dead_public"
+crate = "library"
+item = "DeadUnion"
+level = "allow"
+reason = "retain the union parent for JSON child-span coverage"
+
+[[override]]
+lint = "hawk::dead_public"
+crate = "library"
+item = "dead_outer"
+level = "allow"
+reason = "retain the module parent for JSON child-span coverage"
+"#,
+    );
+    fs::write(config_path, config).expect("write Hawk configuration");
     let output = context.run(&[
         "--output-format=json",
         "-D",
@@ -950,8 +977,8 @@ fn emits_versioned_json_diagnostics_and_keeps_cargo_output_on_stderr() {
     );
     let report: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("stdout contains one JSON report");
-    assert_eq!(report["schema_version"], 1);
-    assert_eq!(report["summary"]["diagnostic_count"], 41);
+    assert_eq!(report["schema_version"], 2);
+    assert_eq!(report["summary"]["diagnostic_count"], 38);
     assert_eq!(
         report["summary"]["production"],
         serde_json::json!([{"package": "app", "binary": "app"}])
@@ -970,7 +997,7 @@ fn emits_versioned_json_diagnostics_and_keeps_cargo_output_on_stderr() {
     let diagnostics = report["diagnostics"]
         .as_array()
         .expect("diagnostics is an array");
-    assert_eq!(diagnostics.len(), 41);
+    assert_eq!(diagnostics.len(), 38);
 
     let dead_entry = diagnostics
         .iter()
@@ -988,8 +1015,12 @@ fn emits_versioned_json_diagnostics_and_keeps_cargo_output_on_stderr() {
         dead_entry["identity"]["module_scope"],
         serde_json::json!([])
     );
+    assert_eq!(
+        dead_entry["identity"]["id"],
+        "v1|7:library|7:library|10:dead_entry|8:function|6:source|18:library/src/lib.rs|190|1"
+    );
     assert!(
-        dead_entry["identity"]["id"]
+        dead_entry["identity"]["compiler_id"]
             .as_str()
             .is_some_and(|id| id.len() == 32 && id.bytes().all(|byte| byte.is_ascii_hexdigit()))
     );
@@ -1076,9 +1107,38 @@ fn emits_an_empty_json_report_when_all_warnings_are_allowed() {
     context.assert_success(&output);
     let report: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("stdout contains one JSON report");
-    assert_eq!(report["schema_version"], 1);
+    assert_eq!(report["schema_version"], 2);
     assert_eq!(report["summary"]["diagnostic_count"], 0);
     assert_eq!(report["diagnostics"], serde_json::json!([]));
+}
+
+#[test]
+fn json_stable_diagnostic_ids_ignore_target_compilation_metadata() {
+    let context = HawkTestContext::new("dead_public_fixes");
+    let reports = ["hawk-target-a", "hawk-target-b"].map(|metadata| {
+        let output = context
+            .command()
+            .arg("--output-format=json")
+            .env("CARGO_ENCODED_RUSTFLAGS", format!("-Cmetadata={metadata}"))
+            .env_remove("RUSTFLAGS")
+            .output()
+            .expect("run cargo-hawk with target-specific compilation metadata");
+        context.assert_success(&output);
+        serde_json::from_slice::<serde_json::Value>(&output.stdout)
+            .expect("stdout contains one JSON report")
+    });
+    let identities = reports.each_ref().map(|report| {
+        report["diagnostics"]
+            .as_array()
+            .expect("diagnostics is an array")
+            .iter()
+            .find(|diagnostic| diagnostic["identity"]["item"] == "dead_api")
+            .expect("dead_api diagnostic")["identity"]
+            .clone()
+    });
+
+    assert_eq!(identities[0]["id"], identities[1]["id"]);
+    assert_ne!(identities[0]["compiler_id"], identities[1]["compiler_id"]);
 }
 
 #[test]
@@ -1185,6 +1245,29 @@ fn json_locations_include_grouped_reexport_separators() {
 #[test]
 fn json_locations_include_separators_after_trivia_and_can_be_deleted() {
     let context = HawkTestContext::new("dead_public_fixes");
+    fs::write(
+        context.workspace().join("hawk.toml"),
+        r#"[[production]]
+package = "app"
+bin = "app"
+reason = "binary product under analysis"
+
+[[override]]
+lint = "hawk::dead_public"
+crate = "library"
+item = "DeadFields"
+level = "allow"
+reason = "retain the field parent for JSON child-span coverage"
+
+[[override]]
+lint = "hawk::dead_public"
+crate = "library"
+item = "DeadEnum"
+level = "allow"
+reason = "retain the enum parent for JSON child-span coverage"
+"#,
+    )
+    .expect("write Hawk configuration");
     let library_path = context.workspace().join("library/src/lib.rs");
     let mut source = "pub struct DeadFields {\n    pub unused: u8 // field separator\n    ,\n    pub remaining: u8,\n}\n\npub enum DeadEnum {\n    Unused /* variant separator */ ,\n    Remaining,\n}\n\nmod exports {\n    pub struct Unused;\n    pub struct Remaining;\n}\n\npub use exports::{Unused /* re-export separator */ , Remaining};\n".to_string();
     fs::write(&library_path, &source).expect("write declarations with separated commas");
@@ -1342,6 +1425,122 @@ fn json_does_not_wait_for_background_cargo_helpers_holding_output_pipes() {
     );
     serde_json::from_slice::<serde_json::Value>(&output.stdout)
         .expect("stdout contains one JSON report");
+}
+
+#[cfg(unix)]
+#[test]
+fn json_replays_failing_cargo_output_while_background_helpers_write() {
+    let context = HawkTestContext::new("dead_public_fixes");
+    fs::write(
+        context.workspace().join("library/src/lib.rs"),
+        "compile_error!(\"EXPECTED-RUSTC-FAILURE\");\n",
+    )
+    .expect("write failing library source");
+    let shim_directory = tempfile::tempdir().expect("temporary Cargo shim directory");
+    let shim = shim_directory.path().join("cargo");
+    let shim_source = shim_directory.path().join("cargo.rs");
+    let keep_alive = shim_directory.path().join("keep-alive");
+    fs::write(&keep_alive, "").expect("write helper marker");
+    fs::write(
+        &shim_source,
+        format!(
+            "use std::env;\nuse std::io::Write as _;\nuse std::process::{{Command, Stdio}};\nuse std::time::Duration;\nfn main() {{\n    let mut args = env::args_os().skip(1);\n    if args.next().as_deref() == Some(std::ffi::OsStr::new(\"--hawk-test-helper\")) {{\n        let mut stderr = std::io::stderr().lock();\n        while std::path::Path::new({:?}).exists() {{\n            stderr.write_all(b\"BACKGROUND-CARGO-HELPER-WRITE-0123456789abcdefghijklmnopqrstuvwxyz\\n\").unwrap();\n        }}\n        return;\n    }}\n    let status = Command::new({:?}).args(env::args_os().skip(1)).status().unwrap();\n    if env::var_os(\"HAWK_OUTPUT_DIR\").is_some() && !status.success() {{\n        println!(\"EXPECTED-CARGO-STDOUT-FAILURE\");\n        eprintln!(\"EXPECTED-CARGO-STDERR-FAILURE\");\n        Command::new(env::current_exe().unwrap()).arg(\"--hawk-test-helper\").stdin(Stdio::null()).spawn().unwrap();\n        std::thread::sleep(Duration::from_millis(50));\n    }}\n    std::process::exit(status.code().unwrap_or(1));\n}}\n",
+            keep_alive,
+            env!("CARGO")
+        ),
+    )
+    .expect("write Cargo shim source");
+    let compiler = Command::new("rustc")
+        .arg(&shim_source)
+        .arg("--edition=2024")
+        .arg("-o")
+        .arg(&shim)
+        .output()
+        .expect("compile Cargo shim");
+    assert!(
+        compiler.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compiler.stderr)
+    );
+
+    let mut paths = vec![shim_directory.path().to_path_buf()];
+    paths.extend(std::env::split_paths(
+        &std::env::var_os("PATH").expect("PATH is set"),
+    ));
+    let output = context
+        .command()
+        .arg("--output-format=json")
+        .env("PATH", std::env::join_paths(paths).expect("construct PATH"))
+        .output()
+        .expect("run cargo-hawk");
+    fs::remove_file(&keep_alive).expect("release background helper");
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("EXPECTED-RUSTC-FAILURE"), "{stderr}");
+    assert!(stderr.contains("EXPECTED-CARGO-STDOUT-FAILURE"), "{stderr}");
+    assert!(stderr.contains("EXPECTED-CARGO-STDERR-FAILURE"), "{stderr}");
+    assert!(
+        stderr.contains("instrumented Cargo check failed with exit status: 101"),
+        "{stderr}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn json_replays_failing_doctest_stdout_and_stderr() {
+    let context = HawkTestContext::new("dead_public_fixes");
+    let shim_directory = tempfile::tempdir().expect("temporary Cargo shim directory");
+    let shim = shim_directory.path().join("cargo");
+    let shim_source = shim_directory.path().join("cargo.rs");
+    fs::write(
+        &shim_source,
+        format!(
+            "use std::env;\nuse std::process::Command;\nfn main() {{\n    if env::var_os(\"HAWK_OUTPUT_DIR\").is_some() && env::args_os().any(|argument| argument == \"--doc\") {{\n        println!(\"EXPECTED-DOCTEST-STDOUT-FAILURE\");\n        eprintln!(\"EXPECTED-DOCTEST-STDERR-FAILURE\");\n        std::process::exit(72);\n    }}\n    let status = Command::new({:?}).args(env::args_os().skip(1)).status().unwrap();\n    std::process::exit(status.code().unwrap_or(1));\n}}\n",
+            env!("CARGO")
+        ),
+    )
+    .expect("write Cargo shim source");
+    let compiler = Command::new("rustc")
+        .arg(&shim_source)
+        .arg("--edition=2024")
+        .arg("-o")
+        .arg(&shim)
+        .output()
+        .expect("compile Cargo shim");
+    assert!(
+        compiler.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compiler.stderr)
+    );
+
+    let mut paths = vec![shim_directory.path().to_path_buf()];
+    paths.extend(std::env::split_paths(
+        &std::env::var_os("PATH").expect("PATH is set"),
+    ));
+    let output = context
+        .command()
+        .arg("--output-format=json")
+        .env("PATH", std::env::join_paths(paths).expect("construct PATH"))
+        .output()
+        .expect("run cargo-hawk");
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("EXPECTED-DOCTEST-STDOUT-FAILURE"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("EXPECTED-DOCTEST-STDERR-FAILURE"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("instrumented Cargo test failed with exit status: 72"),
+        "{stderr}"
+    );
 }
 
 #[test]

@@ -110,19 +110,24 @@ stderr and do not produce a JSON report:
   --output-format=json > hawk-report.json
 ```
 
-The JSON report is versioned with `schema_version` (currently `1`); breaking
+The JSON report is versioned with `schema_version` (currently `2`); breaking
 schema changes increment this version. Its `summary` describes the compilation
 target, configured production binaries,
 feature profiles, non-production coverage, and emitted diagnostic count.
 Every entry in `diagnostics` includes its category, lint code, and severity.
 Finding entries additionally include their finding kind, semantic identity
 (`package`, `crate`, `item`, definition `kind`, parent, and module scope),
-compiler identity (`identity.id`), available source and expansion locations,
+target-independent source-qualified identity (`identity.id`), compiler identity
+(`identity.compiler_id`), available source and expansion locations,
 and the `test_only` and `test_compiled_only` flags. Source locations include
 `line`, `column`, `end_line`, and `end_column` when a complete declaration
 range is available; ending locations are exclusive and include source-spanned
 attributes, documentation, and trailing field, variant, or re-export
 separators.
+The stable identity uses versioned, length-prefixed package, crate, item,
+definition kind, and source-location components, so cfg and path alternatives
+remain distinct while the same declaration can be correlated across targets;
+the compiler identity can change with the target or feature set.
 When rustc cannot retain a complete range for a parsed attribute, such as
 `#[cold]` or `#[unsafe(link_section = "...")]`, the location intentionally
 falls back to `file`, `line`, and `column`; `end_line` and `end_column` are
