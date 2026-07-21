@@ -911,6 +911,77 @@ fn ordered_lint_levels_control_severity_and_exit_status() {
 }
 
 #[test]
+fn dead_public_descendants_respect_configured_overrides() {
+    let context = HawkTestContext::new("basic");
+    let configuration = tempfile::NamedTempFile::new().expect("temporary configuration");
+    fs::write(
+        configuration.path(),
+        r#"
+[[production]]
+package = "app"
+bin = "app"
+reason = "test binary product"
+
+[[override]]
+lint = "hawk::dead_public"
+crate = "library"
+item = "DeadFields"
+level = "allow"
+reason = "parent is intentionally retained"
+
+[[override]]
+lint = "hawk::dead_public"
+crate = "library"
+item = "DeadUnion::value"
+level = "expect"
+reason = "field is intentionally retained"
+"#,
+    )
+    .expect("write temporary configuration");
+    let output = context
+        .command()
+        .arg("--config")
+        .arg(configuration.path())
+        .output()
+        .expect("run cargo-hawk");
+
+    context.assert_success(&output);
+    let stdout = context.normalized_stdout(&output);
+    assert!(!stdout.contains("`DeadFields` is public"));
+    assert!(stdout.contains("`DeadFields::unused` is public"));
+    assert!(!stdout.contains("`DeadUnion` is public"));
+    assert!(!stdout.contains("`DeadUnion::value` is public"));
+    assert!(!stdout.contains("hawk::unfulfilled_expectation"));
+}
+
+#[test]
+fn reports_dead_inherent_members_separately_from_their_type() {
+    let context = HawkTestContext::new("basic");
+    let library_path = context.workspace().join("library/src/lib.rs");
+    let mut library = fs::read_to_string(&library_path).expect("read library source");
+    library.push_str(
+        r"
+
+pub struct DeadInherent;
+
+impl DeadInherent {
+    pub const VALUE: u8 = 1;
+
+    pub fn method() {}
+}
+",
+    );
+    fs::write(library_path, library).expect("write library source");
+    let output = context.run(&[]);
+
+    context.assert_success(&output);
+    let stdout = context.normalized_stdout(&output);
+    assert!(stdout.contains("`DeadInherent` is public"));
+    assert!(stdout.contains("`DeadInherent::VALUE` is public"));
+    assert!(stdout.contains("`DeadInherent::method` is public"));
+}
+
+#[test]
 fn applies_visibility_fixes_through_cargo_fix() {
     let context = HawkTestContext::new("basic");
     let output = context.run(&["--fix", "--allow-no-vcs"]);

@@ -604,8 +604,6 @@ pub fn analyze_with_options<'a>(
         );
     }
 
-    suppress_dead_public_descendants(&mut findings, &definitions, &edges, &equivalents);
-
     findings.sort_by_key(|finding| {
         let span = finding.definition.span.as_ref();
         (
@@ -625,21 +623,74 @@ fn field_group_identity(definition: &Definition) -> Option<&Span> {
     definition.uniform_field_group.as_ref()
 }
 
-fn suppress_dead_public_descendants<'a>(
-    findings: &mut Vec<Finding<'a>>,
-    definitions: &FxHashMap<DefinitionId, &'a Definition>,
+pub fn suppress_dead_public_descendants(
+    production_fragments: &[Fragment],
+    test_fragments: &[Fragment],
+    retained_dead_definitions: &[&Definition],
+    findings: &mut Vec<Finding<'_>>,
+) {
+    if !findings
+        .iter()
+        .any(|finding| finding.kind == FindingKind::DeadPublic)
+    {
+        return;
+    }
+    let definitions: FxHashMap<DefinitionId, &Definition> = production_fragments
+        .iter()
+        .chain(test_fragments)
+        .flat_map(|fragment| &fragment.definitions)
+        .map(|definition| (definition.id, definition))
+        .collect();
+    let definition_compilation_ids: FxHashMap<DefinitionId, usize> = production_fragments
+        .iter()
+        .chain(test_fragments)
+        .enumerate()
+        .flat_map(|(compilation_id, fragment)| {
+            fragment
+                .definitions
+                .iter()
+                .map(move |definition| (definition.id, compilation_id))
+        })
+        .collect();
+    let definition_fragments: FxHashMap<DefinitionId, &Fragment> = production_fragments
+        .iter()
+        .chain(test_fragments)
+        .flat_map(|fragment| {
+            fragment
+                .definitions
+                .iter()
+                .map(move |definition| (definition.id, fragment))
+        })
+        .collect();
+    let edges: Vec<&Edge> = production_fragments
+        .iter()
+        .chain(test_fragments)
+        .flat_map(|fragment| &fragment.edges)
+        .collect();
+    let (equivalents, _) = equivalent_definitions(
+        &definitions,
+        &definition_compilation_ids,
+        &definition_fragments,
+    );
+
+    suppress_dead_public_descendants_with_graph(
+        findings,
+        retained_dead_definitions,
+        &definitions,
+        &edges,
+        &equivalents,
+    );
+}
+
+fn suppress_dead_public_descendants_with_graph(
+    findings: &mut Vec<Finding<'_>>,
+    retained_dead_definitions: &[&Definition],
+    definitions: &FxHashMap<DefinitionId, &Definition>,
     edges: &[&Edge],
     equivalents: &EquivalenceGroups,
 ) {
-    let dead: FxHashSet<_> = findings
-        .iter()
-        .filter(|finding| finding.kind == FindingKind::DeadPublic)
-        .flat_map(|finding| {
-            std::iter::once(finding.definition.id)
-                .chain(equivalents.group(finding.definition.id).iter().copied())
-        })
-        .collect();
     let mut children: FxHashMap<DefinitionId, Vec<DefinitionId>> = FxHashMap::default();
+    let mut parents: FxHashMap<DefinitionId, Vec<DefinitionId>> = FxHashMap::default();
     for edge in edges {
         let Some(child) = definitions.get(&edge.from) else {
             continue;
@@ -649,8 +700,30 @@ fn suppress_dead_public_descendants<'a>(
         };
         if is_containment_edge(edge.kind, child, parent) {
             children.entry(edge.to).or_default().push(edge.from);
+            parents.entry(edge.from).or_default().push(edge.to);
         }
     }
+
+    let protected = reachable(
+        retained_dead_definitions.iter().flat_map(|definition| {
+            std::iter::once(definition.id).chain(equivalents.group(definition.id).iter().copied())
+        }),
+        &parents,
+    );
+    findings.retain(|finding| {
+        finding.kind != FindingKind::DeadPublic
+            || !std::iter::once(finding.definition.id)
+                .chain(equivalents.group(finding.definition.id).iter().copied())
+                .any(|id| protected.contains(&id))
+    });
+    let dead: FxHashSet<_> = findings
+        .iter()
+        .filter(|finding| finding.kind == FindingKind::DeadPublic)
+        .flat_map(|finding| {
+            std::iter::once(finding.definition.id)
+                .chain(equivalents.group(finding.definition.id).iter().copied())
+        })
+        .collect();
 
     let descendants = reachable(
         children
@@ -687,10 +760,6 @@ fn is_containment_edge(kind: EdgeKind, child: &Definition, parent: &Definition) 
                 DefinitionKind::Field,
                 DefinitionKind::Struct | DefinitionKind::Union
             ) | (DefinitionKind::EnumVariant, DefinitionKind::Enum)
-                | (
-                    DefinitionKind::InherentMethod | DefinitionKind::InherentAssociatedConstant,
-                    DefinitionKind::Struct | DefinitionKind::Enum | DefinitionKind::Union
-                )
         ),
         _ => false,
     }
@@ -1170,7 +1239,7 @@ mod tests {
         Definition, DefinitionId, DefinitionKind, Edge, EdgeKind, ExpansionSpan, Finding,
         FindingKind, Fragment, RequiredScope, Span, VisibilityReduction, adjacency,
         analyze as analyze_with_tests, analyze_with_options, equivalent_definitions,
-        extend_equivalence_edges, reachable, reexport_index,
+        extend_equivalence_edges, reachable, reexport_index, suppress_dead_public_descendants,
     };
     use crate::protocol::ProtocolVersion;
     use rustc_hash::{FxHashMap, FxHashSet};
@@ -1527,7 +1596,7 @@ mod tests {
     }
 
     #[test]
-    fn dead_public_members_are_suppressed_beneath_dead_adts() {
+    fn dead_public_fields_and_variants_are_suppressed_beneath_dead_adts() {
         let input = fragments(
             vec![
                 typed_node("DeadStruct", "lib", true, DefinitionKind::Struct),
@@ -1570,11 +1639,26 @@ mod tests {
             .collect(),
         );
 
+        let mut findings = analyze(&input, &HashSet::new());
+        suppress_dead_public_descendants(&input, &[], &[], &mut findings);
+
         assert_eq!(
-            finding_summaries(analyze(&input, &HashSet::new())),
+            finding_summaries(findings),
             vec![
                 (FindingKind::DeadPublic, "DeadEnum".into(), false, false),
                 (FindingKind::DeadPublic, "DeadStruct".into(), false, false),
+                (
+                    FindingKind::DeadPublic,
+                    "DeadStruct::VALUE".into(),
+                    false,
+                    false,
+                ),
+                (
+                    FindingKind::DeadPublic,
+                    "DeadStruct::method".into(),
+                    false,
+                    false,
+                ),
                 (FindingKind::DeadPublic, "DeadUnion".into(), false, false),
             ]
         );
@@ -1603,8 +1687,11 @@ mod tests {
             .collect(),
         );
 
+        let mut findings = analyze(&input, &HashSet::new());
+        suppress_dead_public_descendants(&input, &[], &[], &mut findings);
+
         assert_eq!(
-            finding_summaries(analyze(&input, &HashSet::new())),
+            finding_summaries(findings),
             vec![(FindingKind::DeadPublic, "dead".into(), false, false)]
         );
     }
@@ -1627,8 +1714,11 @@ mod tests {
                 .collect(),
         );
 
+        let mut findings = analyze(&input, &HashSet::new());
+        suppress_dead_public_descendants(&input, &[], &[], &mut findings);
+
         assert_eq!(
-            finding_summaries(analyze(&input, &HashSet::new())),
+            finding_summaries(findings),
             vec![
                 (FindingKind::DeadPublic, "Dead".into(), false, false),
                 (FindingKind::DeadPublic, "Other::field".into(), false, false),

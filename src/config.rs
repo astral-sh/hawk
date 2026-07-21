@@ -8,7 +8,9 @@ use anyhow::{Context, Result, bail};
 use cargo_platform::{Cfg, Platform};
 use serde::Deserialize;
 
-use cargo_hawk_internal::graph::{Definition, DefinitionKind, Finding, FindingKind, Fragment};
+use cargo_hawk_internal::graph::{
+    Definition, DefinitionKind, Finding, FindingKind, Fragment, suppress_dead_public_descendants,
+};
 
 #[derive(Debug)]
 pub(crate) struct Config {
@@ -598,13 +600,24 @@ impl Config {
             .filter(|entry| entry.applies_to(target))
             .filter(|entry| known_items.iter().any(|item| entry.identifies(item)))
             .collect::<Vec<_>>();
-        let findings = findings
+        let mut retained_dead_definitions = Vec::new();
+        let mut findings = findings
             .into_iter()
             .filter(|finding| {
-                !active_overrides.iter().any(|entry| entry.matches(finding))
-                    && !active_exclusions.iter().any(|entry| entry.matches(finding))
+                let suppressed = active_overrides.iter().any(|entry| entry.matches(finding))
+                    || active_exclusions.iter().any(|entry| entry.matches(finding));
+                if suppressed && finding.kind == FindingKind::DeadPublic {
+                    retained_dead_definitions.push(finding.definition);
+                }
+                !suppressed
             })
             .collect();
+        suppress_dead_public_descendants(
+            production_fragments,
+            test_fragments,
+            &retained_dead_definitions,
+            &mut findings,
+        );
         AppliedFindings {
             findings,
             config_diagnostics,
@@ -787,7 +800,8 @@ mod tests {
 
     use super::{AnalysisTarget, Config, ConfigDiagnosticKind};
     use cargo_hawk_internal::graph::{
-        Definition, DefinitionId, DefinitionKind, FindingKind, Fragment, Span, analyze,
+        Definition, DefinitionId, DefinitionKind, Edge, EdgeKind, FindingKind, Fragment, Span,
+        analyze,
     };
 
     fn test_id(value: &str) -> DefinitionId {
@@ -840,6 +854,25 @@ mod tests {
 
     fn candidate_crates() -> HashSet<String> {
         HashSet::from(["library".to_owned()])
+    }
+
+    fn dead_parent_fragment() -> Fragment {
+        let mut fragment = fragment();
+        let mut parent = fragment.definitions[0].clone();
+        parent.id = test_id("Dead");
+        parent.name = "Dead".into();
+        parent.kind = DefinitionKind::Struct;
+        let mut child = fragment.definitions[0].clone();
+        child.id = test_id("Dead::field");
+        child.name = "Dead::field".into();
+        child.kind = DefinitionKind::Field;
+        fragment.definitions = vec![parent, child];
+        fragment.edges = vec![Edge {
+            from: test_id("Dead::field"),
+            to: test_id("Dead"),
+            kind: EdgeKind::Interface,
+        }];
+        fragment
     }
 
     fn same_named_fragment() -> Fragment {
@@ -990,6 +1023,110 @@ reason = "known retained public surface"
         );
 
         assert!(applied.findings.is_empty());
+        assert!(applied.config_diagnostics.is_empty());
+    }
+
+    #[test]
+    fn allowing_a_dead_parent_keeps_its_dead_child_actionable() {
+        let directory = tempfile::tempdir().expect("temporary configuration directory");
+        let path = directory.path().join("hawk.toml");
+        std::fs::write(
+            &path,
+            r#"
+[[override]]
+lint = "hawk::dead_public"
+crate = "library"
+item = "Dead"
+level = "allow"
+reason = "parent is intentionally retained"
+"#,
+        )
+        .expect("write configuration");
+        let config = Config::load(directory.path(), Some(&path)).expect("load configuration");
+        let fragments = vec![dead_parent_fragment()];
+        let findings = analyze(&fragments, &[], &candidate_crates(), &HashSet::new());
+
+        let applied = config.apply(
+            &target("aarch64-apple-darwin", &["unix"]),
+            &fragments,
+            &[],
+            findings,
+        );
+
+        assert_eq!(applied.findings.len(), 1);
+        assert_eq!(applied.findings[0].definition.name, "Dead::field");
+        assert!(applied.config_diagnostics.is_empty());
+    }
+
+    #[test]
+    fn dead_child_expectation_is_fulfilled_before_parent_collapsing() {
+        let directory = tempfile::tempdir().expect("temporary configuration directory");
+        let path = directory.path().join("hawk.toml");
+        std::fs::write(
+            &path,
+            r#"
+[[override]]
+lint = "hawk::dead_public"
+crate = "library"
+item = "Dead::field"
+level = "expect"
+reason = "field is intentionally retained"
+"#,
+        )
+        .expect("write configuration");
+        let config = Config::load(directory.path(), Some(&path)).expect("load configuration");
+        let fragments = vec![dead_parent_fragment()];
+        let findings = analyze(&fragments, &[], &candidate_crates(), &HashSet::new());
+
+        let applied = config.apply(
+            &target("aarch64-apple-darwin", &["unix"]),
+            &fragments,
+            &[],
+            findings,
+        );
+
+        assert!(applied.findings.is_empty());
+        assert!(applied.config_diagnostics.is_empty());
+    }
+
+    #[test]
+    fn excluding_a_dead_parent_file_keeps_its_dead_child_actionable() {
+        let directory = tempfile::tempdir().expect("temporary configuration directory");
+        let path = directory.path().join("hawk.toml");
+        std::fs::write(
+            &path,
+            r#"
+[[exclude]]
+crate = "library"
+file = "library/src/parent.rs"
+reason = "generated parent declaration"
+"#,
+        )
+        .expect("write configuration");
+        let config = Config::load(directory.path(), Some(&path)).expect("load configuration");
+        let mut fragment = dead_parent_fragment();
+        fragment.definitions[0].span = Some(Span {
+            file: "library/src/parent.rs".into(),
+            line: 1,
+            column: 1,
+        });
+        fragment.definitions[1].span = Some(Span {
+            file: "library/src/child.rs".into(),
+            line: 1,
+            column: 1,
+        });
+        let fragments = vec![fragment];
+        let findings = analyze(&fragments, &[], &candidate_crates(), &HashSet::new());
+
+        let applied = config.apply(
+            &target("aarch64-apple-darwin", &["unix"]),
+            &fragments,
+            &[],
+            findings,
+        );
+
+        assert_eq!(applied.findings.len(), 1);
+        assert_eq!(applied.findings[0].definition.name, "Dead::field");
         assert!(applied.config_diagnostics.is_empty());
     }
 

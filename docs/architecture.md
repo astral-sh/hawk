@@ -246,11 +246,14 @@ For each public candidate in a non-excluded workspace library crate:
 | Live in production or non-production, but not required public     | `hawk::unnecessary_public` |
 | Required public by a compiled cross-crate consumer or interface   | no visibility finding      |
 
-When a declaration is already reported as `hawk::dead_public`, Hawk omits
-dead-public findings for its fields, enum variants, inherent members, and
-nested declarations. Removing the enclosing declaration removes those
-descendants too, while unrelated interface dependencies continue to receive
-their own findings.
+After applying configured overrides and exclusions, Hawk omits dead-public
+findings for fields, enum variants, and nested declarations beneath a remaining
+`hawk::dead_public` parent. Removing the enclosing declaration removes those
+descendants too, while separately declared inherent members and unrelated
+interface dependencies continue to receive their own findings. Suppressing a
+parent leaves any otherwise actionable descendants visible, while retaining a
+descendant protects its enclosing declaration from a misleading removal
+diagnostic.
 
 A selected production target is not a library surface to reduce, so its crate
 does not receive these findings.
