@@ -12,6 +12,7 @@ use rustc_driver::{Callbacks, Compilation};
 use rustc_errors::Applicability;
 use rustc_hir as hir;
 use rustc_hir::Node;
+use rustc_hir::attrs::AttributeKind;
 use rustc_hir::def::{CtorOf, DefKind, Res};
 use rustc_hir::def_id::{CRATE_DEF_ID, DefId, LocalDefId};
 use rustc_hir::intravisit::{self, Visitor};
@@ -30,8 +31,9 @@ use rustc_span::{BytePos, FileName, Pos};
 
 use crate::protocol;
 use cargo_hawk_internal::graph::{
-    CollectionOptions, Definition, DefinitionId, DefinitionIdentity, DefinitionKind, Edge,
-    EdgeKind, ExpansionSpan, FindingKind, FixPlan, FixTarget, Fragment, Span, VisibilityReduction,
+    CollectionOptions, DeclarationSpan, Definition, DefinitionId, DefinitionIdentity,
+    DefinitionKind, Edge, EdgeKind, ExpansionSpan, FindingKind, FixPlan, FixTarget, Fragment, Span,
+    VisibilityReduction,
 };
 
 pub(crate) fn is_protocol_version_query(args: &[String]) -> bool {
@@ -458,6 +460,7 @@ fn collect_fragment(
             kind.unwrap_or(DefinitionKind::Other),
             public_api,
             visibility.as_deref(),
+            collection_options,
         ));
         defined.insert(def_id);
     }
@@ -504,6 +507,7 @@ fn collect_fragment(
                         DefinitionKind::Field,
                         public_api,
                         visibility.as_deref(),
+                        collection_options,
                     );
                     field_definition
                         .uniform_field_group
@@ -522,6 +526,7 @@ fn collect_fragment(
                         DefinitionKind::EnumVariant,
                         is_public_variant(tcx, variant.def_id, test_surface),
                         visibility_modifier(tcx, variant.def_id).as_deref(),
+                        collection_options,
                     ));
                     defined.insert(variant.def_id);
                     adt_members.push((variant.def_id, item.owner_id.def_id));
@@ -540,6 +545,7 @@ fn collect_fragment(
                 DefinitionKind::Other,
                 false,
                 visibility_modifier(tcx, def_id).as_deref(),
+                collection_options,
             ));
         }
     }
@@ -1013,6 +1019,7 @@ fn definition(
     kind: DefinitionKind,
     public_api: bool,
     visibility: Option<&str>,
+    collection_options: CollectionOptions,
 ) -> Definition {
     let has_explicit_visibility =
         visibility.is_some_and(|visibility| visibility.starts_with("pub"));
@@ -1028,6 +1035,10 @@ fn definition(
         name: definition_name(tcx, def_id, kind),
         kind,
         span: span(tcx, def_id),
+        declaration_span: (collection_options.collect_declaration_spans()
+            && (public_api || restricted_visible_api))
+            .then(|| declaration_span(tcx, def_id, kind))
+            .flatten(),
         expansion_span: expansion_span(tcx, def_id),
         public_api,
         restricted_visible_api,
@@ -1141,6 +1152,81 @@ fn expansion_span(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Option<ExpansionSpan> 
     Some(ExpansionSpan {
         definition: source_span(tcx, span),
         callsite: source_span(tcx, callsite),
+    })
+}
+
+fn declaration_span(
+    tcx: TyCtxt<'_>,
+    def_id: LocalDefId,
+    kind: DefinitionKind,
+) -> Option<DeclarationSpan> {
+    let mut item_span = tcx
+        .hir_node_by_def_id(def_id)
+        .as_owner()
+        .map_or_else(|| tcx.def_span(def_id), |owner| owner.span());
+    if item_span.is_dummy() || item_span.from_expansion() {
+        return None;
+    }
+    if matches!(
+        kind,
+        DefinitionKind::Field | DefinitionKind::EnumVariant | DefinitionKind::Reexport
+    ) {
+        let extended = item_span.with_hi(item_span.hi() + BytePos(1));
+        if tcx
+            .sess
+            .source_map()
+            .span_to_snippet(extended)
+            .is_ok_and(|source| source.ends_with(','))
+        {
+            item_span = extended;
+        }
+    }
+
+    let mut start = item_span.lo();
+    for attr in tcx.hir_attrs(tcx.local_def_id_to_hir_id(def_id)) {
+        let attr_span = match attr {
+            hir::Attribute::Unparsed(_)
+            | hir::Attribute::Parsed(
+                AttributeKind::DocComment { .. }
+                | AttributeKind::Deprecated { .. }
+                | AttributeKind::CfgTrace(_),
+            ) => attr.span(),
+            hir::Attribute::Parsed(AttributeKind::Doc(documentation)) => documentation.first_span,
+            hir::Attribute::Parsed(
+                AttributeKind::Inline(_, span)
+                | AttributeKind::MustUse { span, .. }
+                | AttributeKind::NonExhaustive(span)
+                | AttributeKind::NoMangle(span)
+                | AttributeKind::Naked(span)
+                | AttributeKind::TrackCaller(span)
+                | AttributeKind::Optimize(_, span)
+                | AttributeKind::ExportName { span, .. }
+                | AttributeKind::Repr {
+                    first_span: span, ..
+                }
+                | AttributeKind::TargetFeature {
+                    attr_span: span, ..
+                },
+            ) => *span,
+            hir::Attribute::Parsed(_) => return None,
+        };
+        if attr_span.is_dummy() || attr_span.from_expansion() {
+            return None;
+        }
+        start = start.min(attr_span.lo());
+    }
+
+    let source_map = tcx.sess.source_map();
+    let start = source_map.lookup_char_pos(start);
+    let end = source_map.lookup_char_pos(item_span.hi());
+    let file = normalize_source_path(&start.file.name.prefer_local_unconditionally().to_string());
+    let end_file = normalize_source_path(&end.file.name.prefer_local_unconditionally().to_string());
+    (file == end_file).then_some(DeclarationSpan {
+        file,
+        start_line: start.line,
+        start_column: start.col.to_usize() + 1,
+        end_line: end.line,
+        end_column: end.col.to_usize() + 1,
     })
 }
 
@@ -1404,7 +1490,7 @@ mod tests {
 
         assert_eq!(
             error.to_string(),
-            "Hawk frontend uses compiler driver protocol 1, but this driver uses protocol 5; install `cargo-hawk` and `cargo-hawk-driver` from the same release"
+            "Hawk frontend uses compiler driver protocol 1, but this driver uses protocol 6; install `cargo-hawk` and `cargo-hawk-driver` from the same release"
         );
     }
 
@@ -1443,6 +1529,15 @@ mod tests {
             )))
             .expect("uniform field collection option")
             .preserve_uniform_field_visibility()
+        );
+        assert!(
+            parse_collection_options(Some(OsStr::new(
+                CollectionOptions::new(true)
+                    .with_declaration_spans()
+                    .as_env_value()
+            )))
+            .expect("declaration-span collection option")
+            .collect_declaration_spans()
         );
         insta::assert_snapshot!(
             parse_collection_options(Some(OsStr::new("unknown")))

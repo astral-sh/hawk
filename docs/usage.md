@@ -118,10 +118,13 @@ Every entry in `diagnostics` includes its category, lint code, and severity.
 Finding entries additionally include their finding kind, semantic identity
 (`package`, `crate`, `item`, definition `kind`, parent, and module scope),
 compiler identity (`identity.id`), available source and expansion locations,
-and the `test_only` and `test_compiled_only` flags. Configuration diagnostics
-include the referenced lint and item, configuration location, and reason.
-Source locations currently identify the start of a declaration; consumers
-should not interpret them as complete deletion ranges.
+and the `test_only` and `test_compiled_only` flags. Source locations include
+`line`, `column`, `end_line`, and `end_column` when a complete declaration
+range is available; ending locations are exclusive and include source-spanned
+attributes, documentation, and trailing field, variant, or re-export
+separators.
+Configuration diagnostics include the referenced
+lint and item, configuration location, and reason.
 
 `--fix` supports the default profile or one explicitly configured feature
 profile. Hawk rejects fixing runs with a multi-profile matrix; run analysis

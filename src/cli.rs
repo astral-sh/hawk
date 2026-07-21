@@ -5,6 +5,10 @@ use std::fmt::Write as _;
 use std::fs::{self, File};
 use std::hash::{Hash, Hasher};
 use std::io::{BufReader, Write as _};
+#[cfg(unix)]
+use std::os::fd::AsFd as _;
+#[cfg(windows)]
+use std::os::windows::io::AsHandle as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 
@@ -459,7 +463,12 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
         target_dir: &target_dir,
         driver: &driver,
         toolchain: &toolchain,
-        collection_options: CollectionOptions::new(config.preserve_uniform_field_visibility()),
+        collection_options: if args.output_format == OutputFormat::Json {
+            CollectionOptions::new(config.preserve_uniform_field_visibility())
+                .with_declaration_spans()
+        } else {
+            CollectionOptions::new(config.preserve_uniform_field_visibility())
+        },
         doctest_packages: doctest_packages.as_deref(),
     };
     let mut production_fragments = Vec::new();
@@ -728,7 +737,20 @@ fn json_finding(
             "parent": definition.name.rsplit_once("::").map(|(parent, _)| parent),
             "module_scope": definition.module_scope,
         },
-        "location": definition.span,
+        "location": definition.declaration_span.as_ref().map_or_else(
+            || definition.span.as_ref().map(|span| serde_json::json!({
+                "file": span.file,
+                "line": span.line,
+                "column": span.column,
+            })),
+            |span| Some(serde_json::json!({
+                "file": span.file,
+                "line": span.start_line,
+                "column": span.start_column,
+                "end_line": span.end_line,
+                "end_column": span.end_column,
+            })),
+        ),
         "expansion": definition.expansion_span,
         "test_only": finding.test_only,
         "test_compiled_only": finding.test_compiled_only,
@@ -881,7 +903,6 @@ struct ConfiguredCargoCommand {
     command: Command,
     subcommand: &'static str,
     capture_output: bool,
-    stream_stdout_to_stderr: bool,
 }
 
 struct CollectedFragments {
@@ -1033,14 +1054,17 @@ impl InstrumentedCargo<'_> {
         if self.args.output_format == OutputFormat::Json {
             command.stderr(Stdio::inherit());
             if !doctests {
-                command.stdout(Stdio::piped());
+                #[cfg(unix)]
+                let stderr = std::io::stderr().as_fd().try_clone_to_owned();
+                #[cfg(windows)]
+                let stderr = std::io::stderr().as_handle().try_clone_to_owned();
+                command.stdout(stderr.context("duplicate stderr for Cargo stdout")?);
             }
         }
         Ok(ConfiguredCargoCommand {
             command,
             subcommand,
             capture_output: doctests && self.args.output_format == OutputFormat::Text,
-            stream_stdout_to_stderr: !doctests && self.args.output_format == OutputFormat::Json,
         })
     }
 
@@ -1055,23 +1079,8 @@ impl InstrumentedCargo<'_> {
             mut command,
             subcommand,
             capture_output,
-            stream_stdout_to_stderr,
         } = self.command(run_id, graph_dir, invocation, feature_profile)?;
-        let status = if stream_stdout_to_stderr {
-            let mut child = command
-                .spawn()
-                .with_context(|| format!("run instrumented Cargo {subcommand}"))?;
-            let mut stdout = child
-                .stdout
-                .take()
-                .expect("streamed Cargo output has piped stdout");
-            let copy_result = std::io::copy(&mut stdout, &mut std::io::stderr());
-            let status = child
-                .wait()
-                .with_context(|| format!("wait for instrumented Cargo {subcommand}"))?;
-            copy_result.context("write streamed Cargo stdout")?;
-            status
-        } else if capture_output {
+        let status = if capture_output {
             let output = command
                 .output()
                 .with_context(|| format!("run instrumented Cargo {subcommand}"))?;
@@ -1790,6 +1799,7 @@ mod tests {
                 line: 5,
                 column: 1,
             }),
+            declaration_span: None,
             expansion_span: None,
             public_api: true,
             restricted_visible_api: false,
@@ -1831,6 +1841,7 @@ mod tests {
                 line: 7,
                 column: 5,
             }),
+            declaration_span: None,
             expansion_span: None,
             public_api: false,
             restricted_visible_api: true,
@@ -1871,6 +1882,7 @@ mod tests {
                 line: 16,
                 column: 5,
             }),
+            declaration_span: None,
             expansion_span: None,
             public_api: false,
             restricted_visible_api: true,
@@ -1907,6 +1919,7 @@ mod tests {
             name: "InternalState::Active".into(),
             kind: DefinitionKind::EnumVariant,
             span: None,
+            declaration_span: None,
             expansion_span: None,
             public_api: true,
             restricted_visible_api: false,
