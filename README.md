@@ -34,6 +34,8 @@ unnecessarily public symbols across crates within a single workspace.
 
 - Analyzes public surface across an entire Cargo workspace, starting from
   configured production targets.
+- Combines reachability across multiple compilation targets and feature
+  profiles.
 - Reports `hawk::dead_public` for unused public items,
   `hawk::unnecessary_public` for `pub` items that can become `pub(crate)`, and
   `hawk::unnecessary_restricted_visibility` for restricted items that can

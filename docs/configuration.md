@@ -30,9 +30,9 @@ required by that binary are not reported as dead or unnecessarily public.
 Every package and binary must be a target of the selected Cargo workspace. At
 least one production target must apply to the analyzed target.
 
-All configured binaries are analyzed with the same feature profiles and
-compilation target. Hawk intentionally does not infer production targets from
-the workspace: configure each intended target explicitly.
+All configured binaries are analyzed with the same feature profiles and each
+selected compilation target. Hawk intentionally does not infer production
+targets from the workspace: configure each intended target explicitly.
 
 ## Doctest packages
 
@@ -81,11 +81,12 @@ explicit `features` list. A profile with none of those settings uses Cargo's
 default features. Each string in `features` is passed as a separate Cargo
 `--features` value.
 
-Automatic fixes are currently rejected when multiple feature profiles are
-configured. Applying a visibility change safely across several configurations
-requires a coordinated fix plan; run the matrix without `--fix`, or select a
-single profile for a fixing run. Feature profiles do not select compilation
-targets; `--target` still selects one target for the entire analysis.
+Automatic fixes are currently rejected when multiple feature profiles or
+compilation targets are configured. Applying a visibility change safely across
+several configurations requires a coordinated fix plan; run the matrix without
+`--fix`, or select a single profile and compilation target for a fixing run.
+Feature profiles do not select compilation targets; repeat `--target` to add
+targets to the analysis matrix.
 
 ## Uniform field visibility
 
@@ -218,9 +219,9 @@ target = "cfg(not(windows))"
 reason = "non-Windows compatibility surface"
 ```
 
-An entry is validated only when its selector applies to the analyzed
+An entry is validated when its selector applies to at least one analyzed
 compilation target. This avoids stale-expectation failures for declarations
-that are not compiled on that target.
+that are not compiled on any selected target.
 
 ## External library boundaries
 

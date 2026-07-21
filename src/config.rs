@@ -542,6 +542,16 @@ impl Config {
         test_fragments: &[Fragment],
         findings: Vec<Finding<'findings>>,
     ) -> AppliedFindings<'findings, 'config> {
+        self.apply_targets(&[target], production_fragments, test_fragments, findings)
+    }
+
+    pub(crate) fn apply_targets<'findings, 'config>(
+        &'config self,
+        targets: &[&AnalysisTarget],
+        production_fragments: &[Fragment],
+        test_fragments: &[Fragment],
+        findings: Vec<Finding<'findings>>,
+    ) -> AppliedFindings<'findings, 'config> {
         let known_items: HashSet<KnownItemIdentity<'_>> = production_fragments
             .iter()
             .chain(test_fragments)
@@ -562,7 +572,7 @@ impl Config {
         for entry in self
             .overrides
             .iter()
-            .filter(|entry| entry.applies_to(target))
+            .filter(|entry| targets.iter().any(|target| entry.applies_to(target)))
         {
             let matching_items = logical_items
                 .iter()
@@ -595,7 +605,7 @@ impl Config {
         let active_exclusions = self
             .exclusions
             .iter()
-            .filter(|entry| entry.applies_to(target))
+            .filter(|entry| targets.iter().any(|target| entry.applies_to(target)))
             .filter(|entry| known_items.iter().any(|item| entry.identifies(item)))
             .collect::<Vec<_>>();
         let findings = findings
@@ -1358,6 +1368,36 @@ reason = "generated only on Windows"
             analyze(&fragments, &[], &candidate_crates(), &HashSet::new()),
         );
         assert_eq!(unix.findings.len(), 4);
+    }
+
+    #[test]
+    fn target_scoped_exclusion_applies_in_a_combined_target_matrix() {
+        let directory = tempfile::tempdir().expect("temporary configuration directory");
+        let path = directory.path().join("hawk.toml");
+        std::fs::write(
+            &path,
+            r#"
+[[exclude]]
+crate = "library"
+module = "generated"
+target = "cfg(windows)"
+reason = "generated only on Windows"
+"#,
+        )
+        .expect("write configuration");
+        let config = Config::load(directory.path(), Some(&path)).expect("load configuration");
+        let fragments = vec![scoped_fragment()];
+        let unix = target("aarch64-apple-darwin", &["unix"]);
+        let windows = target("x86_64-pc-windows-msvc", &["windows"]);
+
+        let applied = config.apply_targets(
+            &[&unix, &windows],
+            &fragments,
+            &[],
+            analyze(&fragments, &[], &candidate_crates(), &HashSet::new()),
+        );
+
+        assert_eq!(applied.findings.len(), 2);
     }
 
     #[test]

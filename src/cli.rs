@@ -48,9 +48,9 @@ struct CheckArgs {
     #[arg(long, default_value = "Cargo.toml")]
     manifest_path: PathBuf,
 
-    /// Compilation target triple to analyze; defaults to the host target.
-    #[arg(long, value_name = "TRIPLE")]
-    target: Option<String>,
+    /// Compilation target triple to analyze; repeat to combine targets.
+    #[arg(long = "target", value_name = "TRIPLE")]
+    targets: Vec<String>,
 
     /// Workspace library crate whose API is an external boundary.
     #[arg(long = "exclude-crate")]
@@ -315,45 +315,65 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
         );
     }
     let toolchain = RustToolchain::discover(&workspace_root, &manifest_path)?;
-    let analysis_target = AnalysisTarget::from_rustc(
-        args.target.as_deref(),
-        toolchain.host(),
-        toolchain.rustc(),
-        &workspace_root,
-    )?;
-    let mut production_products: Vec<ProductionSelection<'_>> = Vec::new();
-    for consumer in config.production_consumers(&analysis_target) {
-        let config_path = config
-            .path()
-            .expect("configured production consumer has a configuration path");
-        validate_product(&metadata, &consumer.package, &consumer.binary).with_context(|| {
-            format!(
-                "validate production consumer in {}:{}:{}: {}",
-                config_path.display(),
-                consumer.span.line,
-                consumer.span.column,
-                consumer.reason
-            )
-        })?;
-        if !production_products
-            .iter()
-            .any(|product| product.package == consumer.package && product.binary == consumer.binary)
-        {
-            production_products.push(ProductionSelection {
-                package: &consumer.package,
-                binary: &consumer.binary,
-            });
-        }
-    }
-    if production_products.is_empty() {
-        let config_path = config
-            .path()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| workspace_root.join("hawk.toml"));
+    let compilation_targets = compilation_targets(&args.targets);
+    if args.fix && compilation_targets.len() > 1 {
         bail!(
-            "no applicable production binaries configured in {}; add a `[[production]]` entry",
-            config_path.display()
+            "--fix does not support multiple compilation targets; run analysis without --fix or select a single `--target`"
         );
+    }
+    let mut target_graphs = Vec::new();
+    for compilation_target in compilation_targets {
+        let analysis_target = AnalysisTarget::from_rustc(
+            compilation_target,
+            toolchain.host(),
+            toolchain.rustc(),
+            &workspace_root,
+        )?;
+        let mut production_products: Vec<ProductionSelection<'_>> = Vec::new();
+        for consumer in config.production_consumers(&analysis_target) {
+            let config_path = config
+                .path()
+                .expect("configured production consumer has a configuration path");
+            validate_product(&metadata, &consumer.package, &consumer.binary).with_context(
+                || {
+                    format!(
+                        "validate production consumer in {}:{}:{}: {}",
+                        config_path.display(),
+                        consumer.span.line,
+                        consumer.span.column,
+                        consumer.reason
+                    )
+                },
+            )?;
+            if !production_products.iter().any(|product| {
+                product.package == consumer.package && product.binary == consumer.binary
+            }) {
+                production_products.push(ProductionSelection {
+                    package: &consumer.package,
+                    binary: &consumer.binary,
+                });
+            }
+        }
+        if production_products.is_empty() {
+            let config_path = config
+                .path()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| workspace_root.join("hawk.toml"));
+            let target_description = compilation_target.map_or_else(
+                || "the host target".to_owned(),
+                |target| format!("target `{target}`"),
+            );
+            bail!(
+                "no applicable production binaries configured in {} for {target_description}; add a `[[production]]` entry",
+                config_path.display()
+            );
+        }
+        target_graphs.push(CompilationTargetGraph {
+            compilation_target,
+            analysis_target,
+            production_products,
+            profile_graphs: Vec::new(),
+        });
     }
     let doctest_packages = config
         .doctest_packages()
@@ -409,63 +429,99 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
         .unwrap_or(graph_dir.as_os_str())
         .to_string_lossy()
         .into_owned();
-    let mut profile_graphs = Vec::new();
-    for (index, feature_profile) in config.feature_profiles().iter().enumerate() {
-        let profile_graph_dir = graph_dir
-            .join("feature-profiles")
-            .join(format!("{index}-{}", feature_profile.name()));
-        let production_dir = profile_graph_dir.join("production");
-        let non_production_dir = profile_graph_dir.join("non-production");
-        fs::create_dir_all(&production_dir).with_context(|| {
-            format!(
-                "create production graph directory {}",
-                production_dir.display()
-            )
-        })?;
-        fs::create_dir_all(&non_production_dir).with_context(|| {
-            format!(
-                "create non-production graph directory {}",
-                non_production_dir.display()
-            )
-        })?;
-        profile_graphs.push(FeatureProfileGraph {
-            feature_profile,
-            run_id: format!("{run_id}-feature-profile-{index}"),
-            production_dir,
-            non_production_dir,
-        });
+    let multiple_targets = target_graphs.len() > 1;
+    for (target_index, target_graph) in target_graphs.iter_mut().enumerate() {
+        let target_graph_dir = if multiple_targets {
+            graph_dir
+                .join("compilation-targets")
+                .join(compilation_target_directory(
+                    target_index,
+                    target_graph.compilation_target.unwrap_or("host"),
+                ))
+        } else {
+            graph_dir.clone()
+        };
+        for (profile_index, feature_profile) in config.feature_profiles().iter().enumerate() {
+            let profile_graph_dir = target_graph_dir
+                .join("feature-profiles")
+                .join(format!("{profile_index}-{}", feature_profile.name()));
+            let production_dir = profile_graph_dir.join("production");
+            let non_production_dir = profile_graph_dir.join("non-production");
+            fs::create_dir_all(&production_dir).with_context(|| {
+                format!(
+                    "create production graph directory {}",
+                    production_dir.display()
+                )
+            })?;
+            fs::create_dir_all(&non_production_dir).with_context(|| {
+                format!(
+                    "create non-production graph directory {}",
+                    non_production_dir.display()
+                )
+            })?;
+            target_graph.profile_graphs.push(FeatureProfileGraph {
+                feature_profile,
+                run_id: format!(
+                    "{run_id}-compilation-target-{target_index}-feature-profile-{profile_index}"
+                ),
+                production_dir,
+                non_production_dir,
+            });
+        }
     }
 
     let driver = driver_executable()?;
     validate_driver_protocol(&driver, &toolchain)?;
-    let cargo = InstrumentedCargo {
-        args: &args,
-        workspace_root: &workspace_root,
-        manifest_path: &manifest_path,
-        target_dir: &target_dir,
-        driver: &driver,
-        toolchain: &toolchain,
-        collection_options: CollectionOptions::new(config.preserve_uniform_field_visibility()),
-        doctest_packages: doctest_packages.as_deref(),
-    };
     let mut production_fragments = Vec::new();
     let mut test_fragments = Vec::new();
-    for profile_graph in &profile_graphs {
-        let (profile_production, profile_tests) =
-            collect_profile_fragments(&cargo, profile_graph, &production_products, "initial")?;
-        production_fragments.extend(profile_production);
-        test_fragments.extend(profile_tests);
+    for target_graph in &target_graphs {
+        let cargo = InstrumentedCargo {
+            args: &args,
+            compilation_target: target_graph.compilation_target,
+            workspace_root: &workspace_root,
+            manifest_path: &manifest_path,
+            target_dir: &target_dir,
+            driver: &driver,
+            toolchain: &toolchain,
+            collection_options: CollectionOptions::new(config.preserve_uniform_field_visibility()),
+            doctest_packages: doctest_packages.as_deref(),
+        };
+        for profile_graph in &target_graph.profile_graphs {
+            let (profile_production, profile_tests) = collect_profile_fragments(
+                &cargo,
+                profile_graph,
+                &target_graph.production_products,
+                "initial",
+            )?;
+            production_fragments.extend(profile_production);
+            test_fragments.extend(profile_tests);
+        }
     }
     let excluded: HashSet<String> = args.excluded_crates.iter().cloned().collect();
     if args.fix {
-        let profile_graph = profile_graphs
+        let target_graph = target_graphs
+            .first()
+            .expect("every analysis has a compilation target");
+        let cargo = InstrumentedCargo {
+            args: &args,
+            compilation_target: target_graph.compilation_target,
+            workspace_root: &workspace_root,
+            manifest_path: &manifest_path,
+            target_dir: &target_dir,
+            driver: &driver,
+            toolchain: &toolchain,
+            collection_options: CollectionOptions::new(config.preserve_uniform_field_visibility()),
+            doctest_packages: doctest_packages.as_deref(),
+        };
+        let profile_graph = target_graph
+            .profile_graphs
             .first()
             .expect("every feature profile has a graph directory");
         let mut fix_iteration = 0;
         let mut applied_fix_plans = HashSet::new();
         loop {
             let initial_findings = config.apply(
-                &analysis_target,
+                &target_graph.analysis_target,
                 &production_fragments,
                 &test_fragments,
                 analyze_with_options(
@@ -568,13 +624,17 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
             (production_fragments, test_fragments) = collect_profile_fragments(
                 &cargo,
                 profile_graph,
-                &production_products,
+                &target_graph.production_products,
                 &format!("post-fix-{fix_iteration}"),
             )?;
         }
     }
-    let findings = config.apply(
-        &analysis_target,
+    let analysis_targets = target_graphs
+        .iter()
+        .map(|target_graph| &target_graph.analysis_target)
+        .collect::<Vec<_>>();
+    let findings = config.apply_targets(
+        &analysis_targets,
         &production_fragments,
         &test_fragments,
         analyze_with_options(
@@ -588,6 +648,17 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
     let mut renderer = DiagnosticRenderer::new(&workspace_root);
     let mut diagnostic_count = 0;
     let mut has_denied_diagnostic = false;
+    let production_products = target_graphs
+        .iter()
+        .flat_map(|target_graph| target_graph.production_products.iter().copied())
+        .fold(Vec::new(), |mut products, product| {
+            if !products.iter().any(|candidate: &ProductionSelection<'_>| {
+                candidate.package == product.package && candidate.binary == product.binary
+            }) {
+                products.push(product);
+            }
+            products
+        });
     let production_description = if production_products.len() == 1 {
         format!("binary `{}`", production_products[0].binary)
     } else {
@@ -613,10 +684,7 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
                 .expect("formatting diagnostics into a string cannot fail");
         }
     }
-    let compilation_target = args.target.as_deref().map_or_else(
-        || "the host target".to_owned(),
-        |target| format!("target `{target}`"),
-    );
+    let compilation_target = compilation_target_summary(&target_graphs);
     let production_summary = production_summary(&production_products, config.feature_profiles());
     renderer
         .write_summary(diagnostic_count, &production_summary, &compilation_target)
@@ -661,6 +729,7 @@ fn terminal_color(raw_args: &[String]) -> TerminalColor {
 
 struct InstrumentedCargo<'a> {
     args: &'a CheckArgs,
+    compilation_target: Option<&'a str>,
     workspace_root: &'a Path,
     manifest_path: &'a Path,
     target_dir: &'a Path,
@@ -681,6 +750,13 @@ struct FeatureProfileGraph<'a> {
     run_id: String,
     production_dir: PathBuf,
     non_production_dir: PathBuf,
+}
+
+struct CompilationTargetGraph<'a> {
+    compilation_target: Option<&'a str>,
+    analysis_target: AnalysisTarget,
+    production_products: Vec<ProductionSelection<'a>>,
+    profile_graphs: Vec<FeatureProfileGraph<'a>>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -832,7 +908,7 @@ impl InstrumentedCargo<'_> {
             .arg(self.args.color.cargo_value());
         feature_profile.configure_cargo(&mut command);
         self.toolchain.configure_command(&mut command)?;
-        if let Some(target) = &self.args.target {
+        if let Some(target) = self.compilation_target {
             command.arg("--target").arg(target);
         }
         if let Some(fix) = fix {
@@ -1016,6 +1092,49 @@ fn production_summary(
             feature_profiles.len()
         )
     }
+}
+
+fn compilation_targets(targets: &[String]) -> Vec<Option<&str>> {
+    if targets.is_empty() {
+        return vec![None];
+    }
+
+    let mut seen = HashSet::new();
+    targets
+        .iter()
+        .filter(|target| seen.insert(target.as_str()))
+        .map(|target| Some(target.as_str()))
+        .collect()
+}
+
+fn compilation_target_directory(index: usize, target: &str) -> String {
+    let target = target
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    format!("{index}-{target}")
+}
+
+fn compilation_target_summary(target_graphs: &[CompilationTargetGraph<'_>]) -> String {
+    let [target_graph] = target_graphs else {
+        let targets = target_graphs
+            .iter()
+            .map(|target_graph| target_graph.compilation_target.unwrap_or("host"))
+            .collect::<Vec<_>>()
+            .join("`, `");
+        return format!("targets `{targets}`");
+    };
+
+    target_graph.compilation_target.map_or_else(
+        || "the host target".to_owned(),
+        |target| format!("target `{target}`"),
+    )
 }
 
 fn doctest_rustdoc_flags(executable: &Path) -> OsString {
@@ -1305,7 +1424,8 @@ mod tests {
 
     use super::{
         Args, CargoInvocation, DEFAULT_TARGET_DIR_COMPONENT_MAX_BYTES, DiagnosticRenderer,
-        LintLevel, LintLevels, ProductionSelection, default_target_dir, fix_plan_signature,
+        LintLevel, LintLevels, ProductionSelection, compilation_target_directory,
+        compilation_targets, default_target_dir, fix_plan_signature,
     };
 
     fn render_diagnostic(finding: &Finding<'_>) -> String {
@@ -1551,6 +1671,27 @@ mod tests {
             "",
             Some((fix_plan, true)),
             false,
+        );
+    }
+
+    #[test]
+    fn compilation_targets_default_to_host_and_deduplicate_values() {
+        assert_eq!(compilation_targets(&[]), vec![None]);
+        assert_eq!(
+            compilation_targets(&[
+                "aarch64-apple-darwin".to_owned(),
+                "x86_64-apple-darwin".to_owned(),
+                "aarch64-apple-darwin".to_owned(),
+            ]),
+            vec![Some("aarch64-apple-darwin"), Some("x86_64-apple-darwin"),]
+        );
+    }
+
+    #[test]
+    fn compilation_target_directories_do_not_treat_custom_targets_as_paths() {
+        assert_eq!(
+            compilation_target_directory(1, "../../targets/custom.json"),
+            "1-.._.._targets_custom.json"
         );
     }
 

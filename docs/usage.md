@@ -72,7 +72,8 @@ Run `cargo hawk` without a subcommand to see the available commands. Use
 ```
 
 Configured production targets and workspace non-production targets are
-analyzed under `--all-features --locked` on the host target by default. A
+analyzed under `--all-features --locked` on the host target by default. Repeat
+`--target TRIPLE` to combine compilation targets. A
 `[[feature-profile]]` matrix in `hawk.toml` can replace that single feature
 selection; Hawk unions evidence from every profile before producing
 diagnostics. The non-production surface includes tests, benches, examples, and
@@ -100,8 +101,9 @@ in a terminal; use `--color=always` or `--color=never` to override terminal
 detection.
 
 `--fix` supports the default profile or one explicitly configured feature
-profile. Hawk rejects fixing runs with a multi-profile matrix; run analysis
-without `--fix` to review the combined findings.
+profile on one compilation target. Hawk rejects fixing runs with a
+multi-profile or multi-target matrix; run analysis without `--fix` to review
+the combined findings.
 
 ## Enforce diagnostics
 
@@ -167,9 +169,11 @@ edits. Dead declarations and enum variants remain report-only.
 
 ## Analyze another target
 
-Pass `--target TRIPLE` to analyze another compilation target. Hawk forwards
-the target to Cargo but does not install a target SDK or configure a cross
-linker.
+Pass `--target TRIPLE` to analyze another compilation target. Repeat the option
+to compile and combine several targets in one analysis; a declaration used by
+any target is preserved, and the final summary lists the analyzed targets.
+Hawk forwards each target to Cargo but does not install a target SDK or
+configure a cross linker.
 
 For example, a macOS host can analyze Windows MSVC production targets using
 [`cargo-xwin`](https://github.com/rust-cross/cargo-xwin). From the Hawk
@@ -192,6 +196,12 @@ eval "$(cargo xwin env --quiet \
 
 ./target/debug/cargo-hawk check \
   --manifest-path /path/to/workspace/Cargo.toml \
+  --target "$target"
+
+# Analyze the host and Windows targets together.
+./target/debug/cargo-hawk check \
+  --manifest-path /path/to/workspace/Cargo.toml \
+  --target aarch64-apple-darwin \
   --target "$target"
 ```
 

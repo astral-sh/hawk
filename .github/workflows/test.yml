@@ -22,6 +22,8 @@ jobs:
           persist-credentials: false
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       - name: "Install Rust toolchain"
-        run: rustup show
+        run: |
+          rustup show
+          rustup target add aarch64-unknown-linux-gnu
       - name: "Cargo test"
         run: cargo test --workspace --all-features --locked

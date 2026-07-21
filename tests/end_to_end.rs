@@ -876,6 +876,105 @@ fn feature_profiles_union_reachability_across_configurations() {
 }
 
 #[test]
+fn compilation_targets_union_reachability_across_architectures() {
+    let host = Command::new("rustc")
+        .arg("-vV")
+        .output()
+        .expect("read Rust compiler version");
+    assert!(host.status.success());
+    let version = String::from_utf8(host.stdout).expect("Rust compiler version");
+    let host = version
+        .lines()
+        .find_map(|line| line.strip_prefix("host: "))
+        .expect("Rust compiler host target");
+    let other = match host {
+        "aarch64-apple-darwin" => "x86_64-apple-darwin",
+        "x86_64-unknown-linux-gnu" => "aarch64-unknown-linux-gnu",
+        target => panic!("unsupported test host target `{target}`"),
+    };
+    let host_api = if host.starts_with("aarch64") {
+        "aarch64_api"
+    } else {
+        "x86_64_api"
+    };
+    let other_api = if host_api == "aarch64_api" {
+        "x86_64_api"
+    } else {
+        "aarch64_api"
+    };
+
+    let single = HawkTestContext::new("compilation_targets");
+    let single_output = single.run(&["--target", host]);
+    single.assert_success(&single_output);
+    let single_stdout = single.normalized_stdout(&single_output);
+    assert!(!single_stdout.contains(&format!("`{host_api}` is public")));
+    assert!(single_stdout.contains(&format!("`{other_api}` is public")));
+
+    let combined = HawkTestContext::new("compilation_targets");
+    let graph_dir = tempfile::tempdir().expect("temporary graph directory");
+    let output = combined
+        .command()
+        .arg("--target")
+        .arg(host)
+        .arg("--target")
+        .arg(other)
+        .arg("--graph-dir")
+        .arg(graph_dir.path())
+        .output()
+        .expect("run cargo-hawk");
+
+    combined.assert_success(&output);
+    let stdout = combined.normalized_stdout(&output);
+    assert!(!stdout.contains("`aarch64_api` is public"));
+    assert!(!stdout.contains("`x86_64_api` is public"));
+    assert!(stdout.contains("`unused_api` is public"));
+    assert!(stdout.contains(&format!("on targets `{host}`, `{other}`")));
+
+    let run_dir = fs::read_dir(graph_dir.path())
+        .expect("read graph directory")
+        .map(|entry| entry.expect("read graph entry"))
+        .find(|entry| entry.file_type().expect("read graph entry type").is_dir())
+        .expect("retained graph run directory")
+        .path();
+    for (index, target) in [host, other].into_iter().enumerate() {
+        let production_dir = run_dir
+            .join("compilation-targets")
+            .join(format!("{index}-{target}"))
+            .join("feature-profiles/0-all-features/production");
+        assert!(
+            fs::read_dir(&production_dir)
+                .expect("read compilation-target graph directory")
+                .map(|entry| entry.expect("read graph entry").path())
+                .any(|path| path
+                    .extension()
+                    .is_some_and(|extension| extension == "json")),
+            "no fragments retained in {}",
+            production_dir.display()
+        );
+    }
+}
+
+#[test]
+fn rejects_fixes_with_multiple_compilation_targets() {
+    let context = HawkTestContext::new("compilation_targets");
+    let output = context.run(&[
+        "--fix",
+        "--allow-no-vcs",
+        "--target",
+        "aarch64-apple-darwin",
+        "--target",
+        "x86_64-apple-darwin",
+    ]);
+
+    assert!(!output.status.success());
+    assert!(
+        context
+            .normalized_stderr(&output)
+            .contains("--fix does not support multiple compilation targets")
+    );
+}
+
+#[test]
 fn rejects_fixes_with_multiple_feature_profiles() {
     let context = HawkTestContext::new("feature_profiles");
     let output = context.run(&["--fix", "--allow-no-vcs"]);
