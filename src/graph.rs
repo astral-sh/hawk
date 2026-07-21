@@ -86,6 +86,7 @@ pub struct Definition {
     pub name: String,
     pub kind: DefinitionKind,
     pub span: Option<Span>,
+    pub declaration_span: Option<DeclarationSpan>,
     pub expansion_span: Option<ExpansionSpan>,
     pub public_api: bool,
     pub restricted_visible_api: bool,
@@ -157,6 +158,16 @@ pub struct Span {
     pub file: String,
     pub line: usize,
     pub column: usize,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeclarationSpan {
+    pub file: String,
+    pub start_line: usize,
+    pub start_column: usize,
+    pub end_line: usize,
+    pub end_column: usize,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
@@ -1214,6 +1225,7 @@ mod tests {
             name: id.into(),
             kind: DefinitionKind::Function,
             span: None,
+            declaration_span: None,
             expansion_span: None,
             public_api,
             restricted_visible_api: false,

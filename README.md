@@ -42,6 +42,7 @@ unnecessarily public symbols across crates within a single workspace.
   items that can become `pub(super)`.
 - Models production separately from tests, benches, examples, and doctests.
 - Applies machine-applicable visibility fixes through `cargo fix`.
+- Previews conservative dead-code removal plans with complete source ranges.
 - Uses Clippy-style `-A`/`-W`/`-D` lint levels for incremental CI adoption.
 
 ## Installation
@@ -126,6 +127,10 @@ cargo hawk check \
 cargo hawk check \
   --manifest-path /path/to/workspace/Cargo.toml \
   --fix
+
+cargo hawk check \
+  --manifest-path /path/to/workspace/Cargo.toml \
+  --prune --preview
 ```
 
 ## Documentation

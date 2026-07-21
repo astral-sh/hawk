@@ -3,6 +3,7 @@ use cargo_hawk_internal::protocol;
 mod cli;
 mod config;
 mod diagnostics;
+mod prune;
 mod toolchain;
 
 fn main() -> std::process::ExitCode {

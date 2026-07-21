@@ -12,6 +12,7 @@ use rustc_driver::{Callbacks, Compilation};
 use rustc_errors::Applicability;
 use rustc_hir as hir;
 use rustc_hir::Node;
+use rustc_hir::attrs::AttributeKind;
 use rustc_hir::def::{CtorOf, DefKind, Res};
 use rustc_hir::def_id::{CRATE_DEF_ID, DefId, LocalDefId};
 use rustc_hir::intravisit::{self, Visitor};
@@ -30,8 +31,9 @@ use rustc_span::{BytePos, FileName, Pos};
 
 use crate::protocol;
 use cargo_hawk_internal::graph::{
-    CollectionOptions, Definition, DefinitionId, DefinitionIdentity, DefinitionKind, Edge,
-    EdgeKind, ExpansionSpan, FindingKind, FixPlan, FixTarget, Fragment, Span, VisibilityReduction,
+    CollectionOptions, DeclarationSpan, Definition, DefinitionId, DefinitionIdentity,
+    DefinitionKind, Edge, EdgeKind, ExpansionSpan, FindingKind, FixPlan, FixTarget, Fragment, Span,
+    VisibilityReduction,
 };
 
 pub(crate) fn is_protocol_version_query(args: &[String]) -> bool {
@@ -1028,6 +1030,7 @@ fn definition(
         name: definition_name(tcx, def_id, kind),
         kind,
         span: span(tcx, def_id),
+        declaration_span: declaration_span(tcx, def_id, kind),
         expansion_span: expansion_span(tcx, def_id),
         public_api,
         restricted_visible_api,
@@ -1141,6 +1144,67 @@ fn expansion_span(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Option<ExpansionSpan> 
     Some(ExpansionSpan {
         definition: source_span(tcx, span),
         callsite: source_span(tcx, callsite),
+    })
+}
+
+fn declaration_span(
+    tcx: TyCtxt<'_>,
+    def_id: LocalDefId,
+    kind: DefinitionKind,
+) -> Option<DeclarationSpan> {
+    if matches!(
+        kind,
+        DefinitionKind::Field | DefinitionKind::EnumVariant | DefinitionKind::Reexport
+    ) {
+        return None;
+    }
+    let item_span = tcx.hir_node_by_def_id(def_id).as_owner()?.span();
+    if item_span.is_dummy() || item_span.from_expansion() {
+        return None;
+    }
+    let attrs = tcx.hir_attrs(tcx.local_def_id_to_hir_id(def_id));
+    let mut start = item_span.lo();
+    for attr in attrs {
+        let attr_span = match attr {
+            hir::Attribute::Unparsed(_)
+            | hir::Attribute::Parsed(
+                AttributeKind::DocComment { .. }
+                | AttributeKind::Deprecated { .. }
+                | AttributeKind::CfgTrace(_),
+            ) => attr.span(),
+            // Parsed built-in attributes generally do not retain a source
+            // span. Do not offer a partial declaration range that would
+            // leave an attribute behind when the item is removed.
+            hir::Attribute::Parsed(_) => return None,
+        };
+        if attr_span.is_dummy() || attr_span.from_expansion() {
+            return None;
+        }
+        start = start.min(attr_span.lo());
+    }
+    let span = item_span.with_lo(start);
+    let source_map = tcx.sess.source_map();
+    let source = source_map.span_to_snippet(span).ok()?;
+    let compact_source: String = source
+        .chars()
+        .filter(|character| !character.is_ascii_whitespace())
+        .collect();
+    if compact_source.contains("#[cfg") {
+        return None;
+    }
+    let start = source_map.lookup_char_pos(span.lo());
+    let end = source_map.lookup_char_pos(span.hi());
+    let file = normalize_source_path(&start.file.name.prefer_local_unconditionally().to_string());
+    let end_file = normalize_source_path(&end.file.name.prefer_local_unconditionally().to_string());
+    if file != end_file {
+        return None;
+    }
+    Some(DeclarationSpan {
+        file,
+        start_line: start.line,
+        start_column: start.col.to_usize() + 1,
+        end_line: end.line,
+        end_column: end.col.to_usize() + 1,
     })
 }
 
@@ -1404,7 +1468,7 @@ mod tests {
 
         assert_eq!(
             error.to_string(),
-            "Hawk frontend uses compiler driver protocol 1, but this driver uses protocol 5; install `cargo-hawk` and `cargo-hawk-driver` from the same release"
+            "Hawk frontend uses compiler driver protocol 1, but this driver uses protocol 6; install `cargo-hawk` and `cargo-hawk-driver` from the same release"
         );
     }
 

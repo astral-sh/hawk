@@ -994,6 +994,47 @@ fn dead_public_findings_are_not_fixed_into_dead_code_errors() {
 }
 
 #[test]
+fn prune_preview_reports_complete_outermost_declarations_without_editing_source() {
+    let context = HawkTestContext::new("prune_preview");
+    let library_path = context.workspace().join("library/src/lib.rs");
+    let before = fs::read_to_string(&library_path).expect("read source before prune preview");
+    let output = context.run(&["--prune", "--preview"]);
+
+    context.assert_success(&output);
+    insta::assert_snapshot!(context.normalized_stdout(&output), @r###"
+    hawk: prune preview: 3 removable declaration candidate(s)
+      library/src/lib.rs:3:1-5:28: `library::documented_dead`
+      library/src/lib.rs:7:1-9:2: `library::DeadParent`
+      library/src/lib.rs:11:1-13:2: `library::dead_outer`
+    hawk: prune preview: skipped 7 finding(s) (2 contained, 1 field/variant/re-export, 2 without a complete source range, 2 with remaining uses)
+    hawk: prune preview: no source files were modified
+    "###);
+    let after = fs::read_to_string(library_path).expect("read source after prune preview");
+    assert_eq!(after, before);
+}
+
+#[test]
+fn prune_requires_preview_and_rejects_visibility_fixes() {
+    let context = HawkTestContext::new("prune_preview");
+    let output = context.run(&["--prune"]);
+
+    assert!(!output.status.success());
+    assert!(
+        context
+            .normalized_stderr(&output)
+            .contains("--prune currently requires --preview")
+    );
+
+    let output = context.run(&["--prune", "--preview", "--fix"]);
+    assert!(!output.status.success());
+    assert!(
+        context
+            .normalized_stderr(&output)
+            .contains("'--prune' cannot be used with '--fix'")
+    );
+}
+
+#[test]
 fn benchmark_consumers_preserve_required_public_visibility() {
     let context = HawkTestContext::new("non_production_targets");
     let output = context.run(&[]);

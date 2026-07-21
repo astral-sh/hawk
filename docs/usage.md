@@ -165,6 +165,31 @@ or non-production surface. Hawk rechecks configured production targets and
 non-production targets, including compile-only doctests, after applying
 edits. Dead declarations and enum variants remain report-only.
 
+## Preview dead-code pruning
+
+Pass `--prune --preview` to build a removal plan for enabled,
+unsuppressed `hawk::dead_public` findings without editing source files:
+
+```sh
+./target/debug/cargo-hawk check \
+  --manifest-path /path/to/workspace/Cargo.toml \
+  --prune --preview
+```
+
+The preview replaces individual visibility diagnostics with a compact,
+deterministic list of outermost removable declarations. Locations cover the
+complete declaration, including source-spanned attributes and documentation;
+the ending line and column are exclusive. Nested findings are collapsed
+beneath their containing declaration. Hawk skips fields, enum variants,
+re-exports, macro-generated or cfg-dependent declarations, items
+whose attributes do not retain a complete source range, and declarations
+with remaining compiled callers. The preview reports how many findings were
+skipped for each reason. Configuration diagnostics remain visible.
+
+Pruning currently supports preview only. Applying a removal plan, formatting,
+and rechecking to a fixed point are not yet supported, so `--prune` without
+`--preview` fails before analysis. `--prune` cannot be combined with `--fix`.
+
 ## Analyze another target
 
 Pass `--target TRIPLE` to analyze another compilation target. Hawk forwards

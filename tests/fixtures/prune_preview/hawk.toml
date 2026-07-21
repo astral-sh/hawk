@@ -1,0 +1,4 @@
+[[production]]
+package = "app"
+bin = "app"
+reason = "exercise prune preview"

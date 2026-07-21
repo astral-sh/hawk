@@ -16,6 +16,7 @@ use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser, Subcommand, Value
 use crate::config::{AnalysisTarget, Config, ConfigDiagnosticKind, FeatureProfile};
 use crate::diagnostics::{DiagnosticRenderer, EMPHASIS, ERROR, WARNING, styled};
 use crate::protocol;
+use crate::prune::PrunePlan;
 use crate::toolchain::{
     RustToolchain, clear_protocol_environment, driver_executable, validate_driver_protocol,
 };
@@ -81,8 +82,16 @@ struct CheckArgs {
     deny: Vec<String>,
 
     /// Automatically apply machine-applicable visibility fixes.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "prune")]
     fix: bool,
+
+    /// Build a removal plan for enabled `hawk::dead_public` findings.
+    #[arg(long)]
+    prune: bool,
+
+    /// Preview a prune plan without modifying source files.
+    #[arg(long, requires = "prune")]
+    preview: bool,
 
     /// Apply fixes despite uncommitted changes in the workspace.
     #[arg(long, requires = "fix")]
@@ -292,6 +301,11 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
     let Commands::Check(args) = Args::from_arg_matches(&matches)
         .context("read command-line arguments")?
         .command;
+    if args.prune && !args.preview {
+        bail!(
+            "--prune currently requires --preview; applying dead-code removals is not yet supported"
+        );
+    }
     debug_assert_eq!(
         lint_levels.overrides.len(),
         args.allow.len() + args.warn.len() + args.deny.len()
@@ -585,6 +599,46 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
             config.preserve_uniform_field_visibility(),
         ),
     );
+    if args.prune {
+        let enabled_dead_findings: Vec<_> = findings
+            .findings
+            .iter()
+            .filter(|finding| {
+                finding.kind == FindingKind::DeadPublic
+                    && lint_levels.level(finding.kind).is_emitted()
+            })
+            .collect();
+        let has_denied_dead_finding = enabled_dead_findings
+            .iter()
+            .any(|finding| lint_levels.level(finding.kind) == LintLevel::Deny);
+        let plan = PrunePlan::build(
+            &enabled_dead_findings,
+            &production_fragments,
+            &test_fragments,
+        );
+        let mut renderer = DiagnosticRenderer::new(&workspace_root);
+        let mut has_denied_config_diagnostic = false;
+        for diagnostic in &findings.config_diagnostics {
+            let level = lint_levels.level(diagnostic.kind);
+            if level.is_emitted() {
+                has_denied_config_diagnostic |= level == LintLevel::Deny;
+                renderer
+                    .write_config_diagnostic(diagnostic, &config, level)
+                    .expect("formatting diagnostics into a string cannot fail");
+            }
+        }
+        let mut output = renderer.into_output();
+        plan.write_preview(&mut output)
+            .expect("formatting a prune plan into a string cannot fail");
+        anstream::AutoStream::new(std::io::stdout(), args.color.into())
+            .write_all(output.as_bytes())
+            .context("write prune preview")?;
+        return Ok(if has_denied_dead_finding || has_denied_config_diagnostic {
+            ExitCode::FAILURE
+        } else {
+            ExitCode::SUCCESS
+        });
+    }
     let mut renderer = DiagnosticRenderer::new(&workspace_root);
     let mut diagnostic_count = 0;
     let mut has_denied_diagnostic = false;
@@ -1566,6 +1620,7 @@ mod tests {
                 line: 5,
                 column: 1,
             }),
+            declaration_span: None,
             expansion_span: None,
             public_api: true,
             restricted_visible_api: false,
@@ -1607,6 +1662,7 @@ mod tests {
                 line: 7,
                 column: 5,
             }),
+            declaration_span: None,
             expansion_span: None,
             public_api: false,
             restricted_visible_api: true,
@@ -1647,6 +1703,7 @@ mod tests {
                 line: 16,
                 column: 5,
             }),
+            declaration_span: None,
             expansion_span: None,
             public_api: false,
             restricted_visible_api: true,
@@ -1683,6 +1740,7 @@ mod tests {
             name: "InternalState::Active".into(),
             kind: DefinitionKind::EnumVariant,
             span: None,
+            declaration_span: None,
             expansion_span: None,
             public_api: true,
             restricted_visible_api: false,
