@@ -932,6 +932,125 @@ fn ordered_lint_levels_control_severity_and_exit_status() {
 }
 
 #[test]
+fn emits_versioned_json_diagnostics_and_keeps_cargo_output_on_stderr() {
+    let context = HawkTestContext::new("basic");
+    let output = context.run(&[
+        "--output-format=json",
+        "-D",
+        "warnings",
+        "-W",
+        "hawk::unnecessary_public",
+        "-A",
+        "hawk::unknown_item",
+    ]);
+
+    assert!(
+        !output.status.success(),
+        "denied JSON diagnostics did not fail"
+    );
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout contains one JSON report");
+    assert_eq!(report["schema_version"], 1);
+    assert_eq!(report["summary"]["diagnostic_count"], 41);
+    assert_eq!(
+        report["summary"]["production"],
+        serde_json::json!([{"package": "app", "binary": "app"}])
+    );
+    assert_eq!(
+        report["summary"]["feature_profiles"],
+        serde_json::json!(["all-features"])
+    );
+    assert_eq!(report["summary"]["includes_non_production_targets"], true);
+    assert!(
+        report["summary"]["target"]
+            .as_str()
+            .is_some_and(|target| !target.is_empty())
+    );
+
+    let diagnostics = report["diagnostics"]
+        .as_array()
+        .expect("diagnostics is an array");
+    assert_eq!(diagnostics.len(), 41);
+
+    let dead_entry = diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic["identity"]["item"] == "dead_entry")
+        .expect("dead_entry diagnostic");
+    assert_eq!(dead_entry["category"], "finding");
+    assert_eq!(dead_entry["code"], "hawk::dead_public");
+    assert_eq!(dead_entry["severity"], "error");
+    assert_eq!(dead_entry["kind"], "dead_public");
+    assert_eq!(dead_entry["identity"]["package"], "library");
+    assert_eq!(dead_entry["identity"]["crate"], "library");
+    assert_eq!(dead_entry["identity"]["kind"], "function");
+    assert_eq!(dead_entry["identity"]["parent"], serde_json::Value::Null);
+    assert_eq!(
+        dead_entry["identity"]["module_scope"],
+        serde_json::json!([])
+    );
+    assert!(
+        dead_entry["identity"]["id"]
+            .as_str()
+            .is_some_and(|id| id.len() == 32 && id.bytes().all(|byte| byte.is_ascii_hexdigit()))
+    );
+    assert_eq!(
+        dead_entry["location"],
+        serde_json::json!({"file": "library/src/lib.rs", "line": 190, "column": 1})
+    );
+    assert_eq!(dead_entry["expansion"], serde_json::Value::Null);
+    assert_eq!(dead_entry["test_only"], false);
+    assert_eq!(dead_entry["test_compiled_only"], false);
+
+    let dead_field = diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic["identity"]["item"] == "DeadFields::unused")
+        .expect("dead field diagnostic");
+    assert_eq!(dead_field["identity"]["kind"], "field");
+    assert_eq!(dead_field["identity"]["parent"], "DeadFields");
+
+    let test_only = diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic["identity"]["item"] == "test_only_helper")
+        .expect("test-only diagnostic");
+    assert_eq!(test_only["severity"], "warning");
+    assert_eq!(test_only["test_only"], true);
+
+    let config = diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic["code"] == "hawk::unfulfilled_expectation")
+        .expect("configuration diagnostic");
+    assert_eq!(config["category"], "configuration");
+    assert_eq!(config["severity"], "error");
+    assert_eq!(config["lint"], "hawk::dead_public");
+    assert_eq!(config["identity"]["crate"], "library");
+    assert_eq!(config["identity"]["item"], "PrivateContextOptions");
+    assert_eq!(
+        config["location"],
+        serde_json::json!({"file": "hawk.toml", "line": 22, "column": 1})
+    );
+    assert_eq!(
+        config["reason"],
+        "covered by unfulfilled expectation diagnostic"
+    );
+
+    let stderr = context.normalized_stderr(&output);
+    assert!(stderr.contains("Finished `dev` profile"));
+}
+
+#[test]
+fn emits_an_empty_json_report_when_all_warnings_are_allowed() {
+    let context = HawkTestContext::new("basic");
+    let output = context.run(&["--output-format=json", "-A", "warnings"]);
+
+    context.assert_success(&output);
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout contains one JSON report");
+    assert_eq!(report["schema_version"], 1);
+    assert_eq!(report["summary"]["diagnostic_count"], 0);
+    assert_eq!(report["diagnostics"], serde_json::json!([]));
+}
+
+#[test]
 fn applies_visibility_fixes_through_cargo_fix() {
     let context = HawkTestContext::new("basic");
     let output = context.run(&["--fix", "--allow-no-vcs"]);

@@ -99,6 +99,10 @@ struct CheckArgs {
     /// Control when colored output is used.
     #[arg(long, value_enum, default_value_t, value_name = "WHEN")]
     color: TerminalColor,
+
+    /// Select the diagnostic output format.
+    #[arg(long, value_enum, default_value_t, value_name = "FORMAT")]
+    output_format: OutputFormat,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -251,6 +255,16 @@ enum TerminalColor {
 
     /// Never display colors.
     Never,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
+enum OutputFormat {
+    /// Emit human-readable diagnostics.
+    #[default]
+    Text,
+
+    /// Emit a versioned JSON diagnostic report.
+    Json,
 }
 
 impl From<TerminalColor> for anstream::ColorChoice {
@@ -586,6 +600,21 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
         ),
     );
     let mut renderer = DiagnosticRenderer::new(&workspace_root);
+    let definition_packages: HashMap<_, _> = if args.output_format == OutputFormat::Json {
+        production_fragments
+            .iter()
+            .chain(&test_fragments)
+            .flat_map(|fragment| {
+                fragment
+                    .definitions
+                    .iter()
+                    .map(|definition| (definition.id, fragment.package_name.as_str()))
+            })
+            .collect()
+    } else {
+        HashMap::new()
+    };
+    let mut json_diagnostics = Vec::new();
     let mut diagnostic_count = 0;
     let mut has_denied_diagnostic = false;
     let production_description = if production_products.len() == 1 {
@@ -598,9 +627,16 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
         if level.is_emitted() {
             diagnostic_count += 1;
             has_denied_diagnostic |= level == LintLevel::Deny;
-            renderer
-                .write_diagnostic(finding, &production_description, level)
-                .expect("formatting diagnostics into a string cannot fail");
+            match args.output_format {
+                OutputFormat::Text => renderer
+                    .write_diagnostic(finding, &production_description, level)
+                    .expect("formatting diagnostics into a string cannot fail"),
+                OutputFormat::Json => json_diagnostics.push(json_finding(
+                    finding,
+                    level,
+                    definition_packages.get(&finding.definition.id).copied(),
+                )),
+            }
         }
     }
     for diagnostic in &findings.config_diagnostics {
@@ -608,9 +644,17 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
         if level.is_emitted() {
             diagnostic_count += 1;
             has_denied_diagnostic |= level == LintLevel::Deny;
-            renderer
-                .write_config_diagnostic(diagnostic, &config, level)
-                .expect("formatting diagnostics into a string cannot fail");
+            match args.output_format {
+                OutputFormat::Text => renderer
+                    .write_config_diagnostic(diagnostic, &config, level)
+                    .expect("formatting diagnostics into a string cannot fail"),
+                OutputFormat::Json => json_diagnostics.push(json_config_diagnostic(
+                    diagnostic,
+                    &config,
+                    &workspace_root,
+                    level,
+                )),
+            }
         }
     }
     let compilation_target = args.target.as_deref().map_or_else(
@@ -618,17 +662,104 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
         |target| format!("target `{target}`"),
     );
     let production_summary = production_summary(&production_products, config.feature_profiles());
-    renderer
-        .write_summary(diagnostic_count, &production_summary, &compilation_target)
-        .expect("formatting diagnostics into a string cannot fail");
-    let diagnostics = renderer.into_output();
-    anstream::AutoStream::new(std::io::stdout(), args.color.into())
-        .write_all(diagnostics.as_bytes())
-        .context("write diagnostic output")?;
+    match args.output_format {
+        OutputFormat::Text => {
+            renderer
+                .write_summary(diagnostic_count, &production_summary, &compilation_target)
+                .expect("formatting diagnostics into a string cannot fail");
+            let diagnostics = renderer.into_output();
+            anstream::AutoStream::new(std::io::stdout(), args.color.into())
+                .write_all(diagnostics.as_bytes())
+                .context("write diagnostic output")?;
+        }
+        OutputFormat::Json => {
+            let output = serde_json::json!({
+                "schema_version": 1,
+                "summary": {
+                    "diagnostic_count": diagnostic_count,
+                    "target": args.target.as_deref().unwrap_or(toolchain.host()),
+                    "production": production_products
+                        .iter()
+                        .map(|product| serde_json::json!({
+                            "package": product.package,
+                            "binary": product.binary,
+                        }))
+                        .collect::<Vec<_>>(),
+                    "feature_profiles": config
+                        .feature_profiles()
+                        .iter()
+                        .map(FeatureProfile::name)
+                        .collect::<Vec<_>>(),
+                    "includes_non_production_targets": true,
+                },
+                "diagnostics": json_diagnostics,
+            });
+            let stdout = std::io::stdout();
+            let mut stdout = stdout.lock();
+            serde_json::to_writer_pretty(&mut stdout, &output)
+                .context("serialize JSON diagnostic output")?;
+            writeln!(stdout).context("write JSON diagnostic output")?;
+        }
+    }
     Ok(if has_denied_diagnostic {
         ExitCode::FAILURE
     } else {
         ExitCode::SUCCESS
+    })
+}
+
+fn json_finding(
+    finding: &Finding<'_>,
+    level: LintLevel,
+    package: Option<&str>,
+) -> serde_json::Value {
+    let definition = finding.definition;
+    serde_json::json!({
+        "category": "finding",
+        "code": finding.kind.code(),
+        "severity": level.severity(),
+        "kind": finding.kind,
+        "identity": {
+            "id": definition.id.to_string(),
+            "package": package,
+            "crate": definition.crate_name,
+            "item": definition.name,
+            "kind": definition.kind,
+            "parent": definition.name.rsplit_once("::").map(|(parent, _)| parent),
+            "module_scope": definition.module_scope,
+        },
+        "location": definition.span,
+        "expansion": definition.expansion_span,
+        "test_only": finding.test_only,
+        "test_compiled_only": finding.test_compiled_only,
+    })
+}
+
+fn json_config_diagnostic(
+    diagnostic: &crate::config::ConfigDiagnostic<'_>,
+    config: &Config,
+    workspace_root: &Path,
+    level: LintLevel,
+) -> serde_json::Value {
+    let entry = diagnostic.entry;
+    let path = config.path().expect("diagnostic requires a loaded config");
+    let path = path.strip_prefix(workspace_root).unwrap_or(path);
+    serde_json::json!({
+        "category": "configuration",
+        "code": diagnostic.kind.code(),
+        "severity": level.severity(),
+        "lint": entry.lint.code(),
+        "identity": {
+            "crate": entry.crate_name,
+            "item": entry.item,
+            "kind": entry.definition_kind,
+        },
+        "location": {
+            "file": path,
+            "line": entry.span.line,
+            "column": entry.span.column,
+        },
+        "reason": entry.reason,
     })
 }
 
@@ -872,7 +1003,7 @@ impl InstrumentedCargo<'_> {
         Ok(ConfiguredCargoCommand {
             command,
             subcommand,
-            capture_output: doctests,
+            capture_output: doctests || self.args.output_format == OutputFormat::Json,
         })
     }
 
@@ -892,7 +1023,14 @@ impl InstrumentedCargo<'_> {
             let output = command
                 .output()
                 .with_context(|| format!("run instrumented Cargo {subcommand}"))?;
-            if !output.status.success() {
+            if self.args.output_format == OutputFormat::Json {
+                std::io::stderr()
+                    .write_all(&output.stdout)
+                    .context("write captured Cargo stdout")?;
+                std::io::stderr()
+                    .write_all(&output.stderr)
+                    .context("write captured Cargo stderr")?;
+            } else if !output.status.success() {
                 std::io::stdout()
                     .write_all(&output.stdout)
                     .context("write failing doctest compilation stdout")?;

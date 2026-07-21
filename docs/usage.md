@@ -99,6 +99,29 @@ compiler fragments for investigation. Diagnostics are colored automatically
 in a terminal; use `--color=always` or `--color=never` to override terminal
 detection.
 
+Use `--output-format=json` for a machine-readable diagnostic report. Cargo
+progress and compiler output remain on stderr, so stdout contains exactly one
+JSON object:
+
+```sh
+./target/debug/cargo-hawk check \
+  --manifest-path /path/to/workspace/Cargo.toml \
+  --output-format=json > hawk-report.json
+```
+
+The JSON report is versioned with `schema_version` (currently `1`); breaking
+schema changes increment this version. Its `summary` describes the compilation
+target, configured production binaries,
+feature profiles, non-production coverage, and emitted diagnostic count.
+Every entry in `diagnostics` includes its category, lint code, and severity.
+Finding entries additionally include their finding kind, semantic identity
+(`package`, `crate`, `item`, definition `kind`, parent, and module scope),
+compiler identity (`identity.id`), available source and expansion locations,
+and the `test_only` and `test_compiled_only` flags. Configuration diagnostics
+include the referenced lint and item, configuration location, and reason.
+Source locations currently identify the start of a declaration; consumers
+should not interpret them as complete deletion ranges.
+
 `--fix` supports the default profile or one explicitly configured feature
 profile. Hawk rejects fixing runs with a multi-profile matrix; run analysis
 without `--fix` to review the combined findings.
