@@ -751,6 +751,9 @@ fn protected_reachable_definitions<'a>(
         })
         .map(|definition| definition.id)
         .collect();
+    if pending.is_empty() {
+        return protected;
+    }
     let mut adjacency: FxHashMap<DefinitionId, Vec<DefinitionId>> = FxHashMap::default();
     for edge in production_fragments
         .iter()
