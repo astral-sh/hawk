@@ -1058,9 +1058,9 @@ impl InstrumentedCargo<'_> {
             .arg(self.args.color.cargo_value());
         feature_profile.configure_cargo(&mut command);
         self.toolchain.configure_command(&mut command)?;
-        if let Some(target) = &self.args.target {
-            command.arg("--target").arg(target);
-        }
+        command
+            .arg("--target")
+            .arg(self.args.target.as_deref().unwrap_or(self.toolchain.host()));
         if let Some(fix) = fix {
             if self.args.allow_dirty || fix.allow_dirty {
                 command.arg("--allow-dirty");

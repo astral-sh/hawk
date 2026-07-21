@@ -1148,6 +1148,69 @@ fn json_stable_diagnostic_ids_ignore_target_compilation_metadata() {
 }
 
 #[test]
+fn json_uses_the_host_target_when_cargo_configures_another_target() {
+    let rustc_version = Command::new("rustc")
+        .arg("-vV")
+        .output()
+        .expect("read Rust compiler version");
+    assert!(rustc_version.status.success());
+    let rustc_version = String::from_utf8(rustc_version.stdout).expect("Rust compiler version");
+    let host_target = rustc_version
+        .lines()
+        .find_map(|line| line.strip_prefix("host: "))
+        .expect("Rust compiler host target");
+    let host_arch = host_target
+        .split_once('-')
+        .expect("host target has an architecture")
+        .0;
+    let installed_targets = Command::new("rustup")
+        .args(["target", "list", "--installed"])
+        .output()
+        .expect("list installed Rust targets");
+    assert!(installed_targets.status.success());
+    let installed_targets =
+        String::from_utf8(installed_targets.stdout).expect("installed Rust targets");
+    let configured_target = installed_targets
+        .lines()
+        .find(|target| *target != host_target)
+        .unwrap_or(host_target);
+    let context = HawkTestContext::new("dead_public_fixes");
+    let cargo_config = context.workspace().join(".cargo");
+    fs::create_dir(&cargo_config).expect("create Cargo configuration directory");
+    fs::write(
+        cargo_config.join("config.toml"),
+        format!("[build]\ntarget = \"{configured_target}\"\n"),
+    )
+    .expect("write Cargo target configuration");
+    fs::write(
+        context.workspace().join("library/src/lib.rs"),
+        format!("#[cfg(target_arch = \"{host_arch}\")]\npub fn host_only() {{}}\n"),
+    )
+    .expect("write target-specific library source");
+    fs::write(
+        context.workspace().join("hawk.toml"),
+        format!(
+            "[[production]]\npackage = \"app\"\nbin = \"app\"\nreason = \"binary product under analysis\"\n\n[[override]]\nlint = \"hawk::dead_public\"\ncrate = \"library\"\nitem = \"host_only\"\nlevel = \"allow\"\nreason = \"host-only declaration is intentionally retained\"\ntarget = 'cfg(target_arch = \"{host_arch}\")'\n"
+        ),
+    )
+    .expect("write Hawk configuration");
+
+    let output = context
+        .command()
+        .arg("--output-format=json")
+        .env("CARGO_BUILD_TARGET", configured_target)
+        .output()
+        .expect("run cargo-hawk with configured Cargo target");
+
+    context.assert_success(&output);
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout contains one JSON report");
+    assert_eq!(report["summary"]["target"], host_target);
+    assert_eq!(report["summary"]["diagnostic_count"], 0);
+    assert_eq!(report["diagnostics"], serde_json::json!([]));
+}
+
+#[test]
 fn json_locations_include_complete_documented_declarations() {
     let context = HawkTestContext::new("dead_public_fixes");
     fs::write(
@@ -1436,6 +1499,29 @@ fn json_still_emits_a_report_when_stderr_is_closed() {
     let report: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("stdout contains one JSON report");
     assert_eq!(report["schema_version"], 3);
+}
+
+#[cfg(unix)]
+#[test]
+fn json_returns_a_normal_cargo_failure_when_stderr_is_closed() {
+    let context = HawkTestContext::new("dead_public_fixes");
+    fs::write(
+        context.workspace().join("library/src/lib.rs"),
+        "compile_error!(\"EXPECTED-JSON-CARGO-FAILURE\");\n",
+    )
+    .expect("write failing library source");
+    let (reader, writer) = std::io::pipe().expect("create stderr pipe");
+    drop(reader);
+    let output = context
+        .command()
+        .arg("--output-format=json")
+        .stderr(writer)
+        .output()
+        .expect("run cargo-hawk with closed stderr");
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.is_empty());
 }
 
 #[cfg(unix)]

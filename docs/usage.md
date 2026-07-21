@@ -207,7 +207,9 @@ edits. Dead declarations and enum variants remain report-only.
 
 Pass `--target TRIPLE` to analyze another compilation target. Hawk forwards
 the target to Cargo but does not install a target SDK or configure a cross
-linker.
+linker. When `--target` is omitted, Hawk explicitly analyzes the host target;
+this overrides Cargo's `build.target` configuration and `CARGO_BUILD_TARGET`
+so compilation, target-scoped configuration, and reported coverage agree.
 
 For example, a macOS host can analyze Windows MSVC production targets using
 [`cargo-xwin`](https://github.com/rust-cross/cargo-xwin). From the Hawk

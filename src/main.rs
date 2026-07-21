@@ -1,4 +1,5 @@
 use cargo_hawk_internal::protocol;
+use std::io::Write as _;
 
 mod cli;
 mod config;
@@ -27,7 +28,7 @@ fn main() -> std::process::ExitCode {
         }
         Err(error) => {
             if let Err(output_error) = cli::write_error(&args, &error) {
-                eprintln!("hawk: {error:#}: {output_error:#}");
+                let _ = writeln!(std::io::stderr(), "hawk: {error:#}: {output_error:#}");
             }
             std::process::ExitCode::FAILURE
         }
