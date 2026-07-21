@@ -123,6 +123,10 @@ and the `test_only` and `test_compiled_only` flags. Source locations include
 range is available; ending locations are exclusive and include source-spanned
 attributes, documentation, and trailing field, variant, or re-export
 separators.
+When rustc cannot retain a complete range for a parsed attribute, such as
+`#[cold]` or `#[unsafe(link_section = "...")]`, the location intentionally
+falls back to `file`, `line`, and `column`; `end_line` and `end_column` are
+omitted.
 Configuration diagnostics include the referenced
 lint and item, configuration location, and reason.
 

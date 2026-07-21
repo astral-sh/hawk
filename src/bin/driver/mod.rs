@@ -17,6 +17,7 @@ use rustc_hir::def::{CtorOf, DefKind, Res};
 use rustc_hir::def_id::{CRATE_DEF_ID, DefId, LocalDefId};
 use rustc_hir::intravisit::{self, Visitor};
 use rustc_interface::interface;
+use rustc_lexer::{FrontmatterAllowed, TokenKind};
 use rustc_lint_defs::builtin::DEAD_CODE;
 use rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrFlags;
 use rustc_middle::ty::{self, TyCtxt};
@@ -1171,14 +1172,27 @@ fn declaration_span(
         kind,
         DefinitionKind::Field | DefinitionKind::EnumVariant | DefinitionKind::Reexport
     ) {
-        let extended = item_span.with_hi(item_span.hi() + BytePos(1));
-        if tcx
-            .sess
-            .source_map()
-            .span_to_snippet(extended)
-            .is_ok_and(|source| source.ends_with(','))
+        let source_file = tcx.sess.source_map().lookup_source_file(item_span.hi());
+        let offset = (item_span.hi() - source_file.start_pos).to_usize();
+        if let Some(source) = source_file
+            .src
+            .as_deref()
+            .and_then(|source| source.get(offset..))
         {
-            item_span = extended;
+            let mut end = item_span.hi();
+            for token in rustc_lexer::tokenize(source, FrontmatterAllowed::No) {
+                end = end + BytePos(token.len);
+                match token.kind {
+                    TokenKind::Whitespace
+                    | TokenKind::LineComment { .. }
+                    | TokenKind::BlockComment { .. } => {}
+                    TokenKind::Comma => {
+                        item_span = item_span.with_hi(end);
+                        break;
+                    }
+                    _ => break,
+                }
+            }
         }
     }
 

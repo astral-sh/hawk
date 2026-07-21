@@ -4,11 +4,7 @@ use std::ffi::{OsStr, OsString};
 use std::fmt::Write as _;
 use std::fs::{self, File};
 use std::hash::{Hash, Hasher};
-use std::io::{BufReader, Write as _};
-#[cfg(unix)]
-use std::os::fd::AsFd as _;
-#[cfg(windows)]
-use std::os::windows::io::AsHandle as _;
+use std::io::{BufReader, Read as _, Seek as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 
@@ -903,6 +899,7 @@ struct ConfiguredCargoCommand {
     command: Command,
     subcommand: &'static str,
     capture_output: bool,
+    cargo_output: Option<File>,
 }
 
 struct CollectedFragments {
@@ -1051,20 +1048,29 @@ impl InstrumentedCargo<'_> {
                 )
                 .env_remove("RUSTDOCFLAGS");
         }
-        if self.args.output_format == OutputFormat::Json {
-            command.stderr(Stdio::inherit());
+        let cargo_output = if self.args.output_format == OutputFormat::Json {
+            let output = tempfile::tempfile().context("create temporary Cargo output file")?;
+            command.stderr(
+                output
+                    .try_clone()
+                    .context("duplicate temporary Cargo output file for stderr")?,
+            );
             if !doctests {
-                #[cfg(unix)]
-                let stderr = std::io::stderr().as_fd().try_clone_to_owned();
-                #[cfg(windows)]
-                let stderr = std::io::stderr().as_handle().try_clone_to_owned();
-                command.stdout(stderr.context("duplicate stderr for Cargo stdout")?);
+                command.stdout(
+                    output
+                        .try_clone()
+                        .context("duplicate temporary Cargo output file for stdout")?,
+                );
             }
-        }
+            Some(output)
+        } else {
+            None
+        };
         Ok(ConfiguredCargoCommand {
             command,
             subcommand,
             capture_output: doctests && self.args.output_format == OutputFormat::Text,
+            cargo_output,
         })
     }
 
@@ -1079,6 +1085,7 @@ impl InstrumentedCargo<'_> {
             mut command,
             subcommand,
             capture_output,
+            cargo_output,
         } = self.command(run_id, graph_dir, invocation, feature_profile)?;
         let status = if capture_output {
             let output = command
@@ -1098,6 +1105,17 @@ impl InstrumentedCargo<'_> {
                 .status()
                 .with_context(|| format!("run instrumented Cargo {subcommand}"))?
         };
+        if let Some(mut cargo_output) = cargo_output {
+            let length = cargo_output
+                .metadata()
+                .context("inspect temporary Cargo output file")?
+                .len();
+            cargo_output
+                .rewind()
+                .context("rewind temporary Cargo output file")?;
+            std::io::copy(&mut cargo_output.take(length), &mut std::io::stderr())
+                .context("write captured Cargo output to stderr")?;
+        }
         if !status.success() {
             bail!("instrumented Cargo {subcommand} failed with {status}");
         }

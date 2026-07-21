@@ -1086,7 +1086,7 @@ fn json_locations_include_complete_documented_declarations() {
     let context = HawkTestContext::new("dead_public_fixes");
     fs::write(
         context.workspace().join("library/src/lib.rs"),
-        "#![deny(dead_code)]\n\n/// A retained source-spanned doc comment.\n#[deprecated(note = \"exercise a source-spanned attribute\")]\n#[inline]\npub fn dead_api() {}\n\n#[must_use]\npub fn must_use_api() -> bool { true }\n\n#[doc(hidden)]\npub struct DeadDocHidden;\n",
+        "#![deny(dead_code)]\n\n/// A retained source-spanned doc comment.\n#[deprecated(note = \"exercise a source-spanned attribute\")]\n#[inline]\npub fn dead_api() {}\n\n#[must_use]\npub fn must_use_api() -> bool { true }\n\n#[doc(hidden)]\npub struct DeadDocHidden;\n\n#[cold]\npub fn cold_api() {}\n",
     )
     .expect("write documented declaration");
 
@@ -1142,6 +1142,18 @@ fn json_locations_include_complete_documented_declarations() {
             "end_column": 26,
         })
     );
+    let cold = diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic["identity"]["item"] == "cold_api")
+        .expect("cold_api diagnostic");
+    assert_eq!(
+        cold["location"],
+        serde_json::json!({
+            "file": "library/src/lib.rs",
+            "line": 15,
+            "column": 1,
+        })
+    );
 }
 
 #[test]
@@ -1170,9 +1182,81 @@ fn json_locations_include_grouped_reexport_separators() {
     );
 }
 
+#[test]
+fn json_locations_include_separators_after_trivia_and_can_be_deleted() {
+    let context = HawkTestContext::new("dead_public_fixes");
+    let library_path = context.workspace().join("library/src/lib.rs");
+    let mut source = "pub struct DeadFields {\n    pub unused: u8 // field separator\n    ,\n    pub remaining: u8,\n}\n\npub enum DeadEnum {\n    Unused /* variant separator */ ,\n    Remaining,\n}\n\nmod exports {\n    pub struct Unused;\n    pub struct Remaining;\n}\n\npub use exports::{Unused /* re-export separator */ , Remaining};\n".to_string();
+    fs::write(&library_path, &source).expect("write declarations with separated commas");
+
+    let output = context.run(&["--output-format=json"]);
+
+    context.assert_success(&output);
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout contains one JSON report");
+    let diagnostics = report["diagnostics"]
+        .as_array()
+        .expect("diagnostics is an array");
+    let locations = [
+        ("DeadFields::unused", "field", 2, 5, 3, 6),
+        ("DeadEnum::Unused", "enum_variant", 8, 5, 8, 37),
+        ("Unused", "reexport", 17, 19, 17, 53),
+    ]
+    .map(|(item, kind, line, column, end_line, end_column)| {
+        let diagnostic = diagnostics
+            .iter()
+            .find(|diagnostic| {
+                diagnostic["identity"]["item"] == item && diagnostic["identity"]["kind"] == kind
+            })
+            .unwrap_or_else(|| panic!("{item} {kind} diagnostic"));
+        assert_eq!(
+            diagnostic["location"],
+            serde_json::json!({
+                "file": "library/src/lib.rs",
+                "line": line,
+                "column": column,
+                "end_line": end_line,
+                "end_column": end_column,
+            })
+        );
+        (line, column, end_line, end_column)
+    });
+
+    let offset = |line: usize, column: usize| {
+        source
+            .split_inclusive('\n')
+            .take(line - 1)
+            .map(str::len)
+            .sum::<usize>()
+            + column
+            - 1
+    };
+    let mut ranges = locations.map(|(line, column, end_line, end_column)| {
+        offset(line, column)..offset(end_line, end_column)
+    });
+    ranges.sort_by_key(|range| range.start);
+    for range in ranges.into_iter().rev() {
+        source.replace_range(range, "");
+    }
+    fs::write(&library_path, source).expect("delete diagnostic ranges");
+
+    let output = context
+        .cargo()
+        .args(["check", "--workspace", "--locked"])
+        .arg("--target-dir")
+        .arg(context.target_dir())
+        .output()
+        .expect("compile declarations after deleting diagnostic ranges");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 #[cfg(unix)]
 #[test]
-fn json_does_not_wait_for_background_cargo_helpers_holding_stdout() {
+fn json_does_not_wait_for_background_cargo_helpers_holding_output_pipes() {
     use std::time::{Duration, Instant};
 
     let context = HawkTestContext::new("dead_public_fixes");
@@ -1207,13 +1291,12 @@ fn json_does_not_wait_for_background_cargo_helpers_holding_stdout() {
     paths.extend(std::env::split_paths(
         &std::env::var_os("PATH").expect("PATH is set"),
     ));
-    let stderr_path = shim_directory.path().join("stderr");
     let mut child = context
         .command()
         .arg("--output-format=json")
         .env("PATH", std::env::join_paths(paths).expect("construct PATH"))
         .stdout(Stdio::piped())
-        .stderr(fs::File::create(&stderr_path).expect("create stderr capture"))
+        .stderr(Stdio::piped())
         .spawn()
         .expect("spawn cargo-hawk");
     let deadline = Instant::now() + Duration::from_mins(1);
@@ -1224,17 +1307,38 @@ fn json_does_not_wait_for_background_cargo_helpers_holding_stdout() {
         if Instant::now() >= deadline {
             fs::remove_file(&keep_alive).expect("release background helper");
             let _ = child.kill();
-            panic!("cargo-hawk waited for a background Cargo helper holding stdout");
+            panic!("cargo-hawk waited for a background Cargo helper holding output pipes");
         }
         std::thread::sleep(Duration::from_millis(50));
     };
+    let (release_sender, release_receiver) = std::sync::mpsc::sync_channel(1);
+    let release_path = keep_alive.clone();
+    let release = std::thread::spawn(move || {
+        if release_receiver
+            .recv_timeout(Duration::from_secs(5))
+            .is_err()
+        {
+            fs::remove_file(release_path).expect("release blocked background helper");
+            return false;
+        }
+        true
+    });
     let output = child.wait_with_output().expect("read cargo-hawk output");
-    fs::remove_file(&keep_alive).expect("release background helper");
+    let _ = release_sender.send(());
+    let completed_before_release = release.join().expect("join helper-release watchdog");
+    if completed_before_release {
+        fs::remove_file(&keep_alive).expect("release background helper");
+    }
+
+    assert!(
+        completed_before_release,
+        "cargo-hawk left background Cargo helpers holding captured output pipes"
+    );
 
     assert!(
         status.success(),
         "{}",
-        fs::read_to_string(stderr_path).expect("read stderr capture")
+        String::from_utf8_lossy(&output.stderr)
     );
     serde_json::from_slice::<serde_json::Value>(&output.stdout)
         .expect("stdout contains one JSON report");
