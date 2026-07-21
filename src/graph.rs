@@ -186,6 +186,8 @@ pub struct Span {
 #[serde(deny_unknown_fields)]
 pub struct DeclarationSpan {
     pub file: String,
+    pub byte_start: usize,
+    pub byte_end: usize,
     pub start_line: usize,
     pub start_column: usize,
     pub end_line: usize,

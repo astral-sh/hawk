@@ -1231,16 +1231,34 @@ fn declaration_span(
     }
 
     let source_map = tcx.sess.source_map();
-    let start = source_map.lookup_char_pos(start);
-    let end = source_map.lookup_char_pos(item_span.hi());
-    let file = normalize_source_path(&start.file.name.prefer_local_unconditionally().to_string());
-    let end_file = normalize_source_path(&end.file.name.prefer_local_unconditionally().to_string());
+    let end = item_span.hi();
+    let start_location = source_map.lookup_char_pos(start);
+    let end_location = source_map.lookup_char_pos(end);
+    let file = normalize_source_path(
+        &start_location
+            .file
+            .name
+            .prefer_local_unconditionally()
+            .to_string(),
+    );
+    let end_file = normalize_source_path(
+        &end_location
+            .file
+            .name
+            .prefer_local_unconditionally()
+            .to_string(),
+    );
     (file == end_file).then_some(DeclarationSpan {
         file,
-        start_line: start.line,
-        start_column: start.col.to_usize() + 1,
-        end_line: end.line,
-        end_column: end.col.to_usize() + 1,
+        byte_start: start_location
+            .file
+            .original_relative_byte_pos(start)
+            .to_usize(),
+        byte_end: end_location.file.original_relative_byte_pos(end).to_usize(),
+        start_line: start_location.line,
+        start_column: start_location.col.to_usize() + 1,
+        end_line: end_location.line,
+        end_column: end_location.col.to_usize() + 1,
     })
 }
 
@@ -1504,7 +1522,7 @@ mod tests {
 
         assert_eq!(
             error.to_string(),
-            "Hawk frontend uses compiler driver protocol 1, but this driver uses protocol 6; install `cargo-hawk` and `cargo-hawk-driver` from the same release"
+            "Hawk frontend uses compiler driver protocol 1, but this driver uses protocol 7; install `cargo-hawk` and `cargo-hawk-driver` from the same release"
         );
     }
 

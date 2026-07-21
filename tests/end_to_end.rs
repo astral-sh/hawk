@@ -977,7 +977,7 @@ reason = "retain the module parent for JSON child-span coverage"
     );
     let report: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("stdout contains one JSON report");
-    assert_eq!(report["schema_version"], 2);
+    assert_eq!(report["schema_version"], 3);
     assert_eq!(report["summary"]["diagnostic_count"], 38);
     assert_eq!(
         report["summary"]["production"],
@@ -1028,6 +1028,8 @@ reason = "retain the module parent for JSON child-span coverage"
         dead_entry["location"],
         serde_json::json!({
             "file": "library/src/lib.rs",
+            "byte_start": 3353,
+            "byte_end": 3395,
             "line": 190,
             "column": 1,
             "end_line": 192,
@@ -1048,6 +1050,8 @@ reason = "retain the module parent for JSON child-span coverage"
         dead_field["location"],
         serde_json::json!({
             "file": "library/src/lib.rs",
+            "byte_start": 2327,
+            "byte_end": 2342,
             "line": 132,
             "column": 5,
             "end_line": 132,
@@ -1063,6 +1067,8 @@ reason = "retain the module parent for JSON child-span coverage"
         dead_variant["location"],
         serde_json::json!({
             "file": "library/src/lib.rs",
+            "byte_start": 3127,
+            "byte_end": 3134,
             "line": 176,
             "column": 5,
             "end_line": 176,
@@ -1107,7 +1113,7 @@ fn emits_an_empty_json_report_when_all_warnings_are_allowed() {
     context.assert_success(&output);
     let report: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("stdout contains one JSON report");
-    assert_eq!(report["schema_version"], 2);
+    assert_eq!(report["schema_version"], 3);
     assert_eq!(report["summary"]["diagnostic_count"], 0);
     assert_eq!(report["diagnostics"], serde_json::json!([]));
 }
@@ -1165,6 +1171,8 @@ fn json_locations_include_complete_documented_declarations() {
         diagnostic["location"],
         serde_json::json!({
             "file": "library/src/lib.rs",
+            "byte_start": 21,
+            "byte_end": 154,
             "line": 3,
             "column": 1,
             "end_line": 6,
@@ -1182,6 +1190,8 @@ fn json_locations_include_complete_documented_declarations() {
         must_use["location"],
         serde_json::json!({
             "file": "library/src/lib.rs",
+            "byte_start": 156,
+            "byte_end": 206,
             "line": 8,
             "column": 1,
             "end_line": 9,
@@ -1196,6 +1206,8 @@ fn json_locations_include_complete_documented_declarations() {
         doc_hidden["location"],
         serde_json::json!({
             "file": "library/src/lib.rs",
+            "byte_start": 208,
+            "byte_end": 248,
             "line": 11,
             "column": 1,
             "end_line": 12,
@@ -1234,6 +1246,8 @@ fn json_locations_include_grouped_reexport_separators() {
         diagnostic["location"],
         serde_json::json!({
             "file": "library/src/lib.rs",
+            "byte_start": 270,
+            "byte_end": 285,
             "line": 17,
             "column": 27,
             "end_line": 17,
@@ -1280,43 +1294,35 @@ reason = "retain the enum parent for JSON child-span coverage"
     let diagnostics = report["diagnostics"]
         .as_array()
         .expect("diagnostics is an array");
-    let locations = [
-        ("DeadFields::unused", "field", 2, 5, 3, 6),
-        ("DeadEnum::Unused", "enum_variant", 8, 5, 8, 37),
-        ("Unused", "reexport", 17, 19, 17, 53),
+    let ranges = [
+        ("DeadFields::unused", "field", 28, 67, 2, 5, 3, 6),
+        ("DeadEnum::Unused", "enum_variant", 118, 150, 8, 5, 8, 37),
+        ("Unused", "reexport", 253, 287, 17, 19, 17, 53),
     ]
-    .map(|(item, kind, line, column, end_line, end_column)| {
-        let diagnostic = diagnostics
-            .iter()
-            .find(|diagnostic| {
-                diagnostic["identity"]["item"] == item && diagnostic["identity"]["kind"] == kind
-            })
-            .unwrap_or_else(|| panic!("{item} {kind} diagnostic"));
-        assert_eq!(
-            diagnostic["location"],
-            serde_json::json!({
-                "file": "library/src/lib.rs",
-                "line": line,
-                "column": column,
-                "end_line": end_line,
-                "end_column": end_column,
-            })
-        );
-        (line, column, end_line, end_column)
-    });
-
-    let offset = |line: usize, column: usize| {
-        source
-            .split_inclusive('\n')
-            .take(line - 1)
-            .map(str::len)
-            .sum::<usize>()
-            + column
-            - 1
-    };
-    let mut ranges = locations.map(|(line, column, end_line, end_column)| {
-        offset(line, column)..offset(end_line, end_column)
-    });
+    .map(
+        |(item, kind, byte_start, byte_end, line, column, end_line, end_column)| {
+            let diagnostic = diagnostics
+                .iter()
+                .find(|diagnostic| {
+                    diagnostic["identity"]["item"] == item && diagnostic["identity"]["kind"] == kind
+                })
+                .unwrap_or_else(|| panic!("{item} {kind} diagnostic"));
+            assert_eq!(
+                diagnostic["location"],
+                serde_json::json!({
+                    "file": "library/src/lib.rs",
+                    "byte_start": byte_start,
+                    "byte_end": byte_end,
+                    "line": line,
+                    "column": column,
+                    "end_line": end_line,
+                    "end_column": end_column,
+                })
+            );
+            byte_start..byte_end
+        },
+    );
+    let mut ranges = ranges;
     ranges.sort_by_key(|range| range.start);
     for range in ranges.into_iter().rev() {
         source.replace_range(range, "");
@@ -1335,6 +1341,101 @@ reason = "retain the enum parent for JSON child-span coverage"
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[test]
+fn json_byte_offsets_delete_unicode_declarations() {
+    let context = HawkTestContext::new("dead_public_fixes");
+    fs::write(
+        context.workspace().join("hawk.toml"),
+        r#"[[production]]
+package = "app"
+bin = "app"
+reason = "binary product under analysis"
+
+[[override]]
+lint = "hawk::dead_public"
+crate = "library"
+item = "DeadFields"
+level = "allow"
+reason = "retain the field parent for JSON child-span coverage"
+"#,
+    )
+    .expect("write Hawk configuration");
+    let library_path = context.workspace().join("library/src/lib.rs");
+    let mut source =
+        "\u{feff}pub struct DeadFields {\r\n    /* 😀é */ pub unused: u8 /* 😀é */ ,\r\n    pub remaining: u8,\r\n}\r\n"
+            .to_string();
+    fs::write(&library_path, &source).expect("write Unicode declaration");
+
+    let output = context.run(&["--output-format=json"]);
+
+    context.assert_success(&output);
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout contains one JSON report");
+    assert_eq!(report["schema_version"], 3);
+    let diagnostic = report["diagnostics"]
+        .as_array()
+        .expect("diagnostics is an array")
+        .iter()
+        .find(|diagnostic| diagnostic["identity"]["item"] == "DeadFields::unused")
+        .expect("dead field diagnostic");
+    assert_eq!(
+        diagnostic["location"],
+        serde_json::json!({
+            "file": "library/src/lib.rs",
+            "byte_start": 45,
+            "byte_end": 74,
+            "line": 2,
+            "column": 14,
+            "end_line": 2,
+            "end_column": 39,
+        })
+    );
+    let location = &diagnostic["location"];
+    let byte_start = usize::try_from(location["byte_start"].as_u64().expect("byte_start"))
+        .expect("byte_start fits in usize");
+    let byte_end = usize::try_from(location["byte_end"].as_u64().expect("byte_end"))
+        .expect("byte_end fits in usize");
+    assert_eq!(
+        source.get(byte_start..byte_end),
+        Some("pub unused: u8 /* 😀é */ ,")
+    );
+    source.replace_range(byte_start..byte_end, "");
+    fs::write(&library_path, source).expect("delete Unicode declaration range");
+
+    let output = context
+        .cargo()
+        .args(["check", "--workspace", "--locked"])
+        .arg("--target-dir")
+        .arg(context.target_dir())
+        .output()
+        .expect("compile declarations after deleting Unicode range");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn json_still_emits_a_report_when_stderr_is_closed() {
+    let context = HawkTestContext::new("dead_public_fixes");
+    let (reader, writer) = std::io::pipe().expect("create stderr pipe");
+    drop(reader);
+    let output = context
+        .command()
+        .arg("--output-format=json")
+        .stderr(writer)
+        .output()
+        .expect("run cargo-hawk with closed stderr");
+
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout contains one JSON report");
+    assert_eq!(report["schema_version"], 3);
 }
 
 #[cfg(unix)]

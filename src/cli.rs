@@ -680,7 +680,7 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
         }
         OutputFormat::Json => {
             let output = serde_json::json!({
-                "schema_version": 2,
+                "schema_version": 3,
                 "summary": {
                     "diagnostic_count": diagnostic_count,
                     "target": args.target.as_deref().unwrap_or(toolchain.host()),
@@ -743,6 +743,8 @@ fn json_finding(
             })),
             |span| Some(serde_json::json!({
                 "file": span.file,
+                "byte_start": span.byte_start,
+                "byte_end": span.byte_end,
                 "line": span.start_line,
                 "column": span.start_column,
                 "end_line": span.end_line,
@@ -1158,8 +1160,13 @@ impl InstrumentedCargo<'_> {
             let reader = cargo_output
                 .reopen()
                 .context("open temporary Cargo output file for reading")?;
-            std::io::copy(&mut reader.take(length), &mut std::io::stderr())
-                .context("write captured Cargo output to stderr")?;
+            match std::io::copy(&mut reader.take(length), &mut std::io::stderr()) {
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => {}
+                Err(error) => {
+                    return Err(error).context("write captured Cargo output to stderr");
+                }
+            }
         }
         if !status.success() {
             bail!("instrumented Cargo {subcommand} failed with {status}");
