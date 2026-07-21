@@ -227,9 +227,14 @@ The analysis then computes two reachability closures:
 - **non-production live** begins at executable entry points compiled for
   tests, benches, examples, or doctests.
 
-Both closures include conservative roots, currently used for trait-associated
-implementation code whose dispatch is not safely modeled by direct call
-edges.
+Both closures also include conservative roots when entry-point traversal alone
+is insufficient. These include conservatively modeled trait-associated code,
+declarations covered by `#[allow(dead_code)]`, and declarations whose codegen
+attributes indicate external addressing or explicit retention, such as
+`no_mangle`, `export_name`, and `used`.
+
+A conservative root establishes liveness only; it does not require public
+Rust visibility.
 
 Separately, Hawk computes the declarations whose public visibility is
 required. Any compiled cross-crate reference requires the referenced

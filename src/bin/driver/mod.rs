@@ -804,7 +804,11 @@ fn collect_fragment(
             })
             .filter(|def_id| {
                 let attrs = tcx.codegen_fn_attrs(def_id.to_def_id());
-                attrs.flags.contains(CodegenFnAttrFlags::NO_MANGLE) || attrs.symbol_name.is_some()
+                attrs.flags.intersects(
+                    CodegenFnAttrFlags::NO_MANGLE
+                        | CodegenFnAttrFlags::USED_COMPILER
+                        | CodegenFnAttrFlags::USED_LINKER,
+                ) || attrs.symbol_name.is_some()
             })
             .map(|def_id| id(tcx, def_id.to_def_id())),
     );

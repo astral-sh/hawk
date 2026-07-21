@@ -1828,16 +1828,49 @@ fn benchmark_consumers_preserve_required_public_visibility() {
 }
 
 #[test]
-fn exported_symbols_are_treated_as_external_roots() {
+fn codegen_roots_preserve_reachable_items() {
     let context = HawkTestContext::new("exported_symbols");
     let output = context.run(&[]);
 
     context.assert_success(&output);
     let stdout = context.normalized_stdout(&output);
-    assert!(!stdout.contains("warning[hawk::dead_public]: `exported_callback` is public"));
-    assert!(!stdout.contains("warning[hawk::dead_public]: `renamed_callback` is public"));
-    assert!(stdout.contains("warning[hawk::unnecessary_public]: `exported_callback` is public"));
-    assert!(stdout.contains("warning[hawk::unnecessary_public]: `renamed_callback` is public"));
+    for live in [
+        "exported_callback",
+        "renamed_callback",
+        "RETAINED_REGISTRATION",
+        "retained_callback",
+        "retained_helper",
+        "macro_registered_callback",
+    ] {
+        assert!(
+            !stdout.contains(&format!("warning[hawk::dead_public]: `{live}` is public")),
+            "declaration `{live}` reachable from a codegen root was diagnosed as dead:\n{stdout}"
+        );
+        assert!(
+            stdout.contains(&format!(
+                "warning[hawk::unnecessary_public]: `{live}` is public"
+            )),
+            "declaration `{live}` reachable from a codegen root was not diagnosed as unnecessarily public:\n{stdout}"
+        );
+    }
+    for unretained in [
+        "UNRETAINED_REGISTRATION",
+        "unretained_callback",
+        "unretained_helper",
+    ] {
+        assert!(
+            stdout.contains(&format!(
+                "warning[hawk::dead_public]: `{unretained}` is public"
+            )),
+            "unretained declaration `{unretained}` was not diagnosed as dead:\n{stdout}"
+        );
+        assert!(
+            !stdout.contains(&format!(
+                "warning[hawk::unnecessary_public]: `{unretained}` is public"
+            )),
+            "unretained declaration `{unretained}` was unexpectedly diagnosed as live:\n{stdout}"
+        );
+    }
 }
 
 #[test]
