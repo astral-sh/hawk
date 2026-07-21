@@ -688,11 +688,8 @@ pub fn suppress_dead_public_descendants(
             ambiguous_paths.insert(path);
         }
     }
-    let protected = protected_containing_definitions(
-        production_fragments,
-        test_fragments,
-        retained_definitions,
-    );
+    let protected =
+        protected_reachable_definitions(production_fragments, test_fragments, retained_definitions);
     findings.retain(|finding| {
         finding.kind != FindingKind::DeadPublic
             || !protected.contains(&containment_identity(finding.definition))
@@ -727,7 +724,7 @@ type ContainmentIdentity<'a> = (
     Option<&'a ExpansionSpan>,
 );
 
-fn protected_containing_definitions<'a>(
+fn protected_reachable_definitions<'a>(
     production_fragments: &'a [Fragment],
     test_fragments: &'a [Fragment],
     retained_definitions: &[&Definition],
@@ -741,42 +738,35 @@ fn protected_containing_definitions<'a>(
         return protected;
     }
 
-    for fragment in production_fragments.iter().chain(test_fragments) {
-        let mut pending: Vec<_> = fragment
-            .definitions
-            .iter()
-            .filter(|definition| retained.contains(&containment_identity(definition)))
-            .map(|definition| definition.id)
-            .collect();
-        if pending.is_empty() {
+    let definitions: FxHashMap<_, _> = production_fragments
+        .iter()
+        .chain(test_fragments)
+        .flat_map(|fragment| &fragment.definitions)
+        .map(|definition| (definition.id, definition))
+        .collect();
+    let mut pending: Vec<_> = definitions
+        .values()
+        .filter(|definition| retained.contains(&containment_identity(definition)))
+        .map(|definition| definition.id)
+        .collect();
+    let mut adjacency: FxHashMap<DefinitionId, Vec<DefinitionId>> = FxHashMap::default();
+    for edge in production_fragments
+        .iter()
+        .chain(test_fragments)
+        .flat_map(|fragment| &fragment.edges)
+    {
+        if definitions.contains_key(&edge.from) && definitions.contains_key(&edge.to) {
+            adjacency.entry(edge.from).or_default().push(edge.to);
+        }
+    }
+    let mut visited = FxHashSet::default();
+    while let Some(source) = pending.pop() {
+        if !visited.insert(source) {
             continue;
         }
-        let definitions: FxHashMap<_, _> = fragment
-            .definitions
-            .iter()
-            .map(|definition| (definition.id, definition))
-            .collect();
-        let mut parents: FxHashMap<DefinitionId, Vec<DefinitionId>> = FxHashMap::default();
-        for edge in &fragment.edges {
-            let Some(child) = definitions.get(&edge.from) else {
-                continue;
-            };
-            let Some(parent) = definitions.get(&edge.to) else {
-                continue;
-            };
-            if is_containment_edge(edge.kind, child, parent) {
-                parents.entry(edge.from).or_default().push(edge.to);
-            }
-        }
-        let mut visited = FxHashSet::default();
-        while let Some(child) = pending.pop() {
-            if !visited.insert(child) {
-                continue;
-            }
-            for parent in parents.get(&child).into_iter().flatten() {
-                protected.insert(containment_identity(definitions[parent]));
-                pending.push(*parent);
-            }
+        for target in adjacency.get(&source).into_iter().flatten() {
+            protected.insert(containment_identity(definitions[target]));
+            pending.push(*target);
         }
     }
     protected
@@ -790,33 +780,6 @@ fn containment_identity(definition: &Definition) -> ContainmentIdentity<'_> {
         definition.span.as_ref(),
         definition.expansion_span.as_ref(),
     )
-}
-
-fn is_containment_edge(kind: EdgeKind, child: &Definition, parent: &Definition) -> bool {
-    if child.crate_name != parent.crate_name
-        || child
-            .name
-            .strip_prefix(parent.name.as_str())
-            .is_none_or(|suffix| !suffix.starts_with("::"))
-    {
-        return false;
-    }
-
-    match kind {
-        EdgeKind::VisibilityParent => parent.kind == DefinitionKind::Module,
-        EdgeKind::Interface => matches!(
-            (child.kind, parent.kind),
-            (
-                DefinitionKind::Field,
-                DefinitionKind::Struct | DefinitionKind::Union
-            ) | (DefinitionKind::EnumVariant, DefinitionKind::Enum)
-                | (
-                    DefinitionKind::InherentMethod | DefinitionKind::InherentAssociatedConstant,
-                    DefinitionKind::Struct | DefinitionKind::Union | DefinitionKind::Enum
-                )
-        ),
-        _ => false,
-    }
 }
 
 fn visit_containing_paths<'a>(
@@ -2095,7 +2058,7 @@ mod tests {
     }
 
     #[test]
-    fn arbitrary_interface_edges_do_not_protect_dead_public_findings() {
+    fn retained_interface_dependencies_protect_dead_public_findings() {
         let input = fragments(
             vec![
                 typed_node("Dead", "lib", true, DefinitionKind::Struct),
@@ -2116,9 +2079,68 @@ mod tests {
 
         suppress_dead_public_descendants(&input, &[], &[&input[1].definitions[1]], &mut findings);
 
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn retained_definitions_protect_their_body_interface_and_reexport_dependencies() {
+        let input = fragments(
+            vec![
+                typed_node("Dependency", "test_support", true, DefinitionKind::Struct),
+                typed_node("Alias", "lib", true, DefinitionKind::TypeAlias),
+                typed_node("RetainedExport", "lib", true, DefinitionKind::Reexport),
+                node("retained", "lib", true),
+                typed_node("Removable", "lib", true, DefinitionKind::Struct),
+            ],
+            vec![
+                Edge {
+                    from: test_id("retained"),
+                    to: test_id("Alias"),
+                    kind: EdgeKind::Body,
+                },
+                Edge {
+                    from: test_id("Alias"),
+                    to: test_id("Dependency"),
+                    kind: EdgeKind::Interface,
+                },
+                Edge {
+                    from: test_id("RetainedExport"),
+                    to: test_id("Dependency"),
+                    kind: EdgeKind::Reexport,
+                },
+            ],
+        );
+        let mut findings = vec![
+            Finding {
+                kind: FindingKind::DeadPublic,
+                definition: &input[1].definitions[0],
+                test_only: false,
+                test_compiled_only: false,
+            },
+            Finding {
+                kind: FindingKind::DeadPublic,
+                definition: &input[1].definitions[1],
+                test_only: false,
+                test_compiled_only: false,
+            },
+            Finding {
+                kind: FindingKind::DeadPublic,
+                definition: &input[1].definitions[4],
+                test_only: false,
+                test_compiled_only: false,
+            },
+        ];
+
+        suppress_dead_public_descendants(
+            &input,
+            &[],
+            &[&input[1].definitions[2], &input[1].definitions[3]],
+            &mut findings,
+        );
+
         assert_eq!(
             finding_summaries(findings),
-            vec![(FindingKind::DeadPublic, "Dead".into(), false, false)]
+            vec![(FindingKind::DeadPublic, "Removable".into(), false, false)]
         );
     }
 

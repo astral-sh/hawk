@@ -598,17 +598,25 @@ fn collect_fragment(
         if matches!(
             diagnostic_kind(tcx, def_id),
             Some(DefinitionKind::InherentMethod | DefinitionKind::InherentAssociatedConstant)
-        ) && let ty::Adt(adt, _) = tcx
-            .type_of(tcx.local_parent(def_id))
-            .instantiate_identity()
-            .skip_norm_wip()
-            .kind()
-        {
+        ) {
+            let impl_def_id = tcx.local_parent(def_id);
             edges.push(Edge {
                 from: id(tcx, def_id.to_def_id()),
-                to: id(tcx, adt.did()),
+                to: id(tcx, impl_def_id.to_def_id()),
                 kind: EdgeKind::Interface,
             });
+            if let ty::Adt(adt, _) = tcx
+                .type_of(impl_def_id)
+                .instantiate_identity()
+                .skip_norm_wip()
+                .kind()
+            {
+                edges.push(Edge {
+                    from: id(tcx, def_id.to_def_id()),
+                    to: id(tcx, adt.did()),
+                    kind: EdgeKind::Interface,
+                });
+            }
         }
         if matches!(
             tcx.def_kind(def_id),
@@ -645,6 +653,90 @@ fn collect_fragment(
         to: id(tcx, adt.to_def_id()),
         kind: EdgeKind::Interface,
     }));
+    let mut reexports_by_target = HashMap::<DefinitionId, Vec<DefinitionId>>::new();
+    let mut reexport_targets_by_source = HashMap::<DefinitionId, Vec<DefinitionId>>::new();
+    for edge in edges.iter().filter(|edge| edge.kind == EdgeKind::Reexport) {
+        reexports_by_target
+            .entry(edge.to)
+            .or_default()
+            .push(edge.from);
+        reexport_targets_by_source
+            .entry(edge.from)
+            .or_default()
+            .push(edge.to);
+    }
+    let definitions_by_id: HashMap<_, _> = definitions
+        .iter()
+        .map(|definition| (definition.id, definition))
+        .collect();
+    for owner in crate_items.owners() {
+        let def_id = owner.def_id;
+        if tcx.def_kind(def_id) != DefKind::Use {
+            continue;
+        }
+        let Some(source_name) = reexport_source_name(tcx, def_id) else {
+            continue;
+        };
+        let reexport_id = id(tcx, def_id.to_def_id());
+        for target in reexport_targets_by_source
+            .get(&reexport_id)
+            .into_iter()
+            .flatten()
+        {
+            for source in reexports_by_target.get(target).into_iter().flatten() {
+                if *source == reexport_id {
+                    continue;
+                }
+                let Some(source_definition) = definitions_by_id.get(source) else {
+                    continue;
+                };
+                if source_definition.name == source_name {
+                    edges.push(Edge {
+                        from: reexport_id,
+                        to: *source,
+                        kind: EdgeKind::Interface,
+                    });
+                }
+            }
+        }
+    }
+    for owner in crate_items.owners() {
+        let def_id = owner.def_id;
+        if !matches!(
+            diagnostic_kind(tcx, def_id),
+            Some(DefinitionKind::InherentMethod | DefinitionKind::InherentAssociatedConstant)
+        ) {
+            continue;
+        }
+        let impl_def_id = tcx.local_parent(def_id);
+        let Some(receiver_name) = inherent_receiver_name(tcx, impl_def_id) else {
+            continue;
+        };
+        let ty::Adt(adt, _) = tcx
+            .type_of(impl_def_id)
+            .instantiate_identity()
+            .skip_norm_wip()
+            .kind()
+        else {
+            continue;
+        };
+        for reexport in reexports_by_target
+            .get(&id(tcx, adt.did()))
+            .into_iter()
+            .flatten()
+        {
+            let Some(reexport_definition) = definitions_by_id.get(reexport) else {
+                continue;
+            };
+            if reexport_definition.name == receiver_name {
+                edges.push(Edge {
+                    from: id(tcx, def_id.to_def_id()),
+                    to: *reexport,
+                    kind: EdgeKind::Interface,
+                });
+            }
+        }
+    }
     source_item_fields.sort_by_key(|(file_start, item_start, _)| (*file_start, *item_start));
     // A derive can expose a generated field whose visibility is governed by a
     // source field, as `rkyv::Archived<T>` does. HIR cannot prove that macro
@@ -1102,6 +1194,56 @@ fn enclosing_module(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Option<LocalDefId> {
     }
     let parent = tcx.local_parent(def_id);
     (parent != CRATE_DEF_ID && tcx.def_kind(parent) == DefKind::Mod).then_some(parent)
+}
+
+fn inherent_receiver_name(tcx: TyCtxt<'_>, impl_def_id: LocalDefId) -> Option<String> {
+    let Node::Item(item) = tcx.hir_node_by_def_id(impl_def_id) else {
+        return None;
+    };
+    let hir::ItemKind::Impl(implementation) = item.kind else {
+        return None;
+    };
+    let hir::TyKind::Path(hir::QPath::Resolved(_, path)) = implementation.self_ty.kind else {
+        return None;
+    };
+    Some(local_path_name(
+        tcx,
+        impl_def_id,
+        path.segments.iter().map(|segment| segment.ident.name),
+    ))
+}
+
+fn reexport_source_name(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Option<String> {
+    let Node::Item(item) = tcx.hir_node_by_def_id(def_id) else {
+        return None;
+    };
+    let hir::ItemKind::Use(path, _) = item.kind else {
+        return None;
+    };
+    Some(local_path_name(
+        tcx,
+        def_id,
+        path.segments.iter().map(|segment| segment.ident.name),
+    ))
+}
+
+fn local_path_name(
+    tcx: TyCtxt<'_>,
+    def_id: LocalDefId,
+    segments: impl Iterator<Item = Symbol>,
+) -> String {
+    let mut scope = module_scope(tcx, def_id);
+    for segment in segments {
+        match segment.as_str() {
+            "crate" => scope.clear(),
+            "self" => {}
+            "super" => {
+                scope.pop();
+            }
+            name => scope.push(name.to_owned()),
+        }
+    }
+    scope.join("::")
 }
 
 fn module_scope(tcx: TyCtxt<'_>, mut def_id: LocalDefId) -> Vec<String> {

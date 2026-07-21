@@ -252,11 +252,12 @@ fields, enum variants, and nested declarations beneath an emitted
 descendants too, while separately declared inherent members and unrelated
 interface dependencies continue to receive their own findings. Suppressing a
 parent leaves any otherwise actionable descendants visible, while suppressing
-any descendant finding protects its enclosing declaration from a misleading
-removal diagnostic. Allowing `hawk::dead_public` on the command line leaves
-other actionable descendant findings and fixes enabled. If cfg alternatives
-declare the same containing path with different kinds or source locations, Hawk
-conservatively keeps their descendant findings visible.
+any finding protects its enclosing declarations and its actual body, interface,
+and re-export dependencies from misleading removal diagnostics. Allowing
+`hawk::dead_public` on the command line leaves other actionable descendant
+findings and fixes enabled. If cfg alternatives declare the same containing path
+with different kinds or source locations, Hawk conservatively keeps their
+descendant findings visible.
 
 A selected production target is not a library surface to reduce, so its crate
 does not receive these findings.

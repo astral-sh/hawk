@@ -459,7 +459,7 @@ fn diagnoses_public_surface_of_a_binary_product() {
     assert!(unrelated_json.exists());
     let stdout = context.normalized_stdout(&output);
     let summary = format!(
-        "hawk: 39 finding(s) for `app --bin app --all-features` and workspace non-production targets on target `{host_target}`\n"
+        "hawk: 38 finding(s) for `app --bin app --all-features` and workspace non-production targets on target `{host_target}`\n"
     );
     let diagnostics = stdout
         .strip_suffix(&summary)
@@ -471,13 +471,6 @@ fn diagnoses_public_surface_of_a_binary_product() {
     5 | pub fn internal_helper() {}
       | ^^^ public declaration
       = help: change this declaration to `pub(crate)`
-
-    warning[hawk::dead_public]: `ContextOptionsAlias` is public but is not reachable from binary `app`
-      --> library/src/lib.rs:21:1
-       |
-    21 | pub type ContextOptionsAlias = ContextOptions;
-       | ^^^ public declaration
-       = help: consider restricting this declaration's visibility or removing it
 
     warning[hawk::unnecessary_public]: `PrivateContextOptions` is public but all reachable uses are within `library`; it can be `pub(crate)`
       --> library/src/lib.rs:57:1
@@ -907,7 +900,7 @@ fn ordered_lint_levels_control_severity_and_exit_status() {
     assert!(stdout.contains("warning[hawk::unnecessary_public]"));
     assert!(stdout.contains("error[hawk::unfulfilled_expectation]"));
     assert!(!stdout.contains("hawk::unknown_item"));
-    assert!(stdout.contains("hawk: 38 finding(s)"));
+    assert!(stdout.contains("hawk: 37 finding(s)"));
 }
 
 #[test]
@@ -1274,6 +1267,148 @@ reason = "struct field is intentionally retained"
     assert!(stdout.contains("`ModuleAlternative::production_dead` is public"));
     assert!(!stdout.contains("`StructAlternative::test_live`"));
     assert!(!stdout.contains("`ModuleAlternative::test_live`"));
+}
+
+#[test]
+fn retained_definitions_keep_their_dependency_closure_compilable() {
+    let context = HawkTestContext::new("dead_public_fixes");
+    let library_path = context.workspace().join("library/src/lib.rs");
+    let source = r"pub struct BodyDependency;
+
+pub fn retained_body() {
+    let _ = BodyDependency;
+}
+
+pub struct InterfaceDependency;
+pub type InterfaceAlias = InterfaceDependency;
+
+pub struct Retained {
+    pub field: InterfaceAlias,
+}
+
+pub struct ExportDependency;
+pub use ExportDependency as RetainedExport;
+
+pub struct TypeReceiver;
+pub type ReceiverAlias = TypeReceiver;
+
+impl ReceiverAlias {
+    pub fn retained_method() {}
+}
+
+pub struct UseReceiver;
+pub mod receiver_alias {
+    pub use super::{UseReceiver as First};
+    pub use self::{First as Alias};
+}
+
+impl receiver_alias::Alias {
+    pub const RETAINED: u8 = 1;
+}
+
+pub mod unrelated_receiver_alias {
+    pub use super::UseReceiver as Alias;
+}
+
+pub struct Removable;
+";
+    fs::write(&library_path, source).expect("write retained dependency fixture");
+    let configuration = tempfile::NamedTempFile::new().expect("temporary configuration");
+    fs::write(
+        configuration.path(),
+        r#"
+[[production]]
+package = "app"
+bin = "app"
+reason = "test binary product"
+
+[[override]]
+lint = "hawk::dead_public"
+crate = "library"
+item = "retained_body"
+kind = "function"
+level = "allow"
+reason = "function body is intentionally retained"
+
+[[override]]
+lint = "hawk::dead_public"
+crate = "library"
+item = "Retained::field"
+kind = "field"
+level = "allow"
+reason = "field API is intentionally retained"
+
+[[override]]
+lint = "hawk::dead_public"
+crate = "library"
+item = "RetainedExport"
+kind = "reexport"
+level = "allow"
+reason = "re-export API is intentionally retained"
+
+[[override]]
+lint = "hawk::dead_public"
+crate = "library"
+item = "TypeReceiver::retained_method"
+kind = "inherent_method"
+level = "allow"
+reason = "type-alias receiver method is intentionally retained"
+
+[[override]]
+lint = "hawk::dead_public"
+crate = "library"
+item = "UseReceiver::RETAINED"
+kind = "inherent_associated_constant"
+level = "allow"
+reason = "re-export receiver constant is intentionally retained"
+"#,
+    )
+    .expect("write temporary configuration");
+    let output = context
+        .command()
+        .arg("--config")
+        .arg(configuration.path())
+        .output()
+        .expect("run cargo-hawk");
+
+    context.assert_success(&output);
+    let stdout = context.normalized_stdout(&output);
+    assert!(stdout.contains("`Removable` is public but is not reachable"));
+    assert!(stdout.contains("public re-export `unrelated_receiver_alias::Alias`"));
+    for item in [
+        "BodyDependency",
+        "InterfaceDependency",
+        "InterfaceAlias",
+        "Retained",
+        "ExportDependency",
+        "RetainedExport",
+        "TypeReceiver",
+        "ReceiverAlias",
+        "UseReceiver",
+        "receiver_alias",
+    ] {
+        assert!(!stdout.contains(&format!("`{item}`")), "{stdout}");
+    }
+
+    let remaining = source
+        .replace(
+            "pub mod unrelated_receiver_alias {\n    pub use super::UseReceiver as Alias;\n}",
+            "pub mod unrelated_receiver_alias {}",
+        )
+        .replace("\npub struct Removable;\n", "\n");
+    fs::write(&library_path, remaining).expect("remove reported dead declaration");
+    let output = context
+        .cargo()
+        .args(["check", "--workspace", "--locked"])
+        .arg("--target-dir")
+        .arg(context.target_dir())
+        .output()
+        .expect("compile workspace after removing reported declaration");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]

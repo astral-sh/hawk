@@ -1129,6 +1129,49 @@ reason = "field is intentionally retained"
     }
 
     #[test]
+    fn retained_field_protects_its_interface_dependency() {
+        let directory = tempfile::tempdir().expect("temporary configuration directory");
+        let path = directory.path().join("hawk.toml");
+        std::fs::write(
+            &path,
+            r#"
+[[override]]
+lint = "hawk::dead_public"
+crate = "library"
+item = "Dead::field"
+level = "expect"
+reason = "field API is intentionally retained"
+"#,
+        )
+        .expect("write configuration");
+        let config = Config::load(directory.path(), Some(&path)).expect("load configuration");
+        let mut fragment = dead_parent_fragment();
+        let mut dependency = fragment.definitions[0].clone();
+        dependency.id = test_id("Dependency");
+        dependency.name = "Dependency".into();
+        dependency.kind = DefinitionKind::TypeAlias;
+        fragment.definitions.push(dependency);
+        fragment.edges.push(Edge {
+            from: test_id("Dead::field"),
+            to: test_id("Dependency"),
+            kind: EdgeKind::Interface,
+        });
+        let fragments = vec![fragment];
+        let findings = analyze(&fragments, &[], &candidate_crates(), &HashSet::new());
+
+        let applied = config.apply(
+            &target("aarch64-apple-darwin", &["unix"]),
+            &fragments,
+            &[],
+            findings,
+            true,
+        );
+
+        assert!(applied.findings.is_empty());
+        assert!(applied.config_diagnostics.is_empty());
+    }
+
+    #[test]
     fn excluding_a_dead_parent_file_keeps_its_dead_child_actionable() {
         let directory = tempfile::tempdir().expect("temporary configuration directory");
         let path = directory.path().join("hawk.toml");
