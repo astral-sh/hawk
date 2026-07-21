@@ -99,9 +99,10 @@ compiler fragments for investigation. Diagnostics are colored automatically
 in a terminal; use `--color=always` or `--color=never` to override terminal
 detection.
 
-Use `--output-format=json` for a machine-readable diagnostic report. Cargo
-progress and compiler output remain on stderr, so stdout contains exactly one
-JSON object:
+Use `--output-format=json` for a machine-readable diagnostic report. For a
+completed analysis, Cargo progress and compiler output remain on stderr, so
+stdout contains exactly one JSON object. Operational failures are reported on
+stderr and do not produce a JSON report:
 
 ```sh
 ./target/debug/cargo-hawk check \

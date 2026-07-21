@@ -1051,6 +1051,27 @@ fn emits_an_empty_json_report_when_all_warnings_are_allowed() {
 }
 
 #[test]
+fn reports_operational_json_errors_on_stderr() {
+    let context = HawkTestContext::new("basic");
+    let configuration = tempfile::NamedTempFile::new().expect("temporary empty configuration");
+    let output = context
+        .command()
+        .arg("--output-format=json")
+        .arg("--config")
+        .arg(configuration.path())
+        .output()
+        .expect("run cargo-hawk");
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(
+        context
+            .normalized_stderr(&output)
+            .contains("error: no applicable production binaries configured")
+    );
+}
+
+#[test]
 fn applies_visibility_fixes_through_cargo_fix() {
     let context = HawkTestContext::new("basic");
     let output = context.run(&["--fix", "--allow-no-vcs"]);

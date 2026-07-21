@@ -20,8 +20,8 @@ use crate::toolchain::{
     RustToolchain, clear_protocol_environment, driver_executable, validate_driver_protocol,
 };
 use cargo_hawk_internal::graph::{
-    CollectionOptions, Definition, DefinitionIdentity, Finding, FindingKind, FixPlan, FixTarget,
-    Fragment, analyze_with_options,
+    CollectionOptions, Definition, DefinitionIdentity, DefinitionKind, Finding, FindingKind,
+    FixPlan, FixTarget, Fragment, analyze_with_options,
 };
 
 #[derive(Debug, Parser)]
@@ -718,13 +718,13 @@ fn json_finding(
         "category": "finding",
         "code": finding.kind.code(),
         "severity": level.severity(),
-        "kind": finding.kind,
+        "kind": json_finding_kind(finding.kind),
         "identity": {
             "id": definition.id.to_string(),
             "package": package,
             "crate": definition.crate_name,
             "item": definition.name,
-            "kind": definition.kind,
+            "kind": json_definition_kind(definition.kind),
             "parent": definition.name.rsplit_once("::").map(|(parent, _)| parent),
             "module_scope": definition.module_scope,
         },
@@ -752,7 +752,7 @@ fn json_config_diagnostic(
         "identity": {
             "crate": entry.crate_name,
             "item": entry.item,
-            "kind": entry.definition_kind,
+            "kind": entry.definition_kind.map(json_definition_kind),
         },
         "location": {
             "file": path,
@@ -761,6 +761,35 @@ fn json_config_diagnostic(
         },
         "reason": entry.reason,
     })
+}
+
+const fn json_finding_kind(kind: FindingKind) -> &'static str {
+    match kind {
+        FindingKind::DeadPublic => "dead_public",
+        FindingKind::UnnecessaryPublic => "unnecessary_public",
+        FindingKind::UnnecessaryRestrictedVisibility => "unnecessary_restricted_visibility",
+        FindingKind::UnnecessaryCrateVisibility => "unnecessary_crate_visibility",
+    }
+}
+
+const fn json_definition_kind(kind: DefinitionKind) -> &'static str {
+    match kind {
+        DefinitionKind::Function => "function",
+        DefinitionKind::InherentMethod => "inherent_method",
+        DefinitionKind::InherentAssociatedConstant => "inherent_associated_constant",
+        DefinitionKind::Trait => "trait",
+        DefinitionKind::Struct => "struct",
+        DefinitionKind::Enum => "enum",
+        DefinitionKind::Union => "union",
+        DefinitionKind::TypeAlias => "type_alias",
+        DefinitionKind::Constant => "constant",
+        DefinitionKind::Static => "static",
+        DefinitionKind::Field => "field",
+        DefinitionKind::EnumVariant => "enum_variant",
+        DefinitionKind::Reexport => "reexport",
+        DefinitionKind::Module => "module",
+        DefinitionKind::Other => "other",
+    }
 }
 
 pub(crate) fn write_error(raw_args: &[String], error: &anyhow::Error) -> Result<()> {
@@ -852,6 +881,7 @@ struct ConfiguredCargoCommand {
     command: Command,
     subcommand: &'static str,
     capture_output: bool,
+    stream_stdout_to_stderr: bool,
 }
 
 struct CollectedFragments {
@@ -1000,10 +1030,17 @@ impl InstrumentedCargo<'_> {
                 )
                 .env_remove("RUSTDOCFLAGS");
         }
+        if self.args.output_format == OutputFormat::Json {
+            command.stderr(Stdio::inherit());
+            if !doctests {
+                command.stdout(Stdio::piped());
+            }
+        }
         Ok(ConfiguredCargoCommand {
             command,
             subcommand,
-            capture_output: doctests || self.args.output_format == OutputFormat::Json,
+            capture_output: doctests && self.args.output_format == OutputFormat::Text,
+            stream_stdout_to_stderr: !doctests && self.args.output_format == OutputFormat::Json,
         })
     }
 
@@ -1018,19 +1055,27 @@ impl InstrumentedCargo<'_> {
             mut command,
             subcommand,
             capture_output,
+            stream_stdout_to_stderr,
         } = self.command(run_id, graph_dir, invocation, feature_profile)?;
-        let status = if capture_output {
+        let status = if stream_stdout_to_stderr {
+            let mut child = command
+                .spawn()
+                .with_context(|| format!("run instrumented Cargo {subcommand}"))?;
+            let mut stdout = child
+                .stdout
+                .take()
+                .expect("streamed Cargo output has piped stdout");
+            let copy_result = std::io::copy(&mut stdout, &mut std::io::stderr());
+            let status = child
+                .wait()
+                .with_context(|| format!("wait for instrumented Cargo {subcommand}"))?;
+            copy_result.context("write streamed Cargo stdout")?;
+            status
+        } else if capture_output {
             let output = command
                 .output()
                 .with_context(|| format!("run instrumented Cargo {subcommand}"))?;
-            if self.args.output_format == OutputFormat::Json {
-                std::io::stderr()
-                    .write_all(&output.stdout)
-                    .context("write captured Cargo stdout")?;
-                std::io::stderr()
-                    .write_all(&output.stderr)
-                    .context("write captured Cargo stderr")?;
-            } else if !output.status.success() {
+            if !output.status.success() {
                 std::io::stdout()
                     .write_all(&output.stdout)
                     .context("write failing doctest compilation stdout")?;
@@ -1444,6 +1489,7 @@ mod tests {
     use super::{
         Args, CargoInvocation, DEFAULT_TARGET_DIR_COMPONENT_MAX_BYTES, DiagnosticRenderer,
         LintLevel, LintLevels, ProductionSelection, default_target_dir, fix_plan_signature,
+        json_definition_kind, json_finding_kind,
     };
 
     fn render_diagnostic(finding: &Finding<'_>) -> String {
@@ -1690,6 +1736,46 @@ mod tests {
             Some((fix_plan, true)),
             false,
         );
+    }
+
+    #[test]
+    fn json_schema_uses_stable_kind_names() {
+        assert_eq!(json_finding_kind(FindingKind::DeadPublic), "dead_public");
+        assert_eq!(
+            json_finding_kind(FindingKind::UnnecessaryPublic),
+            "unnecessary_public"
+        );
+        assert_eq!(
+            json_finding_kind(FindingKind::UnnecessaryRestrictedVisibility),
+            "unnecessary_restricted_visibility"
+        );
+        assert_eq!(
+            json_finding_kind(FindingKind::UnnecessaryCrateVisibility),
+            "unnecessary_crate_visibility"
+        );
+
+        for (kind, expected) in [
+            (DefinitionKind::Function, "function"),
+            (DefinitionKind::InherentMethod, "inherent_method"),
+            (
+                DefinitionKind::InherentAssociatedConstant,
+                "inherent_associated_constant",
+            ),
+            (DefinitionKind::Trait, "trait"),
+            (DefinitionKind::Struct, "struct"),
+            (DefinitionKind::Enum, "enum"),
+            (DefinitionKind::Union, "union"),
+            (DefinitionKind::TypeAlias, "type_alias"),
+            (DefinitionKind::Constant, "constant"),
+            (DefinitionKind::Static, "static"),
+            (DefinitionKind::Field, "field"),
+            (DefinitionKind::EnumVariant, "enum_variant"),
+            (DefinitionKind::Reexport, "reexport"),
+            (DefinitionKind::Module, "module"),
+            (DefinitionKind::Other, "other"),
+        ] {
+            assert_eq!(json_definition_kind(kind), expected);
+        }
     }
 
     #[test]
