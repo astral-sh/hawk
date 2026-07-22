@@ -153,6 +153,71 @@ gate:
   -D warnings
 ```
 
+### Baseline existing debt
+
+Large workspaces may already have thousands of findings. Hand-writing a
+`[[override]]` for each is not practical; a **baseline** records today's
+findings so CI can deny only *new* debt.
+
+Capture the current set of findings (after `hawk.toml` overrides and
+exclusions):
+
+```sh
+./target/debug/cargo-hawk check \
+  --manifest-path /path/to/workspace/Cargo.toml \
+  --baseline hawk-baseline.json \
+  --update-baseline
+```
+
+Commit `hawk-baseline.json` and enforce new findings only:
+
+```sh
+./target/debug/cargo-hawk check \
+  --manifest-path /path/to/workspace/Cargo.toml \
+  --baseline hawk-baseline.json \
+  -D warnings
+```
+
+Matching is semantic — lint code, crate, item path, and definition kind —
+not source line numbers, so edits that only shift line numbers do not re-open
+legacy findings. Item renames correctly appear as “fixed old + new finding.”
+
+Baselined findings are omitted from text and JSON diagnostics. The summary
+reports how many findings the baseline suppressed. Configuration diagnostics
+(`unknown_item`, `unfulfilled_expectation`, …) are never baselined; keep
+those intentional via `[[override]]`.
+
+When findings are fixed, their baseline entries become unused. By default Hawk
+prints a note listing them. Pass `--deny-unused-baseline` to fail CI until the
+baseline is pruned:
+
+```sh
+./target/debug/cargo-hawk check \
+  --manifest-path /path/to/workspace/Cargo.toml \
+  --baseline hawk-baseline.json \
+  --deny-unused-baseline \
+  -D warnings
+```
+
+Rewrite the baseline after paying down debt (or to re-snapshot):
+
+```sh
+./target/debug/cargo-hawk check \
+  --manifest-path /path/to/workspace/Cargo.toml \
+  --baseline hawk-baseline.json \
+  --update-baseline
+```
+
+Baselines are complementary to `[[override]]` / `[[exclude]]`:
+
+| Mechanism | Use for |
+|-----------|---------|
+| `[[override]]` / `[[exclude]]` | Intentional, reviewed exceptions with a reason |
+| `hawk-baseline.json` | Bulk snapshot of pre-existing debt for CI adoption |
+
+Do not auto-write the baseline on ordinary `check` runs: expanding the
+baseline should be an explicit, reviewable change.
+
 Hawk accepts Clippy-style ordered `-A`/`--allow`, `-W`/`--warn`, and
 `-D`/`--deny` lint levels. Later options take precedence:
 

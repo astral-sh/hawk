@@ -342,6 +342,15 @@ output; they never add graph roots or preserve public visibility. This is
 intentionally different from defining a production target: a production target
 changes the analysis, while suppression records an accepted diagnostic scope.
 
+For bulk adoption, Hawk also accepts a machine-generated baseline file
+(`--baseline PATH`). Baseline entries use the same semantic identity as
+overrides (lint, crate, item path, optional definition kind) rather than
+source line numbers, so pure line drift does not re-open legacy findings.
+Baselines are applied after overrides and exclusions, never include
+configuration diagnostics, and are rewritten only with an explicit
+`--update-baseline`. This separates intentional policy (`hawk.toml`) from a
+reviewable snapshot of pre-existing debt.
+
 ## Fixes
 
 Clippy can emit its suggestion at the point where a lint detects a problem,

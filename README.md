@@ -43,6 +43,8 @@ unnecessarily public symbols across crates within a single workspace.
 - Models production separately from tests, benches, examples, and doctests.
 - Applies machine-applicable visibility fixes through `cargo fix`.
 - Uses Clippy-style `-A`/`-W`/`-D` lint levels for incremental CI adoption.
+- Supports a committed findings baseline so large workspaces can fail CI only
+  on *new* debt without hand-writing thousands of overrides.
 
 ## Installation
 

@@ -2,6 +2,17 @@
 
 <!-- prettier-ignore-start -->
 
+## Unreleased
+
+### Enhancements
+
+- Add a findings baseline for adopting Hawk on large workspaces. Capture
+  existing debt with `--baseline PATH --update-baseline`, then run with
+  `--baseline PATH -D warnings` so only new findings fail CI. Matching uses
+  lint + crate + item path + definition kind (not line numbers). Unused
+  baseline entries are reported; `--deny-unused-baseline` fails until they are
+  pruned.
+
 ## 0.1.9
 
 Released on 2026-07-20.

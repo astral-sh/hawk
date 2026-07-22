@@ -1,6 +1,7 @@
 use cargo_hawk_internal::protocol;
 use std::io::Write as _;
 
+mod baseline;
 mod cli;
 mod config;
 mod diagnostics;

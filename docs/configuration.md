@@ -105,6 +105,14 @@ This setting is disabled by default. It does not apply to mixed-visibility
 declarations or declarations whose complete source field list is unavailable,
 such as macro-generated structs.
 
+## Baselines
+
+For bulk adoption on a large workspace, use a separate baseline file rather
+than thousands of overrides. See [Baseline existing debt](usage.md#baseline-existing-debt)
+in the usage guide. Baselines are passed on the CLI (`--baseline PATH`) and are
+not configured in `hawk.toml`. Overrides and exclusions remain the place for
+intentional, reviewed exceptions.
+
 ## Overrides
 
 An override records an intentional finding without changing the analysis:
