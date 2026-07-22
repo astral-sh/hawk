@@ -333,34 +333,71 @@ impl EquivalenceGroups {
     }
 }
 
-/// Returns whether a compiler fragment belongs to the selected library target.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct AuditedFragmentIdentity<'a> {
+    package_name: &'a str,
+    crate_name: &'a str,
+    compilation_target: &'a str,
+    crate_root: Option<&'a str>,
+}
+
+impl<'a> From<&'a Fragment> for AuditedFragmentIdentity<'a> {
+    fn from(fragment: &'a Fragment) -> Self {
+        Self {
+            package_name: &fragment.package_name,
+            crate_name: &fragment.crate_name,
+            compilation_target: &fragment.compilation_target,
+            crate_root: fragment.crate_root.as_deref(),
+        }
+    }
+}
+
+/// Identifies configured production targets and actual workspace-library targets.
 ///
-/// Binary-product workflows continue to audit every workspace library. When
-/// only libraries are selected, the package, target, and crate-root provenance
-/// distinguish their test harnesses from same-named integration-test binaries.
-#[must_use]
-pub fn is_audited_fragment(production_fragments: &[Fragment], fragment: &Fragment) -> bool {
-    if production_fragments.iter().any(|product| {
-        product.is_product_root && product.product_root_kind != Some(ProductionTargetKind::Library)
-    }) {
-        return true;
+/// Library-only products limit candidates to configured targets. Binary and
+/// mixed products retain configured executables and continue auditing all
+/// workspace libraries, while excluding same-named integration-test and example
+/// executables from the candidate set.
+pub struct AuditedFragments<'a> {
+    identities: FxHashSet<AuditedFragmentIdentity<'a>>,
+}
+
+impl<'a> AuditedFragments<'a> {
+    #[must_use]
+    pub fn new(production_fragments: &'a [Fragment], test_fragments: &'a [Fragment]) -> Self {
+        let has_library_product = production_fragments.iter().any(|fragment| {
+            fragment.is_product_root
+                && fragment.product_root_kind == Some(ProductionTargetKind::Library)
+        });
+        let has_other_product = production_fragments.iter().any(|fragment| {
+            fragment.is_product_root
+                && fragment.product_root_kind != Some(ProductionTargetKind::Library)
+        });
+        let library_products_only = has_library_product && !has_other_product;
+
+        let identities = production_fragments
+            .iter()
+            .chain(test_fragments)
+            .filter(|fragment| {
+                if library_products_only {
+                    fragment.is_product_root
+                        && fragment.product_root_kind == Some(ProductionTargetKind::Library)
+                } else {
+                    fragment.product_root_kind.is_some()
+                        || (!fragment.is_product_root && !fragment.test_surface)
+                }
+            })
+            .map(AuditedFragmentIdentity::from)
+            .collect();
+
+        Self { identities }
     }
 
-    let has_library_product = production_fragments.iter().any(|product| {
-        product.is_product_root && product.product_root_kind == Some(ProductionTargetKind::Library)
-    });
-    if !has_library_product {
-        return true;
+    #[must_use]
+    pub fn contains(&self, fragment: &Fragment) -> bool {
+        self.identities
+            .contains(&AuditedFragmentIdentity::from(fragment))
     }
-
-    production_fragments.iter().any(|product| {
-        product.is_product_root
-            && product.product_root_kind == Some(ProductionTargetKind::Library)
-            && product.package_name == fragment.package_name
-            && product.crate_name == fragment.crate_name
-            && product.compilation_target == fragment.compilation_target
-            && product.crate_root == fragment.crate_root
-    })
 }
 
 pub fn analyze<'a>(
@@ -385,6 +422,7 @@ pub fn analyze_with_options<'a>(
     excluded_crates: &std::collections::HashSet<String>,
     preserve_uniform_field_visibility: bool,
 ) -> Vec<Finding<'a>> {
+    let audited_fragments = AuditedFragments::new(production_fragments, test_fragments);
     let observed_definitions: Vec<&Definition> = production_fragments
         .iter()
         .chain(test_fragments)
@@ -607,7 +645,7 @@ pub fn analyze_with_options<'a>(
     for (fragment, definition) in production_fragments
         .iter()
         .chain(test_fragments)
-        .filter(|fragment| is_audited_fragment(production_fragments, fragment))
+        .filter(|fragment| audited_fragments.contains(fragment))
         .flat_map(|fragment| {
             fragment
                 .definitions
@@ -669,7 +707,7 @@ pub fn analyze_with_options<'a>(
     for (fragment, definition) in production_fragments
         .iter()
         .chain(test_fragments)
-        .filter(|fragment| is_audited_fragment(production_fragments, fragment))
+        .filter(|fragment| audited_fragments.contains(fragment))
         .flat_map(|fragment| {
             fragment
                 .definitions
@@ -1219,8 +1257,8 @@ fn reachable(
 #[cfg(test)]
 mod tests {
     use super::{
-        Definition, DefinitionId, DefinitionKind, Edge, EdgeKind, ExpansionSpan, Finding,
-        FindingKind, Fragment, RequiredScope, Span, VisibilityReduction, adjacency,
+        AuditedFragments, Definition, DefinitionId, DefinitionKind, Edge, EdgeKind, ExpansionSpan,
+        Finding, FindingKind, Fragment, RequiredScope, Span, VisibilityReduction, adjacency,
         analyze as analyze_with_tests, analyze_with_options, equivalent_definitions,
         extend_equivalence_edges, reachable, reexport_index,
     };
@@ -2642,6 +2680,67 @@ mod tests {
             )
             .is_empty()
         );
+    }
+
+    #[test]
+    fn binary_products_named_like_libraries_remain_audited_without_becoming_candidates() {
+        let mut production_input = fragments(vec![], vec![]);
+        let binary = &mut production_input[0];
+        binary.package_name = "lib".into();
+        binary.crate_name = "lib".into();
+        binary.crate_root = Some("lib/src/main.rs".into());
+        binary.definitions[0].crate_name = "lib".into();
+        binary
+            .definitions
+            .push(node("binary_product_helper", "lib", true));
+        binary.edges.push(Edge {
+            from: test_id("main"),
+            to: test_id("binary_product_helper"),
+            kind: EdgeKind::Body,
+        });
+        production_input[1]
+            .definitions
+            .push(node("library_helper", "lib", true));
+
+        let audited_fragments = AuditedFragments::new(&production_input, &[]);
+        assert!(audited_fragments.contains(&production_input[0]));
+        assert!(audited_fragments.contains(&production_input[1]));
+
+        let findings =
+            analyze_with_tests(&production_input, &[], &candidate_crates(), &HashSet::new());
+
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, FindingKind::DeadPublic);
+        assert_eq!(findings[0].definition.id, test_id("library_helper"));
+    }
+
+    #[test]
+    fn mixed_products_exclude_same_named_integration_test_declarations() {
+        let mut production_input = fragments(vec![], vec![]);
+        production_input[1].is_product_root = true;
+        production_input[1].product_root_kind = Some(ProductionTargetKind::Library);
+
+        let mut test_input = test_fragments(vec![node("library_test_helper", "lib", true)], vec![]);
+        let integration_test = &mut test_input[0];
+        integration_test.package_name = "lib".into();
+        integration_test.crate_name = "lib".into();
+        integration_test.crate_root = Some("lib/tests/lib.rs".into());
+        integration_test.definitions[0].crate_name = "lib".into();
+        integration_test
+            .definitions
+            .push(node("integration_test_helper", "lib", true));
+
+        let findings = analyze_with_tests(
+            &production_input,
+            &test_input,
+            &candidate_crates(),
+            &HashSet::new(),
+        );
+
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, FindingKind::DeadPublic);
+        assert_eq!(findings[0].definition.id, test_id("library_test_helper"));
+        assert!(findings[0].test_compiled_only);
     }
 
     #[test]

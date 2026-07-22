@@ -10,7 +10,7 @@ use cargo_platform::{Cfg, Platform};
 use serde::Deserialize;
 
 use cargo_hawk_internal::graph::{
-    Definition, DefinitionKind, Finding, FindingKind, Fragment, is_audited_fragment,
+    AuditedFragments, Definition, DefinitionKind, Finding, FindingKind, Fragment,
 };
 
 #[derive(Debug)]
@@ -604,13 +604,14 @@ impl Config {
         candidate_crates: &HashSet<String>,
         findings: Vec<Finding<'findings>>,
     ) -> AppliedFindings<'findings, 'config> {
+        let audited_fragments = AuditedFragments::new(production_fragments, test_fragments);
         let known_items: HashSet<KnownItemIdentity<'_>> = production_fragments
             .iter()
             .chain(test_fragments)
             .filter(|fragment| fragment.compilation_target == target.name)
             .filter(|fragment| {
                 !candidate_crates.contains(&fragment.crate_name)
-                    || is_audited_fragment(production_fragments, fragment)
+                    || audited_fragments.contains(fragment)
             })
             .flat_map(|fragment| &fragment.definitions)
             .map(known_item_identity)
@@ -621,7 +622,7 @@ impl Config {
             .filter(|fragment| fragment.compilation_target == target.name)
             .filter(|fragment| {
                 !candidate_crates.contains(&fragment.crate_name)
-                    || is_audited_fragment(production_fragments, fragment)
+                    || audited_fragments.contains(fragment)
             })
             .flat_map(|fragment| {
                 fragment.definitions.iter().map(|definition| {

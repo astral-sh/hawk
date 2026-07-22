@@ -932,9 +932,32 @@ fn library_production_targets_are_described_in_json_reports() {
     assert_eq!(report["summary"]["diagnostic_count"], 2);
 }
 
-#[test]
-fn library_production_targets_ignore_same_named_integration_tests() {
+fn add_binary_production_product(context: &HawkTestContext) {
+    let consumer_manifest_path = context.workspace().join("consumer/Cargo.toml");
+    let mut consumer_manifest =
+        fs::read_to_string(&consumer_manifest_path).expect("read consumer manifest");
+    consumer_manifest.push_str("\n[[bin]]\nname = \"runner\"\npath = \"src/main.rs\"\n");
+    fs::write(consumer_manifest_path, consumer_manifest).expect("add configured binary target");
+    fs::write(
+        context.workspace().join("consumer/src/main.rs"),
+        "fn main() { internal_api::used_across_workspace(); }\n",
+    )
+    .expect("write configured binary target");
+
+    let configuration_path = context.workspace().join("hawk.toml");
+    let mut configuration =
+        fs::read_to_string(&configuration_path).expect("read production configuration");
+    configuration.push_str(
+        "\n[[production]]\npackage = \"consumer\"\nbin = \"runner\"\nreason = \"mixed binary and library product\"\n",
+    );
+    fs::write(configuration_path, configuration).expect("add binary production product");
+}
+
+fn assert_library_audit_ignores_same_named_integration_test(include_binary_product: bool) {
     let context = HawkTestContext::new("library_products");
+    if include_binary_product {
+        add_binary_production_product(&context);
+    }
     let library_path = context.workspace().join("api/src/lib.rs");
     let mut library = fs::read_to_string(&library_path).expect("read library source");
     library.push_str(
@@ -988,8 +1011,22 @@ fn library_production_targets_ignore_same_named_integration_tests() {
 }
 
 #[test]
-fn library_production_targets_ignore_same_named_integration_test_overrides() {
+fn library_production_targets_ignore_same_named_integration_tests() {
+    assert_library_audit_ignores_same_named_integration_test(false);
+}
+
+#[test]
+fn mixed_production_targets_ignore_same_named_integration_tests() {
+    assert_library_audit_ignores_same_named_integration_test(true);
+}
+
+fn assert_library_audit_ignores_same_named_integration_test_overrides(
+    include_binary_product: bool,
+) {
     let context = HawkTestContext::new("library_products");
+    if include_binary_product {
+        add_binary_production_product(&context);
+    }
     let integration_path = context.workspace().join("api/tests/internal_api.rs");
     fs::create_dir_all(
         integration_path
@@ -1031,6 +1068,16 @@ fn library_production_targets_ignore_same_named_integration_test_overrides() {
             .any(|diagnostic| diagnostic["code"] == "hawk::unfulfilled_expectation"),
         "an integration-test override became an unfulfilled library expectation: {report}"
     );
+}
+
+#[test]
+fn library_production_targets_ignore_same_named_integration_test_overrides() {
+    assert_library_audit_ignores_same_named_integration_test_overrides(false);
+}
+
+#[test]
+fn mixed_production_targets_ignore_same_named_integration_test_overrides() {
+    assert_library_audit_ignores_same_named_integration_test_overrides(true);
 }
 
 #[test]
