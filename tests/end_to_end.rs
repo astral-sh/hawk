@@ -838,6 +838,38 @@ fn rejects_duplicate_workspace_library_crate_names() {
 }
 
 #[test]
+fn rejects_unknown_excluded_crates_before_compilation() {
+    let context = HawkTestContext::new("basic");
+
+    let output = context.run(&[
+        "--exclude-crate",
+        "library",
+        "--exclude-crate",
+        "libary",
+        "--exclude-crate",
+        "unit_suport",
+    ]);
+
+    assert!(!output.status.success());
+
+    let stderr = context.normalized_stderr(&output);
+
+    assert!(stderr.contains("unknown --exclude-crate value(s): `libary`, `unit_suport`"));
+
+    assert!(stderr.contains(
+        "valid workspace library crate names: `library`, `test_support`, `unit_support`"
+    ));
+
+    assert!(
+        fs::read_dir(context.target_dir())
+            .expect("read target directory")
+            .next()
+            .is_none(),
+        "unknown excluded crate started compilation:\n{stderr}"
+    );
+}
+
+#[test]
 fn feature_profiles_union_reachability_across_configurations() {
     let context = HawkTestContext::new("feature_profiles");
     let graph_dir = tempfile::tempdir().expect("temporary graph directory");

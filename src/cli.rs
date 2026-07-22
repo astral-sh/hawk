@@ -333,6 +333,7 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
         .exec()
         .with_context(|| format!("read Cargo metadata from {}", args.manifest_path.display()))?;
     let candidate_crates = workspace_library_crates(&metadata)?;
+    validate_excluded_crates(&args.excluded_crates, &candidate_crates)?;
 
     let workspace_root = metadata.workspace_root.clone().into_std_path_buf();
     let manifest_path = args
@@ -1602,6 +1603,46 @@ fn workspace_library_crates(metadata: &cargo_metadata::Metadata) -> Result<HashS
     Ok(packages_by_crate.into_keys().collect())
 }
 
+fn validate_excluded_crates(
+    excluded_crates: &[String],
+    candidate_crates: &HashSet<String>,
+) -> Result<()> {
+    let unknown_crates = excluded_crates
+        .iter()
+        .filter(|crate_name| !candidate_crates.contains(*crate_name))
+        .collect::<BTreeSet<_>>();
+
+    if unknown_crates.is_empty() {
+        return Ok(());
+    }
+
+    let unknown_crates = unknown_crates
+        .iter()
+        .map(|crate_name| format!("`{crate_name}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let valid_crates = candidate_crates.iter().collect::<BTreeSet<_>>();
+
+    if valid_crates.is_empty() {
+        bail!(
+            "unknown --exclude-crate value(s): {unknown_crates}; this workspace has no library crates"
+        );
+    }
+
+    let valid_crates = valid_crates
+        .iter()
+        .map(|crate_name| format!("`{crate_name}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    bail!(
+        "unknown --exclude-crate value(s): {}; valid workspace library crate names: {}",
+        unknown_crates,
+        valid_crates,
+    );
+}
+
 fn validate_product(
     metadata: &cargo_metadata::Metadata,
     package: &str,
@@ -1720,7 +1761,7 @@ mod tests {
     use super::{
         Args, CargoInvocation, DEFAULT_TARGET_DIR_COMPONENT_MAX_BYTES, DiagnosticRenderer,
         LintLevel, LintLevels, ProductionSelection, default_target_dir, definition_packages,
-        fix_plan_signature, json_definition_kind, json_finding_kind,
+        fix_plan_signature, json_definition_kind, json_finding_kind, validate_excluded_crates,
     };
 
     fn render_diagnostic(finding: &Finding<'_>) -> String {
@@ -1776,6 +1817,17 @@ mod tests {
         assert_ne!(
             target_dir,
             default_target_dir(Path::new("/another/path/to/example-workspace"))
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_excluded_crates_without_workspace_libraries() {
+        let error = validate_excluded_crates(&["foo".to_owned()], &HashSet::new())
+            .expect_err("unknown excluded crate is rejected");
+
+        assert_eq!(
+            error.to_string(),
+            "unknown --exclude-crate value(s): `foo`; this workspace has no library crates"
         );
     }
 
