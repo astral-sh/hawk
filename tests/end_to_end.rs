@@ -1207,6 +1207,48 @@ fn library_production_targets_classify_library_format_examples_as_non_production
 }
 
 #[test]
+fn library_production_targets_do_not_root_examples_sharing_workspace_library_sources() {
+    let context = HawkTestContext::new("library_products");
+    let library_path = context.workspace().join("api/src/lib.rs");
+    let library = fs::read_to_string(&library_path).expect("read library source");
+    fs::write(
+        &library_path,
+        format!("#![deny(dead_code)]\n\n{library}\npub fn shared_source_dead_api() {{}}\n"),
+    )
+    .expect("add dead-code-denying shared library source");
+
+    let manifest_path = context.workspace().join("consumer/Cargo.toml");
+    let mut manifest = fs::read_to_string(&manifest_path).expect("read consumer manifest");
+    manifest.push_str(
+        "\n[[example]]\nname = \"mirrored_api\"\npath = \"../api/src/../src/lib.rs\"\ncrate-type = [\"rlib\"]\n",
+    );
+    fs::write(manifest_path, manifest).expect("add cross-package shared-source example");
+
+    let output = context.run(&["--output-format=json"]);
+
+    context.assert_success(&output);
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout contains one JSON report");
+    let diagnostic = report["diagnostics"]
+        .as_array()
+        .expect("diagnostics is an array")
+        .iter()
+        .find(|diagnostic| diagnostic["identity"]["item"] == "shared_source_dead_api")
+        .expect("shared-source dead public export diagnostic");
+    assert_eq!(diagnostic["code"], "hawk::dead_public");
+    assert_eq!(diagnostic["test_only"], false);
+
+    let output = context.run(&["--fix", "--allow-no-vcs"]);
+
+    context.assert_success(&output);
+    let fixed_library = fs::read_to_string(library_path).expect("read fixed library source");
+    assert!(
+        fixed_library.contains("pub fn shared_source_dead_api()"),
+        "a shared-source example made --fix narrow a dead library export: {fixed_library}"
+    );
+}
+
+#[test]
 fn library_production_targets_classify_doctest_callers_as_non_production() {
     let context = HawkTestContext::new("library_products");
     let library_path = context.workspace().join("api/src/lib.rs");

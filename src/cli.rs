@@ -507,6 +507,11 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
 
     let driver = driver_executable()?;
     validate_driver_protocol(&driver, &toolchain)?;
+    let workspace_library_sources = workspace_library_sources(&metadata);
+    let workspace_library_source_paths = workspace_library_sources
+        .values()
+        .map(|source| source.path.clone())
+        .collect();
     let cargo = InstrumentedCargo {
         args: &args,
         workspace_root: &workspace_root,
@@ -521,7 +526,8 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
             CollectionOptions::new(config.preserve_uniform_field_visibility())
         },
         doctest_packages: doctest_packages.as_deref(),
-        workspace_library_sources: workspace_library_sources(&metadata),
+        workspace_library_sources,
+        workspace_library_source_paths,
     };
     let mut production_fragments = Vec::new();
     let mut test_fragments = Vec::new();
@@ -980,6 +986,7 @@ struct InstrumentedCargo<'a> {
     collection_options: CollectionOptions,
     doctest_packages: Option<&'a [String]>,
     workspace_library_sources: HashMap<String, WorkspaceLibrarySource>,
+    workspace_library_source_paths: HashSet<PathBuf>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1410,6 +1417,7 @@ impl InstrumentedCargo<'_> {
             classify_non_production_target(
                 fragment,
                 &self.workspace_library_sources,
+                &self.workspace_library_source_paths,
                 self.workspace_root,
             );
         }
@@ -1456,6 +1464,7 @@ impl InstrumentedCargo<'_> {
 fn classify_non_production_target(
     fragment: &mut Fragment,
     workspace_library_sources: &HashMap<String, WorkspaceLibrarySource>,
+    workspace_library_source_paths: &HashSet<PathBuf>,
     workspace_root: &Path,
 ) {
     if fragment.is_product_root || fragment.test_surface {
@@ -1471,8 +1480,8 @@ fn classify_non_production_target(
         workspace_root.join(crate_root)
     };
     let crate_root = normalize_workspace_source_path(&crate_root);
-    if workspace_library_sources
-        .get(&fragment.package_name)
+    let library_source = workspace_library_sources.get(&fragment.package_name);
+    if library_source
         .is_some_and(|source| source.crate_name == fragment.crate_name && source.path == crate_root)
     {
         return;
@@ -1482,15 +1491,20 @@ fn classify_non_production_target(
     // invocations, but they are not the owning package's production library.
     fragment.is_product_root = true;
     fragment.non_production_consumer = true;
-    fragment.roots.extend(
-        fragment
-            .definitions
-            .iter()
-            .filter(|definition| definition.public_api)
-            .map(|definition| definition.id),
-    );
-    fragment.roots.sort();
-    fragment.roots.dedup();
+    if !workspace_library_source_paths.contains(&crate_root) {
+        // An example can intentionally share its source file with the package
+        // library. Rooting its exports would also root their equivalent library
+        // declarations, making genuinely dead APIs appear test-live.
+        fragment.roots.extend(
+            fragment
+                .definitions
+                .iter()
+                .filter(|definition| definition.public_api)
+                .map(|definition| definition.id),
+        );
+        fragment.roots.sort();
+        fragment.roots.dedup();
+    }
 }
 
 fn normalize_workspace_source_path(path: &Path) -> PathBuf {
@@ -2359,13 +2373,23 @@ mod tests {
 
     #[test]
     fn non_production_library_targets_are_classified_by_their_source_paths() {
-        let sources = HashMap::from([(
-            "consumer".to_owned(),
-            WorkspaceLibrarySource {
-                crate_name: "consumer".to_owned(),
-                path: PathBuf::from("/workspace/consumer/src/lib.rs"),
-            },
-        )]);
+        let sources = HashMap::from([
+            (
+                "consumer".to_owned(),
+                WorkspaceLibrarySource {
+                    crate_name: "consumer".to_owned(),
+                    path: PathBuf::from("/workspace/consumer/src/lib.rs"),
+                },
+            ),
+            (
+                "api".to_owned(),
+                WorkspaceLibrarySource {
+                    crate_name: "api".to_owned(),
+                    path: PathBuf::from("/workspace/api/src/lib.rs"),
+                },
+            ),
+        ]);
+        let library_paths = sources.values().map(|source| source.path.clone()).collect();
         let definition = Definition {
             id: test_id("non-production-entry"),
             crate_name: "consumer".into(),
@@ -2401,28 +2425,61 @@ mod tests {
         };
 
         let mut library = fragment("consumer/src/lib.rs");
-        classify_non_production_target(&mut library, &sources, Path::new("/workspace"));
+        classify_non_production_target(
+            &mut library,
+            &sources,
+            &library_paths,
+            Path::new("/workspace"),
+        );
         assert!(!library.is_product_root);
         assert!(!library.non_production_consumer);
         assert!(library.roots.is_empty());
 
         let mut normalized_library = fragment("consumer/src/../src/./lib.rs");
-        classify_non_production_target(&mut normalized_library, &sources, Path::new("/workspace"));
+        classify_non_production_target(
+            &mut normalized_library,
+            &sources,
+            &library_paths,
+            Path::new("/workspace"),
+        );
         assert!(!normalized_library.is_product_root);
         assert!(!normalized_library.non_production_consumer);
 
         let mut same_source_example = fragment("consumer/src/lib.rs");
         same_source_example.crate_name = "example_library".into();
-        classify_non_production_target(&mut same_source_example, &sources, Path::new("/workspace"));
+        classify_non_production_target(
+            &mut same_source_example,
+            &sources,
+            &library_paths,
+            Path::new("/workspace"),
+        );
         assert!(same_source_example.is_product_root);
         assert!(same_source_example.non_production_consumer);
+        assert!(same_source_example.roots.is_empty());
+
+        let mut other_library_example = fragment("api/src/lib.rs");
+        other_library_example.crate_name = "api_example".into();
+        classify_non_production_target(
+            &mut other_library_example,
+            &sources,
+            &library_paths,
+            Path::new("/workspace"),
+        );
+        assert!(other_library_example.is_product_root);
+        assert!(other_library_example.non_production_consumer);
+        assert!(other_library_example.roots.is_empty());
 
         for crate_root in [
             "consumer/examples/library.rs",
             "/tmp/rustdoctest/doctest_bundle_2024.rs",
         ] {
             let mut non_production = fragment(crate_root);
-            classify_non_production_target(&mut non_production, &sources, Path::new("/workspace"));
+            classify_non_production_target(
+                &mut non_production,
+                &sources,
+                &library_paths,
+                Path::new("/workspace"),
+            );
             assert!(non_production.is_product_root);
             assert!(non_production.non_production_consumer);
             assert_eq!(non_production.roots, vec![test_id("non-production-entry")]);
