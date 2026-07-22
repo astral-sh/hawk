@@ -235,6 +235,18 @@ merges identities by physical source span and item kind, including a path
 module compiled into different crates; declarations without source spans use
 their diagnostic paths instead.
 
+That merge requires one spelling per source file. Cargo compiles the same file
+under different working directories and rustc reports the path relative to
+whichever was used, so the driver resolves each name against its own session's
+working directory and then expresses it relative to the workspace root the
+frontend supplies. Separators are normalized so one file cannot become two
+identities.
+
+The guarantee covers workspace sources. Files outside the workspace, including
+the bundles rustdoc generates in a temporary directory for doctests, keep an
+absolute path: they are consistent within one analysis, and giving them a
+reusable relative name could merge unrelated generated snippets.
+
 The analysis then computes two reachability closures:
 
 - **production live** begins at configured binary entry points and actual

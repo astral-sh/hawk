@@ -3,14 +3,19 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// Version of the protocol shared by the Hawk frontend and compiler driver.
 ///
-/// Increment this whenever the graph schema, fix-plan schema, or driver contract changes.
-pub const VERSION: u32 = 8;
+/// Increment this whenever the serialized graph or fix-plan schema changes, the
+/// required frontend-driver environment contract changes, or the meaning of a
+/// serialized value changes. Workspace source paths became canonical
+/// workspace-relative identities in 9, which also made the workspace root a
+/// required environment value; sources outside the workspace stay absolute.
+pub const VERSION: u32 = 9;
 
 pub const VERSION_ARGUMENT: &str = "--hawk-protocol-version";
 
 pub const VERSION_ENV: &str = "HAWK_PROTOCOL_VERSION";
 pub const OUTPUT_DIR_ENV: &str = "HAWK_OUTPUT_DIR";
 pub const ROOT_CRATE_ENV: &str = "HAWK_ROOT_CRATE";
+pub const WORKSPACE_ROOT_ENV: &str = "HAWK_WORKSPACE_ROOT";
 pub const CONSUMER_MODE_ENV: &str = "HAWK_CONSUMER_MODE";
 pub const COLLECTION_OPTIONS_ENV: &str = "HAWK_COLLECTION_OPTIONS";
 pub const RUN_ID_ENV: &str = "HAWK_RUN_ID";
@@ -22,6 +27,7 @@ pub const ENVIRONMENT_VARIABLES: &[&str] = &[
     VERSION_ENV,
     OUTPUT_DIR_ENV,
     ROOT_CRATE_ENV,
+    WORKSPACE_ROOT_ENV,
     CONSUMER_MODE_ENV,
     COLLECTION_OPTIONS_ENV,
     RUN_ID_ENV,
@@ -123,7 +129,7 @@ mod tests {
 
         assert_eq!(
             error.to_string(),
-            "unsupported Hawk protocol version 1; expected 8"
+            "unsupported Hawk protocol version 1; expected 9"
         );
     }
 }

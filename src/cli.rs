@@ -1330,6 +1330,7 @@ impl InstrumentedCargo<'_> {
             .env(protocol::VERSION_ENV, protocol::VERSION.to_string())
             .env(protocol::OUTPUT_DIR_ENV, graph_dir)
             .env(protocol::ROOT_CRATE_ENV, root_crate)
+            .env(protocol::WORKSPACE_ROOT_ENV, self.workspace_root)
             .env(protocol::CONSUMER_MODE_ENV, consumer_mode.as_str())
             .env(protocol::RUN_ID_ENV, run_id)
             .env(

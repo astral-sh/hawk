@@ -1,6 +1,9 @@
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
+
+use cargo_hawk_internal::graph::Fragment;
 
 #[cfg(unix)]
 use std::os::unix::fs::{PermissionsExt, symlink};
@@ -278,6 +281,11 @@ fn rejects_incomplete_driver_protocol_environment() {
             Some("production"),
             Some(""),
             "HAWK_RUN_ID must not be empty",
+        ),
+        (
+            Some("production"),
+            Some("run"),
+            "Hawk frontend did not provide HAWK_WORKSPACE_ROOT",
         ),
     ] {
         let mut command = Command::new(env!("CARGO_BIN_EXE_cargo-hawk-driver"));
@@ -2099,6 +2107,17 @@ fn feature_profiles_union_reachability_across_configurations() {
         .expect("run cargo-hawk");
 
     context.assert_success(&output);
+    let run_dir = fs::read_dir(graph_dir.path())
+        .expect("read graph directory")
+        .map(|entry| entry.expect("read graph entry"))
+        .find(|entry| entry.file_type().expect("read graph entry type").is_dir())
+        .expect("retained graph run directory")
+        .path();
+
+    // Check the serialized source identities first: corrupt identities produce
+    // arbitrary reachability, so this reports the cause rather than a symptom.
+    assert_workspace_source_paths_are_stable(&run_dir);
+
     let stdout = context.normalized_stdout(&output);
     assert!(
         !stdout.contains("`fallback_api` is public"),
@@ -2107,12 +2126,6 @@ fn feature_profiles_union_reachability_across_configurations() {
     assert!(stdout.contains("`unused_api` is public"));
     assert!(stdout.contains("`app --bin app` across 2 feature profiles"));
 
-    let run_dir = fs::read_dir(graph_dir.path())
-        .expect("read graph directory")
-        .map(|entry| entry.expect("read graph entry"))
-        .find(|entry| entry.file_type().expect("read graph entry type").is_dir())
-        .expect("retained graph run directory")
-        .path();
     for profile in ["0-all", "1-fallback"] {
         let production_dir = run_dir
             .join("feature-profiles")
@@ -2129,6 +2142,96 @@ fn feature_profiles_union_reachability_across_configurations() {
             production_dir.display()
         );
     }
+}
+
+/// Hawk merges definitions from separate compilations by source span, so one
+/// workspace file must have exactly one spelling within a run. Cargo compiles
+/// the same file from the workspace root in one target and from the package
+/// root in another, so a span that kept the compiler's own wording would split
+/// a declaration into two identities and silently corrupt reachability.
+///
+/// Only workspace-backed sources are covered. Generated rustdoc bundles live
+/// in a temporary directory outside the workspace and keep absolute paths;
+/// inventing a shared identity for those could merge unrelated snippets.
+fn assert_workspace_source_paths_are_stable(run_dir: &Path) {
+    let expected_roots = [
+        ("app", "app/src/main.rs"),
+        ("library", "library/src/lib.rs"),
+    ];
+    let mut observed = BTreeSet::new();
+    let mut checked_spans = 0;
+
+    let mut stack = vec![run_dir.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in fs::read_dir(&dir).expect("read graph directory") {
+            let path = entry.expect("read graph entry").path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if path.extension().is_none_or(|extension| extension != "json") {
+                continue;
+            }
+            let fragment: Fragment =
+                serde_json::from_str(&fs::read_to_string(&path).expect("read fragment"))
+                    .expect("parse fragment");
+            let Some((crate_name, expected_root)) = expected_roots
+                .iter()
+                .find(|(name, _)| *name == fragment.crate_name)
+            else {
+                continue;
+            };
+            observed.insert(*crate_name);
+
+            assert_eq!(
+                fragment.crate_root.as_deref(),
+                Some(*expected_root),
+                "crate `{}` in {} reported an unexpected source root",
+                fragment.crate_name,
+                path.display()
+            );
+            for definition in &fragment.definitions {
+                let Some(span) = definition.span.as_ref() else {
+                    continue;
+                };
+                checked_spans += 1;
+                assert!(
+                    !span.file.contains('\\'),
+                    "span path `{}` in {} keeps a native separator",
+                    span.file,
+                    path.display()
+                );
+                assert!(
+                    Path::new(&span.file).is_relative(),
+                    "workspace span path `{}` in {} is not workspace relative",
+                    span.file,
+                    path.display()
+                );
+                // The JSON declaration span is a second path-producing surface
+                // for the same file. It has to resolve to the same identity as
+                // the ordinary span, or JSON `location.file` and stable ids
+                // would diverge from the reachability the ordinary span drives.
+                if let Some(declaration_span) = definition.declaration_span.as_ref() {
+                    assert_eq!(
+                        declaration_span.file,
+                        span.file,
+                        "declaration span path `{}` disagrees with span path `{}` in {}",
+                        declaration_span.file,
+                        span.file,
+                        path.display()
+                    );
+                }
+            }
+        }
+    }
+
+    // Guard against the checks silently covering nothing.
+    assert_eq!(
+        observed,
+        expected_roots.iter().map(|(name, _)| *name).collect(),
+        "not every workspace crate appeared in the retained fragments"
+    );
+    assert!(checked_spans > 0, "no workspace spans were checked");
 }
 
 #[test]
