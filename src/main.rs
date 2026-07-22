@@ -1,4 +1,5 @@
 use cargo_hawk_internal::protocol;
+use std::io::Write as _;
 
 mod cli;
 mod config;
@@ -21,13 +22,18 @@ fn main() -> std::process::ExitCode {
         Err(error)
             if error
                 .downcast_ref::<std::io::Error>()
-                .is_some_and(|error| error.kind() == std::io::ErrorKind::BrokenPipe) =>
+                .is_some_and(|error| error.kind() == std::io::ErrorKind::BrokenPipe)
+                || error
+                    .downcast_ref::<serde_json::Error>()
+                    .is_some_and(|error| {
+                        error.io_error_kind() == Some(std::io::ErrorKind::BrokenPipe)
+                    }) =>
         {
             std::process::ExitCode::SUCCESS
         }
         Err(error) => {
             if let Err(output_error) = cli::write_error(&args, &error) {
-                eprintln!("hawk: {error:#}: {output_error:#}");
+                let _ = writeln!(std::io::stderr(), "hawk: {error:#}: {output_error:#}");
             }
             std::process::ExitCode::FAILURE
         }

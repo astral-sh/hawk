@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::{Display, Formatter, Write as _};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -122,13 +122,26 @@ where
     pub(crate) fn write_summary(
         &mut self,
         diagnostic_count: usize,
+        diagnostic_counts: &BTreeMap<&str, BTreeMap<&str, usize>>,
         production_summary: &str,
         compilation_target: &str,
     ) -> std::fmt::Result {
         writeln!(
             self.output,
             "hawk: {diagnostic_count} finding(s) for {production_summary} and workspace non-production targets on {compilation_target}"
-        )
+        )?;
+        for (lint, crates) in diagnostic_counts {
+            let lint_count: usize = crates.values().sum();
+            write!(self.output, "  {lint}: {lint_count} (")?;
+            for (index, (crate_name, count)) in crates.iter().enumerate() {
+                if index > 0 {
+                    write!(self.output, ", ")?;
+                }
+                write!(self.output, "{crate_name}: {count}")?;
+            }
+            writeln!(self.output, ")")?;
+        }
+        Ok(())
     }
 
     pub(crate) fn source_line(&mut self, span: &Span) -> Option<&str> {

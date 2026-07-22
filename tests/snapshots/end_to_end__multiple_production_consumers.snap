@@ -10,3 +10,4 @@ warning[hawk::dead_public]: `unused` is public but is not reachable from the con
   = help: consider restricting this declaration's visibility or removing it
 
 hawk: 1 finding(s) for 2 configured production binaries and workspace non-production targets on the host target
+  hawk::dead_public: 1 (library: 1)

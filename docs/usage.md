@@ -99,6 +99,44 @@ compiler fragments for investigation. Diagnostics are colored automatically
 in a terminal; use `--color=always` or `--color=never` to override terminal
 detection.
 
+Use `--output-format=json` for a machine-readable diagnostic report. For a
+completed analysis, Cargo progress and compiler output remain on stderr, so
+stdout contains exactly one JSON object. Operational failures are reported on
+stderr and do not produce a JSON report:
+
+```sh
+./target/debug/cargo-hawk check \
+  --manifest-path /path/to/workspace/Cargo.toml \
+  --output-format=json > hawk-report.json
+```
+
+The JSON report is versioned with `schema_version` (currently `3`); breaking
+schema changes increment this version. Its `summary` describes the compilation
+target, configured production binaries, feature profiles, non-production
+coverage, and emitted diagnostic count.
+Every entry in `diagnostics` includes its category, lint code, and severity.
+Finding entries additionally include their finding kind, semantic identity
+(`package`, `crate`, `item`, definition `kind`, parent, and module scope),
+target-independent source-qualified identity (`identity.id`), compiler identity
+(`identity.compiler_id`), available source and expansion locations,
+and the `test_only` and `test_compiled_only` flags. Source locations include
+`line`, `column`, `end_line`, `end_column`, `byte_start`, and `byte_end` when a
+complete declaration range is available. Lines and columns are one-based,
+columns count Unicode scalar values, and byte offsets are zero-based UTF-8
+offsets into the original source file. `end_line`/`end_column` and `byte_end`
+are exclusive; ranges include source-spanned attributes, documentation, and
+trailing field, variant, or re-export separators.
+The stable identity uses versioned, length-prefixed package, crate, item,
+definition kind, and source-location components, so cfg and path alternatives
+remain distinct while the same declaration can be correlated across targets;
+the compiler identity can change with the target or feature set.
+When rustc cannot retain a complete range for a parsed attribute, such as
+`#[cold]` or `#[unsafe(link_section = "...")]`, the location intentionally
+falls back to `file`, `line`, and `column`; ending locations and byte offsets
+are omitted.
+Configuration diagnostics include the referenced
+lint and item, configuration location, and reason.
+
 `--fix` supports the default profile or one explicitly configured feature
 profile. Hawk rejects fixing runs with a multi-profile matrix; run analysis
 without `--fix` to review the combined findings.
@@ -131,6 +169,21 @@ The supported selectors are `warnings`, `hawk::dead_public`,
 `hawk::ambiguous_item`, and `hawk::unfulfilled_expectation`. Denied diagnostics
 are emitted as errors and cause a non-zero exit status. Invalid configuration
 and failed instrumented Cargo builds fail independently of lint levels.
+
+To focus on deletion candidates in either text or JSON output, pass
+`--only dead-public`. This suppresses visibility-reduction findings while
+preserving configuration diagnostics such as unknown items and unfulfilled
+expectations:
+
+```sh
+./target/debug/cargo-hawk check \
+  --manifest-path /path/to/workspace/Cargo.toml \
+  --only dead-public
+```
+
+In text output, the final summary groups emitted findings by lint and Cargo
+package. Hawk reports configuration diagnostics separately under
+`configuration`.
 
 `hawk::unnecessary_crate_visibility` is allow-by-default because preferring
 `pub(super)` over `pub(crate)` is a style choice. Enable it explicitly with
@@ -169,7 +222,9 @@ edits. Dead declarations and enum variants remain report-only.
 
 Pass `--target TRIPLE` to analyze another compilation target. Hawk forwards
 the target to Cargo but does not install a target SDK or configure a cross
-linker.
+linker. When `--target` is omitted, Hawk explicitly analyzes the host target;
+this overrides Cargo's `build.target` configuration and `CARGO_BUILD_TARGET`
+so compilation, target-scoped configuration, and reported coverage agree.
 
 For example, a macOS host can analyze Windows MSVC production targets using
 [`cargo-xwin`](https://github.com/rust-cross/cargo-xwin). From the Hawk

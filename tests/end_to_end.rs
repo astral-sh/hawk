@@ -253,17 +253,23 @@ fn rejects_incomplete_driver_protocol_environment() {
 #[test]
 fn exits_successfully_when_diagnostic_output_is_closed() {
     let context = HawkTestContext::new("basic");
-    let mut child = context
-        .command()
-        .arg("-A")
-        .arg("warnings")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn cargo-hawk");
-    drop(child.stdout.take());
+    for output_format in ["text", "json"] {
+        let mut child = context
+            .command()
+            .arg(format!("--output-format={output_format}"))
+            .arg("-A")
+            .arg("warnings")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn cargo-hawk");
+        drop(child.stdout.take());
 
-    assert!(child.wait().expect("wait for cargo-hawk").success());
+        let output = child.wait_with_output().expect("wait for cargo-hawk");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{output_format}: {stderr}");
+        assert!(!stderr.contains("Broken pipe"), "{output_format}: {stderr}");
+    }
 }
 
 #[test]
@@ -459,7 +465,7 @@ fn diagnoses_public_surface_of_a_binary_product() {
     assert!(unrelated_json.exists());
     let stdout = context.normalized_stdout(&output);
     let summary = format!(
-        "hawk: 42 finding(s) for `app --bin app --all-features` and workspace non-production targets on target `{host_target}`\n"
+        "hawk: 42 finding(s) for `app --bin app --all-features` and workspace non-production targets on target `{host_target}`\n  hawk::dead_public: 15 (library: 14, test_support: 1)\n  hawk::unfulfilled_expectation: 1 (configuration: 1)\n  hawk::unknown_item: 1 (configuration: 1)\n  hawk::unnecessary_public: 25 (library: 22, test_support: 1, unit_support: 2)\n"
     );
     let diagnostics = stdout
         .strip_suffix(&summary)
@@ -947,6 +953,819 @@ fn later_warnings_group_reenables_default_warnings() {
 }
 
 #[test]
+fn emits_versioned_json_diagnostics_and_keeps_cargo_output_on_stderr() {
+    let context = HawkTestContext::new("basic");
+    let output = context.run(&[
+        "--output-format=json",
+        "-D",
+        "warnings",
+        "-W",
+        "hawk::unnecessary_public",
+        "-A",
+        "hawk::unknown_item",
+    ]);
+
+    assert!(
+        !output.status.success(),
+        "denied JSON diagnostics did not fail"
+    );
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout contains one JSON report");
+    assert_eq!(report["schema_version"], 3);
+    assert_eq!(report["summary"]["diagnostic_count"], 41);
+    assert_eq!(
+        report["summary"]["production"],
+        serde_json::json!([{"package": "app", "binary": "app"}])
+    );
+    assert_eq!(
+        report["summary"]["feature_profiles"],
+        serde_json::json!(["all-features"])
+    );
+    assert_eq!(report["summary"]["includes_non_production_targets"], true);
+    assert!(
+        report["summary"]["target"]
+            .as_str()
+            .is_some_and(|target| !target.is_empty())
+    );
+
+    let diagnostics = report["diagnostics"]
+        .as_array()
+        .expect("diagnostics is an array");
+    assert_eq!(diagnostics.len(), 41);
+
+    let dead_entry = diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic["identity"]["item"] == "dead_entry")
+        .expect("dead_entry diagnostic");
+    assert_eq!(dead_entry["category"], "finding");
+    assert_eq!(dead_entry["code"], "hawk::dead_public");
+    assert_eq!(dead_entry["severity"], "error");
+    assert_eq!(dead_entry["kind"], "dead_public");
+    assert_eq!(dead_entry["identity"]["package"], "library");
+    assert_eq!(dead_entry["identity"]["crate"], "library");
+    assert_eq!(dead_entry["identity"]["kind"], "function");
+    assert_eq!(dead_entry["identity"]["parent"], serde_json::Value::Null);
+    assert_eq!(
+        dead_entry["identity"]["module_scope"],
+        serde_json::json!([])
+    );
+    assert_eq!(
+        dead_entry["identity"]["id"],
+        "v1|7:library|7:library|10:dead_entry|8:function|6:source|18:library/src/lib.rs|190|1"
+    );
+    assert!(
+        dead_entry["identity"]["compiler_id"]
+            .as_str()
+            .is_some_and(|id| id.len() == 32 && id.bytes().all(|byte| byte.is_ascii_hexdigit()))
+    );
+    assert_eq!(
+        dead_entry["location"],
+        serde_json::json!({
+            "file": "library/src/lib.rs",
+            "byte_start": 3353,
+            "byte_end": 3395,
+            "line": 190,
+            "column": 1,
+            "end_line": 192,
+            "end_column": 2,
+        })
+    );
+    assert_eq!(dead_entry["expansion"], serde_json::Value::Null);
+    assert_eq!(dead_entry["test_only"], false);
+    assert_eq!(dead_entry["test_compiled_only"], false);
+
+    let dead_field = diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic["identity"]["item"] == "DeadFields::unused")
+        .expect("dead field diagnostic");
+    assert_eq!(dead_field["identity"]["kind"], "field");
+    assert_eq!(dead_field["identity"]["parent"], "DeadFields");
+    assert_eq!(
+        dead_field["location"],
+        serde_json::json!({
+            "file": "library/src/lib.rs",
+            "byte_start": 2327,
+            "byte_end": 2342,
+            "line": 132,
+            "column": 5,
+            "end_line": 132,
+            "end_column": 20,
+        })
+    );
+
+    let dead_variant = diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic["identity"]["item"] == "ProductEnum::Unused")
+        .expect("dead enum-variant diagnostic");
+    assert_eq!(
+        dead_variant["location"],
+        serde_json::json!({
+            "file": "library/src/lib.rs",
+            "byte_start": 3127,
+            "byte_end": 3134,
+            "line": 176,
+            "column": 5,
+            "end_line": 176,
+            "end_column": 12,
+        })
+    );
+
+    let test_only = diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic["identity"]["item"] == "test_only_helper")
+        .expect("test-only diagnostic");
+    assert_eq!(test_only["severity"], "warning");
+    assert_eq!(test_only["test_only"], true);
+
+    let config = diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic["code"] == "hawk::unfulfilled_expectation")
+        .expect("configuration diagnostic");
+    assert_eq!(config["category"], "configuration");
+    assert_eq!(config["severity"], "error");
+    assert_eq!(config["lint"], "hawk::dead_public");
+    assert_eq!(config["identity"]["crate"], "library");
+    assert_eq!(config["identity"]["item"], "PrivateContextOptions");
+    assert_eq!(
+        config["location"],
+        serde_json::json!({"file": "hawk.toml", "line": 22, "column": 1})
+    );
+    assert_eq!(
+        config["reason"],
+        "covered by unfulfilled expectation diagnostic"
+    );
+
+    let stderr = context.normalized_stderr(&output);
+    assert!(stderr.contains("Finished `dev` profile"));
+}
+
+#[test]
+fn emits_an_empty_json_report_when_all_warnings_are_allowed() {
+    let context = HawkTestContext::new("basic");
+    let output = context.run(&["--output-format=json", "-A", "warnings"]);
+
+    context.assert_success(&output);
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout contains one JSON report");
+    assert_eq!(report["schema_version"], 3);
+    assert_eq!(report["summary"]["diagnostic_count"], 0);
+    assert_eq!(report["diagnostics"], serde_json::json!([]));
+}
+
+#[test]
+fn json_stable_diagnostic_ids_ignore_target_compilation_metadata() {
+    let context = HawkTestContext::new("dead_public_fixes");
+    let reports = ["hawk-target-a", "hawk-target-b"].map(|metadata| {
+        let output = context
+            .command()
+            .arg("--output-format=json")
+            .env("CARGO_ENCODED_RUSTFLAGS", format!("-Cmetadata={metadata}"))
+            .env_remove("RUSTFLAGS")
+            .output()
+            .expect("run cargo-hawk with target-specific compilation metadata");
+        context.assert_success(&output);
+        serde_json::from_slice::<serde_json::Value>(&output.stdout)
+            .expect("stdout contains one JSON report")
+    });
+    let identities = reports.each_ref().map(|report| {
+        report["diagnostics"]
+            .as_array()
+            .expect("diagnostics is an array")
+            .iter()
+            .find(|diagnostic| diagnostic["identity"]["item"] == "dead_api")
+            .expect("dead_api diagnostic")["identity"]
+            .clone()
+    });
+
+    assert_eq!(identities[0]["id"], identities[1]["id"]);
+    assert_ne!(identities[0]["compiler_id"], identities[1]["compiler_id"]);
+}
+
+#[test]
+fn json_uses_the_host_target_when_cargo_configures_another_target() {
+    let rustc_version = Command::new("rustc")
+        .arg("-vV")
+        .output()
+        .expect("read Rust compiler version");
+    assert!(rustc_version.status.success());
+    let rustc_version = String::from_utf8(rustc_version.stdout).expect("Rust compiler version");
+    let host_target = rustc_version
+        .lines()
+        .find_map(|line| line.strip_prefix("host: "))
+        .expect("Rust compiler host target");
+    let host_arch = host_target
+        .split_once('-')
+        .expect("host target has an architecture")
+        .0;
+    let installed_targets = Command::new("rustup")
+        .args(["target", "list", "--installed"])
+        .output()
+        .expect("list installed Rust targets");
+    assert!(installed_targets.status.success());
+    let installed_targets =
+        String::from_utf8(installed_targets.stdout).expect("installed Rust targets");
+    let configured_target = installed_targets
+        .lines()
+        .find(|target| *target != host_target)
+        .unwrap_or(host_target);
+    let context = HawkTestContext::new("dead_public_fixes");
+    let cargo_config = context.workspace().join(".cargo");
+    fs::create_dir(&cargo_config).expect("create Cargo configuration directory");
+    fs::write(
+        cargo_config.join("config.toml"),
+        format!("[build]\ntarget = \"{configured_target}\"\n"),
+    )
+    .expect("write Cargo target configuration");
+    fs::write(
+        context.workspace().join("library/src/lib.rs"),
+        format!("#[cfg(target_arch = \"{host_arch}\")]\npub fn host_only() {{}}\n"),
+    )
+    .expect("write target-specific library source");
+    fs::write(
+        context.workspace().join("hawk.toml"),
+        format!(
+            "[[production]]\npackage = \"app\"\nbin = \"app\"\nreason = \"binary product under analysis\"\n\n[[override]]\nlint = \"hawk::dead_public\"\ncrate = \"library\"\nitem = \"host_only\"\nlevel = \"allow\"\nreason = \"host-only declaration is intentionally retained\"\ntarget = 'cfg(target_arch = \"{host_arch}\")'\n"
+        ),
+    )
+    .expect("write Hawk configuration");
+
+    let output = context
+        .command()
+        .arg("--output-format=json")
+        .env("CARGO_BUILD_TARGET", configured_target)
+        .output()
+        .expect("run cargo-hawk with configured Cargo target");
+
+    context.assert_success(&output);
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout contains one JSON report");
+    assert_eq!(report["summary"]["target"], host_target);
+    assert_eq!(report["summary"]["diagnostic_count"], 0);
+    assert_eq!(report["diagnostics"], serde_json::json!([]));
+}
+
+#[test]
+fn json_locations_include_complete_documented_declarations() {
+    let context = HawkTestContext::new("dead_public_fixes");
+    fs::write(
+        context.workspace().join("library/src/lib.rs"),
+        "#![deny(dead_code)]\n\n/// A retained source-spanned doc comment.\n#[deprecated(note = \"exercise a source-spanned attribute\")]\n#[inline]\npub fn dead_api() {}\n\n#[must_use]\npub fn must_use_api() -> bool { true }\n\n#[doc(hidden)]\npub struct DeadDocHidden;\n\n#[cold]\npub fn cold_api() {}\n",
+    )
+    .expect("write documented declaration");
+
+    let output = context.run(&["--output-format=json"]);
+
+    context.assert_success(&output);
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout contains one JSON report");
+    let diagnostic = report["diagnostics"]
+        .as_array()
+        .expect("diagnostics is an array")
+        .iter()
+        .find(|diagnostic| diagnostic["identity"]["item"] == "dead_api")
+        .expect("dead_api diagnostic");
+    assert_eq!(
+        diagnostic["location"],
+        serde_json::json!({
+            "file": "library/src/lib.rs",
+            "byte_start": 21,
+            "byte_end": 154,
+            "line": 3,
+            "column": 1,
+            "end_line": 6,
+            "end_column": 21,
+        })
+    );
+    let diagnostics = report["diagnostics"]
+        .as_array()
+        .expect("diagnostics is an array");
+    let must_use = diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic["identity"]["item"] == "must_use_api")
+        .expect("must_use_api diagnostic");
+    assert_eq!(
+        must_use["location"],
+        serde_json::json!({
+            "file": "library/src/lib.rs",
+            "byte_start": 156,
+            "byte_end": 206,
+            "line": 8,
+            "column": 1,
+            "end_line": 9,
+            "end_column": 39,
+        })
+    );
+    let doc_hidden = diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic["identity"]["item"] == "DeadDocHidden")
+        .expect("DeadDocHidden diagnostic");
+    assert_eq!(
+        doc_hidden["location"],
+        serde_json::json!({
+            "file": "library/src/lib.rs",
+            "byte_start": 208,
+            "byte_end": 248,
+            "line": 11,
+            "column": 1,
+            "end_line": 12,
+            "end_column": 26,
+        })
+    );
+    let cold = diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic["identity"]["item"] == "cold_api")
+        .expect("cold_api diagnostic");
+    assert_eq!(
+        cold["location"],
+        serde_json::json!({
+            "file": "library/src/lib.rs",
+            "line": 15,
+            "column": 1,
+        })
+    );
+}
+
+#[test]
+fn json_locations_include_grouped_reexport_separators() {
+    let context = HawkTestContext::new("grouped_reexport_fixes");
+    let output = context.run(&["--output-format=json"]);
+
+    context.assert_success(&output);
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout contains one JSON report");
+    let diagnostic = report["diagnostics"]
+        .as_array()
+        .expect("diagnostics is an array")
+        .iter()
+        .find(|diagnostic| diagnostic["identity"]["item"] == "ProductionOnly")
+        .expect("ProductionOnly re-export diagnostic");
+    assert_eq!(
+        diagnostic["location"],
+        serde_json::json!({
+            "file": "library/src/lib.rs",
+            "byte_start": 270,
+            "byte_end": 285,
+            "line": 17,
+            "column": 27,
+            "end_line": 17,
+            "end_column": 42,
+        })
+    );
+}
+
+#[test]
+fn json_locations_include_separators_after_trivia_and_can_be_deleted() {
+    let context = HawkTestContext::new("dead_public_fixes");
+    let library_path = context.workspace().join("library/src/lib.rs");
+    let mut source = "pub struct DeadFields {\n    pub unused: u8 // field separator\n    ,\n    pub remaining: u8,\n}\n\npub enum DeadEnum {\n    Unused /* variant separator */ ,\n    Remaining,\n}\n\nmod exports {\n    pub struct Unused;\n    pub struct Remaining;\n}\n\npub use exports::{Unused /* re-export separator */ , Remaining};\n".to_string();
+    fs::write(&library_path, &source).expect("write declarations with separated commas");
+
+    let output = context.run(&["--output-format=json"]);
+
+    context.assert_success(&output);
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout contains one JSON report");
+    let diagnostics = report["diagnostics"]
+        .as_array()
+        .expect("diagnostics is an array");
+    let ranges = [
+        ("DeadFields::unused", "field", 28, 67, 2, 5, 3, 6),
+        ("DeadEnum::Unused", "enum_variant", 118, 150, 8, 5, 8, 37),
+        ("Unused", "reexport", 253, 287, 17, 19, 17, 53),
+    ]
+    .map(
+        |(item, kind, byte_start, byte_end, line, column, end_line, end_column)| {
+            let diagnostic = diagnostics
+                .iter()
+                .find(|diagnostic| {
+                    diagnostic["identity"]["item"] == item && diagnostic["identity"]["kind"] == kind
+                })
+                .unwrap_or_else(|| panic!("{item} {kind} diagnostic"));
+            assert_eq!(
+                diagnostic["location"],
+                serde_json::json!({
+                    "file": "library/src/lib.rs",
+                    "byte_start": byte_start,
+                    "byte_end": byte_end,
+                    "line": line,
+                    "column": column,
+                    "end_line": end_line,
+                    "end_column": end_column,
+                })
+            );
+            byte_start..byte_end
+        },
+    );
+    let mut ranges = ranges;
+    ranges.sort_by_key(|range| range.start);
+    for range in ranges.into_iter().rev() {
+        source.replace_range(range, "");
+    }
+    fs::write(&library_path, source).expect("delete diagnostic ranges");
+
+    let output = context
+        .cargo()
+        .args(["check", "--workspace", "--locked"])
+        .arg("--target-dir")
+        .arg(context.target_dir())
+        .output()
+        .expect("compile declarations after deleting diagnostic ranges");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn json_byte_offsets_delete_unicode_declarations() {
+    let context = HawkTestContext::new("dead_public_fixes");
+    let library_path = context.workspace().join("library/src/lib.rs");
+    let mut source =
+        "\u{feff}pub struct DeadFields {\r\n    /* 😀é */ pub unused: u8 /* 😀é */ ,\r\n    pub remaining: u8,\r\n}\r\n"
+            .to_string();
+    fs::write(&library_path, &source).expect("write Unicode declaration");
+
+    let output = context.run(&["--output-format=json"]);
+
+    context.assert_success(&output);
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout contains one JSON report");
+    assert_eq!(report["schema_version"], 3);
+    let diagnostic = report["diagnostics"]
+        .as_array()
+        .expect("diagnostics is an array")
+        .iter()
+        .find(|diagnostic| diagnostic["identity"]["item"] == "DeadFields::unused")
+        .expect("dead field diagnostic");
+    assert_eq!(
+        diagnostic["location"],
+        serde_json::json!({
+            "file": "library/src/lib.rs",
+            "byte_start": 45,
+            "byte_end": 74,
+            "line": 2,
+            "column": 14,
+            "end_line": 2,
+            "end_column": 39,
+        })
+    );
+    let location = &diagnostic["location"];
+    let byte_start = usize::try_from(location["byte_start"].as_u64().expect("byte_start"))
+        .expect("byte_start fits in usize");
+    let byte_end = usize::try_from(location["byte_end"].as_u64().expect("byte_end"))
+        .expect("byte_end fits in usize");
+    assert_eq!(
+        source.get(byte_start..byte_end),
+        Some("pub unused: u8 /* 😀é */ ,")
+    );
+    source.replace_range(byte_start..byte_end, "");
+    fs::write(&library_path, source).expect("delete Unicode declaration range");
+
+    let output = context
+        .cargo()
+        .args(["check", "--workspace", "--locked"])
+        .arg("--target-dir")
+        .arg(context.target_dir())
+        .output()
+        .expect("compile declarations after deleting Unicode range");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn json_still_emits_a_report_when_stderr_is_closed() {
+    let context = HawkTestContext::new("dead_public_fixes");
+    let (reader, writer) = std::io::pipe().expect("create stderr pipe");
+    drop(reader);
+    let output = context
+        .command()
+        .arg("--output-format=json")
+        .stderr(writer)
+        .output()
+        .expect("run cargo-hawk with closed stderr");
+
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout contains one JSON report");
+    assert_eq!(report["schema_version"], 3);
+}
+
+#[cfg(unix)]
+#[test]
+fn json_returns_a_normal_cargo_failure_when_stderr_is_closed() {
+    let context = HawkTestContext::new("dead_public_fixes");
+    fs::write(
+        context.workspace().join("library/src/lib.rs"),
+        "compile_error!(\"EXPECTED-JSON-CARGO-FAILURE\");\n",
+    )
+    .expect("write failing library source");
+    let (reader, writer) = std::io::pipe().expect("create stderr pipe");
+    drop(reader);
+    let output = context
+        .command()
+        .arg("--output-format=json")
+        .stderr(writer)
+        .output()
+        .expect("run cargo-hawk with closed stderr");
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn json_closes_inherited_cargo_output_after_analysis() {
+    use std::time::{Duration, Instant};
+
+    let context = HawkTestContext::new("dead_public_fixes");
+    let shim_directory = tempfile::tempdir().expect("temporary Cargo shim directory");
+    let shim = shim_directory.path().join("cargo");
+    let shim_source = shim_directory.path().join("cargo.rs");
+    let helper_done = shim_directory.path().join("helper-done");
+    fs::write(
+        &shim_source,
+        format!(
+            "use std::env;\nuse std::io::Write as _;\nuse std::process::{{Command, Stdio}};\nuse std::time::{{Duration, Instant}};\nfn main() {{\n    let mut args = env::args_os().skip(1);\n    if args.next().as_deref() == Some(std::ffi::OsStr::new(\"--hawk-test-helper\")) {{\n        let deadline = Instant::now() + Duration::from_secs(10);\n        let mut stderr = std::io::stderr().lock();\n        while Instant::now() < deadline {{\n            match stderr.write_all(b\"BACKGROUND-CARGO-HELPER-WRITE-0123456789abcdefghijklmnopqrstuvwxyz\\n\") {{\n                Ok(()) => {{}},\n                Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => {{\n                    std::fs::write({:?}, \"closed\").unwrap();\n                    return;\n                }}\n                Err(error) => panic!(\"unexpected helper output error: {{error}}\"),\n            }}\n        }}\n        std::fs::write({:?}, \"timed-out\").unwrap();\n        return;\n    }}\n    let args = env::args_os().skip(1).collect::<Vec<_>>();\n    let status = Command::new({:?}).args(&args).status().unwrap();\n    if env::var_os(\"HAWK_OUTPUT_DIR\").is_some() && args.iter().any(|argument| argument == \"--bin\") {{\n        eprintln!(\"EXPECTED-CARGO-RELAY-OUTPUT: {{}}\", \"x\".repeat(20_000));\n        Command::new(env::current_exe().unwrap()).arg(\"--hawk-test-helper\").stdin(Stdio::null()).spawn().unwrap();\n    }}\n    std::process::exit(status.code().unwrap_or(1));\n}}\n",
+            helper_done,
+            helper_done,
+            env!("CARGO")
+        ),
+    )
+    .expect("write Cargo shim source");
+    let compiler = Command::new("rustc")
+        .arg(&shim_source)
+        .arg("--edition=2024")
+        .arg("-o")
+        .arg(&shim)
+        .output()
+        .expect("compile Cargo shim");
+    assert!(
+        compiler.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compiler.stderr)
+    );
+
+    let mut paths = vec![shim_directory.path().to_path_buf()];
+    paths.extend(std::env::split_paths(
+        &std::env::var_os("PATH").expect("PATH is set"),
+    ));
+    let output = context
+        .command()
+        .arg("--output-format=json")
+        .env("PATH", std::env::join_paths(paths).expect("construct PATH"))
+        .output()
+        .expect("run cargo-hawk");
+
+    context.assert_success(&output);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("EXPECTED-CARGO-RELAY-OUTPUT:"), "{stderr}");
+    serde_json::from_slice::<serde_json::Value>(&output.stdout)
+        .expect("stdout contains one JSON report");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !helper_done.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    assert_eq!(
+        fs::read_to_string(&helper_done).expect("background Cargo helper finished"),
+        "closed"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn json_does_not_wait_for_background_cargo_helpers_holding_output_pipes() {
+    use std::time::{Duration, Instant};
+
+    let context = HawkTestContext::new("dead_public_fixes");
+    let shim_directory = tempfile::tempdir().expect("temporary Cargo shim directory");
+    let shim = shim_directory.path().join("cargo");
+    let shim_source = shim_directory.path().join("cargo.rs");
+    let keep_alive = shim_directory.path().join("keep-alive");
+    fs::write(&keep_alive, "").expect("write helper marker");
+    fs::write(
+        &shim_source,
+        format!(
+            "use std::env;\nuse std::process::{{Command, Stdio}};\nuse std::time::Duration;\nfn main() {{\n    let mut args = env::args_os().skip(1);\n    if args.next().as_deref() == Some(std::ffi::OsStr::new(\"--hawk-test-helper\")) {{\n        while std::path::Path::new({:?}).exists() {{ std::thread::sleep(Duration::from_millis(25)); }}\n        return;\n    }}\n    let status = Command::new({:?}).args(env::args_os().skip(1)).status().unwrap();\n    if env::var_os(\"HAWK_OUTPUT_DIR\").is_some() {{\n        Command::new(env::current_exe().unwrap()).arg(\"--hawk-test-helper\").stdin(Stdio::null()).spawn().unwrap();\n    }}\n    std::process::exit(status.code().unwrap_or(1));\n}}\n",
+            keep_alive,
+            env!("CARGO")
+        ),
+    )
+    .expect("write Cargo shim source");
+    let compiler = Command::new("rustc")
+        .arg(&shim_source)
+        .arg("--edition=2024")
+        .arg("-o")
+        .arg(&shim)
+        .output()
+        .expect("compile Cargo shim");
+    assert!(
+        compiler.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compiler.stderr)
+    );
+
+    let mut paths = vec![shim_directory.path().to_path_buf()];
+    paths.extend(std::env::split_paths(
+        &std::env::var_os("PATH").expect("PATH is set"),
+    ));
+    let mut child = context
+        .command()
+        .arg("--output-format=json")
+        .env("PATH", std::env::join_paths(paths).expect("construct PATH"))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn cargo-hawk");
+    let deadline = Instant::now() + Duration::from_mins(1);
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("poll cargo-hawk") {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            fs::remove_file(&keep_alive).expect("release background helper");
+            let _ = child.kill();
+            panic!("cargo-hawk waited for a background Cargo helper holding output pipes");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let (release_sender, release_receiver) = std::sync::mpsc::sync_channel(1);
+    let release_path = keep_alive.clone();
+    let release = std::thread::spawn(move || {
+        if release_receiver
+            .recv_timeout(Duration::from_secs(5))
+            .is_err()
+        {
+            fs::remove_file(release_path).expect("release blocked background helper");
+            return false;
+        }
+        true
+    });
+    let output = child.wait_with_output().expect("read cargo-hawk output");
+    let _ = release_sender.send(());
+    let completed_before_release = release.join().expect("join helper-release watchdog");
+    if completed_before_release {
+        fs::remove_file(&keep_alive).expect("release background helper");
+    }
+
+    assert!(
+        completed_before_release,
+        "cargo-hawk left background Cargo helpers holding captured output pipes"
+    );
+
+    assert!(
+        status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice::<serde_json::Value>(&output.stdout)
+        .expect("stdout contains one JSON report");
+}
+
+#[cfg(unix)]
+#[test]
+fn json_replays_failing_cargo_output_while_background_helpers_write() {
+    let context = HawkTestContext::new("dead_public_fixes");
+    fs::write(
+        context.workspace().join("library/src/lib.rs"),
+        "compile_error!(\"EXPECTED-RUSTC-FAILURE\");\n",
+    )
+    .expect("write failing library source");
+    let shim_directory = tempfile::tempdir().expect("temporary Cargo shim directory");
+    let shim = shim_directory.path().join("cargo");
+    let shim_source = shim_directory.path().join("cargo.rs");
+    let keep_alive = shim_directory.path().join("keep-alive");
+    fs::write(&keep_alive, "").expect("write helper marker");
+    fs::write(
+        &shim_source,
+        format!(
+            "use std::env;\nuse std::io::Write as _;\nuse std::process::{{Command, Stdio}};\nuse std::time::Duration;\nfn main() {{\n    let mut args = env::args_os().skip(1);\n    if args.next().as_deref() == Some(std::ffi::OsStr::new(\"--hawk-test-helper\")) {{\n        let mut stderr = std::io::stderr().lock();\n        while std::path::Path::new({:?}).exists() {{\n            stderr.write_all(b\"BACKGROUND-CARGO-HELPER-WRITE-0123456789abcdefghijklmnopqrstuvwxyz\\n\").unwrap();\n        }}\n        return;\n    }}\n    let status = Command::new({:?}).args(env::args_os().skip(1)).status().unwrap();\n    if env::var_os(\"HAWK_OUTPUT_DIR\").is_some() && !status.success() {{\n        println!(\"EXPECTED-CARGO-STDOUT-FAILURE\");\n        eprintln!(\"EXPECTED-CARGO-STDERR-FAILURE\");\n        Command::new(env::current_exe().unwrap()).arg(\"--hawk-test-helper\").stdin(Stdio::null()).spawn().unwrap();\n        std::thread::sleep(Duration::from_millis(50));\n    }}\n    std::process::exit(status.code().unwrap_or(1));\n}}\n",
+            keep_alive,
+            env!("CARGO")
+        ),
+    )
+    .expect("write Cargo shim source");
+    let compiler = Command::new("rustc")
+        .arg(&shim_source)
+        .arg("--edition=2024")
+        .arg("-o")
+        .arg(&shim)
+        .output()
+        .expect("compile Cargo shim");
+    assert!(
+        compiler.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compiler.stderr)
+    );
+
+    let mut paths = vec![shim_directory.path().to_path_buf()];
+    paths.extend(std::env::split_paths(
+        &std::env::var_os("PATH").expect("PATH is set"),
+    ));
+    let output = context
+        .command()
+        .arg("--output-format=json")
+        .env("PATH", std::env::join_paths(paths).expect("construct PATH"))
+        .output()
+        .expect("run cargo-hawk");
+    fs::remove_file(&keep_alive).expect("release background helper");
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("EXPECTED-RUSTC-FAILURE"), "{stderr}");
+    assert!(stderr.contains("EXPECTED-CARGO-STDOUT-FAILURE"), "{stderr}");
+    assert!(stderr.contains("EXPECTED-CARGO-STDERR-FAILURE"), "{stderr}");
+    assert!(
+        stderr.contains("instrumented Cargo check failed with exit status: 101"),
+        "{stderr}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn json_replays_failing_doctest_stdout_and_stderr() {
+    let context = HawkTestContext::new("dead_public_fixes");
+    let shim_directory = tempfile::tempdir().expect("temporary Cargo shim directory");
+    let shim = shim_directory.path().join("cargo");
+    let shim_source = shim_directory.path().join("cargo.rs");
+    fs::write(
+        &shim_source,
+        format!(
+            "use std::env;\nuse std::process::Command;\nfn main() {{\n    if env::var_os(\"HAWK_OUTPUT_DIR\").is_some() && env::args_os().any(|argument| argument == \"--doc\") {{\n        println!(\"EXPECTED-DOCTEST-STDOUT-FAILURE\");\n        eprintln!(\"EXPECTED-DOCTEST-STDERR-FAILURE\");\n        std::process::exit(72);\n    }}\n    let status = Command::new({:?}).args(env::args_os().skip(1)).status().unwrap();\n    std::process::exit(status.code().unwrap_or(1));\n}}\n",
+            env!("CARGO")
+        ),
+    )
+    .expect("write Cargo shim source");
+    let compiler = Command::new("rustc")
+        .arg(&shim_source)
+        .arg("--edition=2024")
+        .arg("-o")
+        .arg(&shim)
+        .output()
+        .expect("compile Cargo shim");
+    assert!(
+        compiler.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compiler.stderr)
+    );
+
+    let mut paths = vec![shim_directory.path().to_path_buf()];
+    paths.extend(std::env::split_paths(
+        &std::env::var_os("PATH").expect("PATH is set"),
+    ));
+    let output = context
+        .command()
+        .arg("--output-format=json")
+        .env("PATH", std::env::join_paths(paths).expect("construct PATH"))
+        .output()
+        .expect("run cargo-hawk");
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("EXPECTED-DOCTEST-STDOUT-FAILURE"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("EXPECTED-DOCTEST-STDERR-FAILURE"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("instrumented Cargo test failed with exit status: 72"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn reports_operational_json_errors_on_stderr() {
+    let context = HawkTestContext::new("basic");
+    let configuration = tempfile::NamedTempFile::new().expect("temporary empty configuration");
+    let output = context
+        .command()
+        .arg("--output-format=json")
+        .arg("--config")
+        .arg(configuration.path())
+        .output()
+        .expect("run cargo-hawk");
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(
+        context
+            .normalized_stderr(&output)
+            .contains("error: no applicable production binaries configured")
+    );
+}
+
+#[test]
 fn applies_visibility_fixes_through_cargo_fix() {
     let context = HawkTestContext::new("basic");
     let output = context.run(&["--fix", "--allow-no-vcs"]);
@@ -1157,6 +1976,8 @@ fn override_does_not_suppress_a_same_named_item_in_another_crate() {
     assert!(!stdout.contains("hawk::ambiguous_item"));
     assert!(!stdout.contains("hawk::unfulfilled_expectation"));
     assert!(stdout.contains("hawk: 1 finding(s)"));
+    assert!(stdout.contains("  hawk::dead_public: 1 (right-package: 1)"));
+    assert!(!stdout.contains("right_shared: 1"));
 }
 
 #[test]
@@ -1306,4 +2127,53 @@ fn narrows_crate_visibility_to_the_required_module_scope_when_enabled() {
     assert!(library.contains("    fn parent_helper() {}"));
     assert!(library.contains("        pub(super) fn call_parent_helper() {"));
     assert!(library.contains("    pub(crate) mod api {"));
+}
+
+#[test]
+fn reports_only_dead_public_findings() {
+    let context = HawkTestContext::new("basic");
+    let output = context.run(&["--only", "dead-public"]);
+
+    context.assert_success(&output);
+    let stdout = context.normalized_stdout(&output);
+    assert!(stdout.contains("warning[hawk::dead_public]"));
+    assert!(!stdout.contains("warning[hawk::unnecessary_public]"));
+    assert!(stdout.contains("warning[hawk::unknown_item]"));
+    assert!(stdout.contains("warning[hawk::unfulfilled_expectation]"));
+    assert!(stdout.contains("hawk: 17 finding(s)"));
+    assert!(stdout.contains("  hawk::dead_public: 15 (library: 14, test_support: 1)"));
+    assert!(stdout.contains("  hawk::unknown_item: 1 (configuration: 1)"));
+    assert!(!stdout.contains("  hawk::unnecessary_public:"));
+}
+
+#[test]
+fn reports_only_dead_public_findings_as_json() {
+    let context = HawkTestContext::new("basic");
+    let output = context.run(&["--only", "dead-public", "--output-format=json"]);
+
+    context.assert_success(&output);
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout contains one JSON report");
+    assert_eq!(report["schema_version"], 3);
+    assert_eq!(report["summary"]["diagnostic_count"], 17);
+    let diagnostics = report["diagnostics"]
+        .as_array()
+        .expect("diagnostics is an array");
+    assert_eq!(diagnostics.len(), 17);
+    assert!(
+        diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic["category"] == "configuration"
+                || diagnostic["code"] == "hawk::dead_public")
+    );
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic["category"] == "configuration")
+    );
+    assert!(
+        diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic["code"] != "hawk::unnecessary_public")
+    );
 }

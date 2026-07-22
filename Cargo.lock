@@ -91,10 +91,12 @@ dependencies = [
  "clap",
  "insta",
  "rustc-hash",
+ "rustix",
  "serde",
  "serde_json",
  "tempfile",
  "toml",
+ "windows-sys",
 ]
 
 [[package]]

@@ -12,10 +12,12 @@ use rustc_driver::{Callbacks, Compilation};
 use rustc_errors::Applicability;
 use rustc_hir as hir;
 use rustc_hir::Node;
+use rustc_hir::attrs::AttributeKind;
 use rustc_hir::def::{CtorOf, DefKind, Res};
 use rustc_hir::def_id::{CRATE_DEF_ID, DefId, LocalDefId};
 use rustc_hir::intravisit::{self, Visitor};
 use rustc_interface::interface;
+use rustc_lexer::{FrontmatterAllowed, TokenKind};
 use rustc_lint_defs::builtin::DEAD_CODE;
 use rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrFlags;
 use rustc_middle::ty::{self, TyCtxt};
@@ -30,8 +32,9 @@ use rustc_span::{BytePos, FileName, Pos};
 
 use crate::protocol;
 use cargo_hawk_internal::graph::{
-    CollectionOptions, Definition, DefinitionId, DefinitionIdentity, DefinitionKind, Edge,
-    EdgeKind, ExpansionSpan, FindingKind, FixPlan, FixTarget, Fragment, Span, VisibilityReduction,
+    CollectionOptions, DeclarationSpan, Definition, DefinitionId, DefinitionIdentity,
+    DefinitionKind, Edge, EdgeKind, ExpansionSpan, FindingKind, FixPlan, FixTarget, Fragment, Span,
+    VisibilityReduction,
 };
 
 pub(crate) fn is_protocol_version_query(args: &[String]) -> bool {
@@ -458,6 +461,7 @@ fn collect_fragment(
             kind.unwrap_or(DefinitionKind::Other),
             public_api,
             visibility.as_deref(),
+            collection_options,
         ));
         defined.insert(def_id);
     }
@@ -504,6 +508,7 @@ fn collect_fragment(
                         DefinitionKind::Field,
                         public_api,
                         visibility.as_deref(),
+                        collection_options,
                     );
                     field_definition
                         .uniform_field_group
@@ -522,6 +527,7 @@ fn collect_fragment(
                         DefinitionKind::EnumVariant,
                         is_public_variant(tcx, variant.def_id, test_surface),
                         visibility_modifier(tcx, variant.def_id).as_deref(),
+                        collection_options,
                     ));
                     defined.insert(variant.def_id);
                     adt_members.push((variant.def_id, item.owner_id.def_id));
@@ -540,6 +546,7 @@ fn collect_fragment(
                 DefinitionKind::Other,
                 false,
                 visibility_modifier(tcx, def_id).as_deref(),
+                collection_options,
             ));
         }
     }
@@ -1013,6 +1020,7 @@ fn definition(
     kind: DefinitionKind,
     public_api: bool,
     visibility: Option<&str>,
+    collection_options: CollectionOptions,
 ) -> Definition {
     let has_explicit_visibility =
         visibility.is_some_and(|visibility| visibility.starts_with("pub"));
@@ -1028,6 +1036,10 @@ fn definition(
         name: definition_name(tcx, def_id, kind),
         kind,
         span: span(tcx, def_id),
+        declaration_span: (collection_options.collect_declaration_spans()
+            && (public_api || restricted_visible_api))
+            .then(|| declaration_span(tcx, def_id, kind))
+            .flatten(),
         expansion_span: expansion_span(tcx, def_id),
         public_api,
         restricted_visible_api,
@@ -1141,6 +1153,115 @@ fn expansion_span(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Option<ExpansionSpan> 
     Some(ExpansionSpan {
         definition: source_span(tcx, span),
         callsite: source_span(tcx, callsite),
+    })
+}
+
+/// Returns a complete, deletable source range, including outer attributes and trailing separators.
+///
+/// Returns `None` when an expansion or parsed attribute cannot be safely mapped back to source.
+fn declaration_span(
+    tcx: TyCtxt<'_>,
+    def_id: LocalDefId,
+    kind: DefinitionKind,
+) -> Option<DeclarationSpan> {
+    let mut item_span = tcx
+        .hir_node_by_def_id(def_id)
+        .as_owner()
+        .map_or_else(|| tcx.def_span(def_id), |owner| owner.span());
+    if item_span.is_dummy() || item_span.from_expansion() {
+        return None;
+    }
+    if matches!(
+        kind,
+        DefinitionKind::Field | DefinitionKind::EnumVariant | DefinitionKind::Reexport
+    ) {
+        let source_file = tcx.sess.source_map().lookup_source_file(item_span.hi());
+        let offset = (item_span.hi() - source_file.start_pos).to_usize();
+        if let Some(source) = source_file
+            .src
+            .as_deref()
+            .and_then(|source| source.get(offset..))
+        {
+            let mut end = item_span.hi();
+            for token in rustc_lexer::tokenize(source, FrontmatterAllowed::No) {
+                end = end + BytePos(token.len);
+                match token.kind {
+                    TokenKind::Whitespace
+                    | TokenKind::LineComment { .. }
+                    | TokenKind::BlockComment { .. } => {}
+                    TokenKind::Comma => {
+                        item_span = item_span.with_hi(end);
+                        break;
+                    }
+                    _ => break,
+                }
+            }
+        }
+    }
+
+    let mut start = item_span.lo();
+    for attr in tcx.hir_attrs(tcx.local_def_id_to_hir_id(def_id)) {
+        let attr_span = match attr {
+            hir::Attribute::Unparsed(_)
+            | hir::Attribute::Parsed(
+                AttributeKind::DocComment { .. }
+                | AttributeKind::Deprecated { .. }
+                | AttributeKind::CfgTrace(_),
+            ) => attr.span(),
+            hir::Attribute::Parsed(AttributeKind::Doc(documentation)) => documentation.first_span,
+            hir::Attribute::Parsed(
+                AttributeKind::Inline(_, span)
+                | AttributeKind::MustUse { span, .. }
+                | AttributeKind::NonExhaustive(span)
+                | AttributeKind::NoMangle(span)
+                | AttributeKind::Naked(span)
+                | AttributeKind::TrackCaller(span)
+                | AttributeKind::Optimize(_, span)
+                | AttributeKind::ExportName { span, .. }
+                | AttributeKind::Repr {
+                    first_span: span, ..
+                }
+                | AttributeKind::TargetFeature {
+                    attr_span: span, ..
+                },
+            ) => *span,
+            hir::Attribute::Parsed(_) => return None,
+        };
+        if attr_span.is_dummy() || attr_span.from_expansion() {
+            return None;
+        }
+        start = start.min(attr_span.lo());
+    }
+
+    let source_map = tcx.sess.source_map();
+    let end = item_span.hi();
+    let start_location = source_map.lookup_char_pos(start);
+    let end_location = source_map.lookup_char_pos(end);
+    let file = normalize_source_path(
+        &start_location
+            .file
+            .name
+            .prefer_local_unconditionally()
+            .to_string(),
+    );
+    let end_file = normalize_source_path(
+        &end_location
+            .file
+            .name
+            .prefer_local_unconditionally()
+            .to_string(),
+    );
+    (file == end_file).then_some(DeclarationSpan {
+        file,
+        byte_start: start_location
+            .file
+            .original_relative_byte_pos(start)
+            .to_usize(),
+        byte_end: end_location.file.original_relative_byte_pos(end).to_usize(),
+        start_line: start_location.line,
+        start_column: start_location.col.to_usize() + 1,
+        end_line: end_location.line,
+        end_column: end_location.col.to_usize() + 1,
     })
 }
 
@@ -1404,7 +1525,7 @@ mod tests {
 
         assert_eq!(
             error.to_string(),
-            "Hawk frontend uses compiler driver protocol 1, but this driver uses protocol 5; install `cargo-hawk` and `cargo-hawk-driver` from the same release"
+            "Hawk frontend uses compiler driver protocol 1, but this driver uses protocol 7; install `cargo-hawk` and `cargo-hawk-driver` from the same release"
         );
     }
 
@@ -1443,6 +1564,15 @@ mod tests {
             )))
             .expect("uniform field collection option")
             .preserve_uniform_field_visibility()
+        );
+        assert!(
+            parse_collection_options(Some(OsStr::new(
+                CollectionOptions::new(true)
+                    .with_declaration_spans()
+                    .as_env_value()
+            )))
+            .expect("declaration-span collection option")
+            .collect_declaration_spans()
         );
         insta::assert_snapshot!(
             parse_collection_options(Some(OsStr::new("unknown")))
