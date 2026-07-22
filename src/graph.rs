@@ -436,6 +436,16 @@ pub fn analyze_with_options<'a>(
     let production_adjacency =
         adjacency(&production_edges, &equivalents, &production_definition_ids);
     let test_adjacency = adjacency(&test_edges, &equivalents, &test_definition_ids);
+    let test_roots = test_fragments
+        .iter()
+        .filter(|fragment| fragment.is_product_root)
+        .flat_map(|fragment| fragment.roots.iter().copied())
+        .chain(
+            test_fragments
+                .iter()
+                .flat_map(|fragment| fragment.conservative_roots.iter().copied()),
+        );
+    let tests = reachable(test_roots, &test_adjacency);
 
     let library_root_definition_ids: FxHashSet<DefinitionId> = production_fragments
         .iter()
@@ -463,7 +473,17 @@ pub fn analyze_with_options<'a>(
             definition_fragments
                 .get(&edge.from)
                 .is_some_and(|fragment| {
-                    !fragment.non_production_consumer
+                    // Mixed normal/development dependency cycles cannot identify the
+                    // production package from metadata alone. Preserve library calls
+                    // outside test reachability rather than reporting their APIs dead.
+                    (!fragment.non_production_consumer
+                        || (!fragment.is_product_root
+                            && !fragment.test_surface
+                            && !tests.contains(&edge.from)
+                            && !equivalents
+                                .group(edge.from)
+                                .iter()
+                                .any(|equivalent| tests.contains(equivalent))))
                         && production_targets.contains(fragment.compilation_target.as_str())
                 })
                 && definition_crate_ids
@@ -484,16 +504,6 @@ pub fn analyze_with_options<'a>(
                 .flat_map(|fragment| fragment.conservative_roots.iter().copied()),
         );
     let production = reachable(production_roots, &production_adjacency);
-    let test_roots = test_fragments
-        .iter()
-        .filter(|fragment| fragment.is_product_root)
-        .flat_map(|fragment| fragment.roots.iter().copied())
-        .chain(
-            test_fragments
-                .iter()
-                .flat_map(|fragment| fragment.conservative_roots.iter().copied()),
-        );
-    let tests = reachable(test_roots, &test_adjacency);
 
     let mut explicitly_required: FxHashSet<DefinitionId> = production_fragments
         .iter()
@@ -1680,6 +1690,92 @@ mod tests {
                 edges: vec![Edge {
                     from: test_id("consumer_test"),
                     to: test_id("workspace_api"),
+                    kind: EdgeKind::Body,
+                }],
+                roots: vec![test_id("consumer_test")],
+                conservative_roots: vec![],
+                required_public_roots: vec![],
+            },
+            library_dependency,
+        ];
+
+        let findings =
+            analyze_with_tests(&production, &tests, &candidate_crates(), &HashSet::new());
+
+        assert_eq!(
+            finding_summaries(findings),
+            vec![(
+                FindingKind::UnnecessaryPublic,
+                "crate_helper".into(),
+                true,
+                false,
+            )]
+        );
+    }
+
+    #[test]
+    fn library_products_recognize_test_reachable_equivalent_callers() {
+        let mut production = fragments(
+            vec![
+                node("workspace_api", "lib", true),
+                node("crate_helper", "lib", true),
+            ],
+            vec![Edge {
+                from: test_id("workspace_api"),
+                to: test_id("crate_helper"),
+                kind: EdgeKind::Body,
+            }],
+        );
+        production.remove(0);
+        production[0].is_product_root = true;
+        production[0].product_root_kind = Some(ProductionTargetKind::Library);
+        let mut library_dependency = production[0].clone();
+        library_dependency.is_product_root = false;
+        library_dependency.product_root_kind = None;
+
+        let consumer = source(node("consumer", "consumer", false), 1);
+        let mut equivalent_consumer = source(node("test_consumer", "consumer", false), 1);
+        equivalent_consumer.name.clone_from(&consumer.name);
+        let tests = vec![
+            Fragment {
+                protocol_version: ProtocolVersion,
+                package_name: "consumer".into(),
+                crate_name: "consumer".into(),
+                compilation_target: "aarch64-apple-darwin".into(),
+                crate_id: test_id("consumer"),
+                crate_root: Some("consumer/src/lib.rs".into()),
+                is_product_root: false,
+                product_root_kind: None,
+                test_surface: false,
+                non_production_consumer: true,
+                definitions: vec![consumer],
+                edges: vec![Edge {
+                    from: test_id("consumer"),
+                    to: test_id("workspace_api"),
+                    kind: EdgeKind::Body,
+                }],
+                roots: vec![],
+                conservative_roots: vec![],
+                required_public_roots: vec![],
+            },
+            Fragment {
+                protocol_version: ProtocolVersion,
+                package_name: "consumer".into(),
+                crate_name: "consumer".into(),
+                compilation_target: "aarch64-apple-darwin".into(),
+                crate_id: test_id("consumer-test"),
+                crate_root: Some("consumer/src/lib.rs".into()),
+                is_product_root: true,
+                product_root_kind: None,
+                test_surface: true,
+                non_production_consumer: true,
+                definitions: vec![
+                    node("consumer_test", "consumer", false),
+                    equivalent_consumer,
+                ],
+                edges: vec![Edge {
+                    from: test_id("consumer_test"),
+                    to: test_id("test_consumer"),
                     kind: EdgeKind::Body,
                 }],
                 roots: vec![test_id("consumer_test")],

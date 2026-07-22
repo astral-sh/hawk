@@ -1093,6 +1093,89 @@ fn library_production_targets_preserve_production_consumers_in_dev_dependency_cy
     assert_eq!(dev_helper["test_only"], true);
 }
 
+fn assert_production_consumer_in_reversed_dev_dependency_cycle(support_uses_api: bool) {
+    let context = HawkTestContext::new("library_products");
+    let library_path = context.workspace().join("api/src/lib.rs");
+    let mut library = fs::read_to_string(&library_path).expect("read library source");
+    library.push_str(
+        "\npub fn cycle_api() {\n    cycle_helper();\n}\n\npub fn cycle_helper() {}\n\npub fn support_api() {}\n",
+    );
+    fs::write(library_path, library).expect("add library exports for dependency cycle");
+
+    let (support_dependencies, support_source) = if support_uses_api {
+        (
+            "internal-api = { path = \"../api\" }\n",
+            "pub fn fixture() { internal_api::support_api(); }\n",
+        )
+    } else {
+        ("", "pub fn fixture() {}\n")
+    };
+    add_library_support_package(&context, support_dependencies, support_source);
+
+    let consumer_manifest_path = context.workspace().join("consumer/Cargo.toml");
+    let consumer_manifest = fs::read_to_string(&consumer_manifest_path)
+        .expect("read consumer manifest")
+        .replace(
+            "[dependencies]\n",
+            "[dependencies]\nsupport = { path = \"../support\" }\n",
+        )
+        .replace(
+            "\n[dev-dependencies]\nsupport = { path = \"../support\" }\n",
+            "\n",
+        );
+    fs::write(consumer_manifest_path, consumer_manifest)
+        .expect("move support to production dependencies");
+
+    let support_manifest_path = context.workspace().join("support/Cargo.toml");
+    let mut support_manifest =
+        fs::read_to_string(&support_manifest_path).expect("read support manifest");
+    support_manifest.push_str("\n[dev-dependencies]\nconsumer = { path = \"../consumer\" }\n");
+    fs::write(support_manifest_path, support_manifest)
+        .expect("add development dependency back to the consumer");
+
+    let consumer_source_path = context.workspace().join("consumer/src/lib.rs");
+    let consumer_source = fs::read_to_string(&consumer_source_path)
+        .expect("read consumer source")
+        .replace(
+            "internal_api::used_across_workspace();",
+            "internal_api::cycle_api();\n    support::fixture();",
+        );
+    fs::write(consumer_source_path, consumer_source)
+        .expect("add production use from the cyclic consumer");
+    regenerate_fixture_lockfile(&context);
+
+    let output = context.run(&["--output-format=json"]);
+
+    context.assert_success(&output);
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout contains one JSON report");
+    let diagnostics = report["diagnostics"]
+        .as_array()
+        .expect("diagnostics is an array");
+    assert!(
+        !diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic["identity"]["item"] == "cycle_api"),
+        "a production consumer in the reversed development-dependency cycle was ignored: {report}"
+    );
+    let helper = diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic["identity"]["item"] == "cycle_helper")
+        .expect("production helper diagnostic");
+    assert_eq!(helper["code"], "hawk::unnecessary_public");
+    assert_eq!(helper["test_only"], false);
+}
+
+#[test]
+fn library_production_targets_preserve_consumers_in_reversed_dev_dependency_cycles() {
+    assert_production_consumer_in_reversed_dev_dependency_cycle(false);
+}
+
+#[test]
+fn library_production_targets_preserve_consumers_when_cyclic_support_also_uses_the_product() {
+    assert_production_consumer_in_reversed_dev_dependency_cycle(true);
+}
+
 #[test]
 fn library_production_targets_distinguish_external_packages_with_workspace_names() {
     let context = HawkTestContext::new("library_products");
