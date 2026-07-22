@@ -1455,6 +1455,84 @@ fn library_production_targets_ignore_disabled_optional_dependencies() {
 }
 
 #[test]
+fn library_production_targets_preserve_every_selected_feature_variant() {
+    let context = HawkTestContext::new("library_products");
+    let workspace_manifest_path = context.workspace().join("Cargo.toml");
+    let workspace_manifest = fs::read_to_string(&workspace_manifest_path)
+        .expect("read workspace manifest")
+        .replace(
+            "members = [\"api\", \"consumer\"]",
+            "members = [\"api\", \"consumer\", \"feature-consumer\"]",
+        );
+    fs::write(workspace_manifest_path, workspace_manifest).expect("add feature-enabled consumer");
+
+    let library_manifest_path = context.workspace().join("api/Cargo.toml");
+    let mut library_manifest =
+        fs::read_to_string(&library_manifest_path).expect("read library manifest");
+    library_manifest.push_str("\n[features]\ndefault = []\nextra = []\n");
+    fs::write(library_manifest_path, library_manifest).expect("add optional library feature");
+
+    let library_path = context.workspace().join("api/src/lib.rs");
+    let mut library = fs::read_to_string(&library_path).expect("read library source");
+    library.push_str(
+        "\n#[cfg(feature = \"extra\")]\npub fn feature_api() {\n    feature_helper();\n}\n\n#[cfg(feature = \"extra\")]\npub fn feature_helper() {}\n",
+    );
+    fs::write(library_path, library).expect("add feature-enabled library declarations");
+
+    let consumer_manifest_path = context.workspace().join("consumer/Cargo.toml");
+    let consumer_manifest = fs::read_to_string(&consumer_manifest_path)
+        .expect("read consumer manifest")
+        .replace(
+            "internal-api = { path = \"../api\" }",
+            "internal-api = { path = \"../api\", default-features = false }",
+        );
+    fs::write(consumer_manifest_path, consumer_manifest)
+        .expect("disable optional API features in the first selected product");
+
+    let feature_consumer = context.workspace().join("feature-consumer");
+    fs::create_dir_all(feature_consumer.join("src"))
+        .expect("create feature-enabled consumer package");
+    fs::write(
+        feature_consumer.join("Cargo.toml"),
+        "[package]\nname = \"feature-consumer\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[dependencies]\ninternal-api = { path = \"../api\", features = [\"extra\"] }\n",
+    )
+    .expect("write feature-enabled consumer manifest");
+    fs::write(
+        feature_consumer.join("src/lib.rs"),
+        "pub fn consume_extra() {\n    internal_api::feature_api();\n}\n",
+    )
+    .expect("write feature-enabled consumer source");
+
+    fs::write(
+        context.workspace().join("hawk.toml"),
+        "[[production]]\npackage = \"consumer\"\nlib = \"consumer\"\nreason = \"product with optional API features disabled\"\n\n[[production]]\npackage = \"internal-api\"\nlib = \"internal_api\"\nreason = \"product with every optional API feature enabled\"\n",
+    )
+    .expect("select both library feature variants");
+    regenerate_fixture_lockfile(&context);
+
+    let output = context.run(&["--output-format=json"]);
+
+    context.assert_success(&output);
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout contains one JSON report");
+    let diagnostics = report["diagnostics"]
+        .as_array()
+        .expect("diagnostics is an array");
+    assert!(
+        !diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic["identity"]["item"] == "feature_api"),
+        "a feature-enabled API used across the workspace was diagnosed: {report}"
+    );
+    let helper = diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic["identity"]["item"] == "feature_helper")
+        .expect("feature-enabled helper diagnostic");
+    assert_eq!(helper["code"], "hawk::unnecessary_public");
+    assert_eq!(helper["test_only"], false);
+}
+
+#[test]
 fn library_production_targets_support_explicit_rlib_crate_types() {
     let context = HawkTestContext::new("library_products");
     let library_manifest_path = context.workspace().join("api/Cargo.toml");

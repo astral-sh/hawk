@@ -1423,26 +1423,27 @@ impl InstrumentedCargo<'_> {
                 continue;
             };
             let crate_name = library.replace('-', "_");
-            let fragment = production
-                .iter_mut()
-                .find(|fragment| {
-                    fragment.package_name == product.package
-                        && fragment.crate_name == crate_name
-                        && fragment.compilation_target
-                            == self.args.target.as_deref().unwrap_or(self.toolchain.host())
-                        && fragment.product_root_kind
-                            != Some(protocol::ProductionTargetKind::Binary)
-                })
-                .with_context(|| {
-                    format!(
-                        "no instrumented fragment was emitted for configured library `{}` in package `{}`",
-                        library, product.package
-                    )
-                })?;
-            // This library may already have been compiled as another product's dependency.
-            // Promote the retained fragment without invalidating the shared Cargo fingerprint.
-            fragment.is_product_root = true;
-            fragment.product_root_kind = Some(protocol::ProductionTargetKind::Library);
+            let mut found = false;
+            for fragment in production.iter_mut().filter(|fragment| {
+                fragment.package_name == product.package
+                    && fragment.crate_name == crate_name
+                    && fragment.compilation_target
+                        == self.args.target.as_deref().unwrap_or(self.toolchain.host())
+                    && fragment.product_root_kind != Some(protocol::ProductionTargetKind::Binary)
+            }) {
+                // Other products can compile this library with different feature sets before
+                // Cargo checks the selected product itself. Retain every matching variant.
+                fragment.is_product_root = true;
+                fragment.product_root_kind = Some(protocol::ProductionTargetKind::Library);
+                found = true;
+            }
+            if !found {
+                bail!(
+                    "no instrumented fragment was emitted for configured library `{}` in package `{}`",
+                    library,
+                    product.package
+                );
+            }
         }
 
         Ok(CollectedFragments {
