@@ -69,6 +69,7 @@ pub struct Fragment {
     pub protocol_version: ProtocolVersion,
     pub package_name: String,
     pub crate_name: String,
+    pub compilation_target: String,
     pub crate_id: DefinitionId,
     pub crate_root: Option<String>,
     pub is_product_root: bool,
@@ -446,10 +447,13 @@ pub fn analyze_with_options<'a>(
     let workspace_library_roots = edges
         .iter()
         .filter(|edge| {
-            definition_crate_ids
+            definition_fragments
                 .get(&edge.from)
-                .zip(definition_crate_ids.get(&edge.to))
-                .is_some_and(|(source, target)| source != target)
+                .is_some_and(|fragment| !fragment.test_surface)
+                && definition_crate_ids
+                    .get(&edge.from)
+                    .zip(definition_crate_ids.get(&edge.to))
+                    .is_some_and(|(source, target)| source != target)
         })
         .flat_map(|edge| std::iter::once(edge.to).chain(equivalents.group(edge.to).iter().copied()))
         .filter(|target| library_root_definition_ids.contains(target));
@@ -1364,6 +1368,7 @@ mod tests {
                 protocol_version: ProtocolVersion,
                 package_name: "app".into(),
                 crate_name: "app".into(),
+                compilation_target: "aarch64-apple-darwin".into(),
                 crate_id: test_id("app"),
                 crate_root: Some("app/src/main.rs".into()),
                 is_product_root: true,
@@ -1379,6 +1384,7 @@ mod tests {
                 protocol_version: ProtocolVersion,
                 package_name: "lib".into(),
                 crate_name: "lib".into(),
+                compilation_target: "aarch64-apple-darwin".into(),
                 crate_id: test_id("lib"),
                 crate_root: Some("lib/src/lib.rs".into()),
                 is_product_root: false,
@@ -1399,6 +1405,7 @@ mod tests {
                 protocol_version: ProtocolVersion,
                 package_name: "integration_test".into(),
                 crate_name: "integration_test".into(),
+                compilation_target: "aarch64-apple-darwin".into(),
                 crate_id: test_id("integration_test"),
                 crate_root: Some("integration_test/tests/test.rs".into()),
                 is_product_root: true,
@@ -1418,6 +1425,7 @@ mod tests {
                 protocol_version: ProtocolVersion,
                 package_name: "lib".into(),
                 crate_name: "lib".into(),
+                compilation_target: "aarch64-apple-darwin".into(),
                 crate_id: test_id("lib"),
                 crate_root: Some("lib/src/lib.rs".into()),
                 is_product_root: false,
@@ -1538,6 +1546,7 @@ mod tests {
             protocol_version: ProtocolVersion,
             package_name: "consumer".into(),
             crate_name: "consumer".into(),
+            compilation_target: "aarch64-apple-darwin".into(),
             crate_id: test_id("consumer"),
             crate_root: Some("consumer/src/lib.rs".into()),
             is_product_root: false,
@@ -1568,6 +1577,63 @@ mod tests {
                 ),
                 (FindingKind::DeadPublic, "unused".into(), false, false),
             ]
+        );
+    }
+
+    #[test]
+    fn library_products_keep_test_only_callers_out_of_production_reachability() {
+        let mut production = fragments(
+            vec![
+                node("workspace_api", "lib", true),
+                node("crate_helper", "lib", true),
+            ],
+            vec![Edge {
+                from: test_id("workspace_api"),
+                to: test_id("crate_helper"),
+                kind: EdgeKind::Body,
+            }],
+        );
+        production.remove(0);
+        production[0].is_product_root = true;
+        production[0].product_root_kind = Some(ProductionTargetKind::Library);
+        let mut library_dependency = production[0].clone();
+        library_dependency.is_product_root = false;
+        library_dependency.product_root_kind = None;
+        let tests = vec![
+            Fragment {
+                protocol_version: ProtocolVersion,
+                package_name: "consumer".into(),
+                crate_name: "consumer".into(),
+                compilation_target: "aarch64-apple-darwin".into(),
+                crate_id: test_id("consumer"),
+                crate_root: Some("consumer/src/lib.rs".into()),
+                is_product_root: true,
+                product_root_kind: None,
+                test_surface: true,
+                definitions: vec![node("consumer_test", "consumer", false)],
+                edges: vec![Edge {
+                    from: test_id("consumer_test"),
+                    to: test_id("workspace_api"),
+                    kind: EdgeKind::Body,
+                }],
+                roots: vec![test_id("consumer_test")],
+                conservative_roots: vec![],
+                required_public_roots: vec![],
+            },
+            library_dependency,
+        ];
+
+        let findings =
+            analyze_with_tests(&production, &tests, &candidate_crates(), &HashSet::new());
+
+        assert_eq!(
+            finding_summaries(findings),
+            vec![(
+                FindingKind::UnnecessaryPublic,
+                "crate_helper".into(),
+                true,
+                false,
+            )]
         );
     }
 
@@ -2535,6 +2601,7 @@ mod tests {
             protocol_version: ProtocolVersion,
             package_name: "lib".into(),
             crate_name: "lib".into(),
+            compilation_target: "aarch64-apple-darwin".into(),
             crate_id: test_id("lib-test"),
             crate_root: Some("lib/src/lib.rs".into()),
             is_product_root: false,
@@ -2645,6 +2712,7 @@ mod tests {
             protocol_version: ProtocolVersion,
             package_name: "test_support".into(),
             crate_name: "test_support".into(),
+            compilation_target: "aarch64-apple-darwin".into(),
             crate_id: test_id("test_support"),
             crate_root: Some("test_support/src/lib.rs".into()),
             is_product_root: false,
@@ -2689,6 +2757,7 @@ mod tests {
             protocol_version: ProtocolVersion,
             package_name: "test_support".into(),
             crate_name: "test_support".into(),
+            compilation_target: "aarch64-apple-darwin".into(),
             crate_id: test_id("test_support"),
             crate_root: Some("test_support/src/lib.rs".into()),
             is_product_root: false,
@@ -2739,6 +2808,7 @@ mod tests {
                 protocol_version: ProtocolVersion,
                 package_name: package_name.into(),
                 crate_name: "lib".into(),
+                compilation_target: "aarch64-apple-darwin".into(),
                 crate_id: test_id(&format!("{package_name}-bin")),
                 crate_root: Some(other_root.into()),
                 is_product_root: true,
@@ -2796,6 +2866,7 @@ mod tests {
                 protocol_version: ProtocolVersion,
                 package_name: "lib".into(),
                 crate_name: "lib".into(),
+                compilation_target: "aarch64-apple-darwin".into(),
                 crate_id: test_id("lib-test"),
                 crate_root: Some("lib/src/lib.rs".into()),
                 is_product_root: false,

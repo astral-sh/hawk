@@ -161,6 +161,10 @@ reports `hawk::unknown_item`. If an override without `kind` identifies
 multiple same-named declarations, Hawk reports `hawk::ambiguous_item` and
 suppresses none of them.
 
+When an audit is limited to selected library targets, overrides for other
+compiled workspace crates are ignored. Overrides naming an unknown crate or an
+unknown item in an audited crate still report `hawk::unknown_item`.
+
 Definitions from the same Cargo package with the same crate, diagnostic path,
 and item kind are one logical override identity even when cfg alternatives
 compile them from different source locations. An override applies to every

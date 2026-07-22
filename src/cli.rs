@@ -519,6 +519,7 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
                 &analysis_target,
                 &production_fragments,
                 &test_fragments,
+                &candidate_crates,
                 analyze_with_options(
                     &production_fragments,
                     &test_fragments,
@@ -629,6 +630,7 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
         &analysis_target,
         &production_fragments,
         &test_fragments,
+        &candidate_crates,
         analyze_with_options(
             &production_fragments,
             &test_fragments,
@@ -733,7 +735,7 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
         }
         OutputFormat::Json => {
             let output = serde_json::json!({
-                "schema_version": 3,
+                "schema_version": 4,
                 "summary": {
                     "diagnostic_count": diagnostic_count,
                     "target": args.target.as_deref().unwrap_or(toolchain.host()),
@@ -1380,6 +1382,8 @@ impl InstrumentedCargo<'_> {
                 .find(|fragment| {
                     fragment.package_name == product.package
                         && fragment.crate_name == crate_name
+                        && fragment.compilation_target
+                            == self.args.target.as_deref().unwrap_or(self.toolchain.host())
                         && fragment.product_root_kind
                             != Some(protocol::ProductionTargetKind::Binary)
                 })
@@ -2033,6 +2037,7 @@ mod tests {
             protocol_version: crate::protocol::ProtocolVersion,
             package_name: package_name.into(),
             crate_name: "renamed_library".into(),
+            compilation_target: "aarch64-apple-darwin".into(),
             crate_id: test_id(package_name),
             crate_root: None,
             is_product_root: false,

@@ -586,6 +586,7 @@ impl Config {
         target: &AnalysisTarget,
         production_fragments: &[Fragment],
         test_fragments: &[Fragment],
+        candidate_crates: &HashSet<String>,
         findings: Vec<Finding<'findings>>,
     ) -> AppliedFindings<'findings, 'config> {
         let known_items: HashSet<KnownItemIdentity<'_>> = production_fragments
@@ -609,6 +610,12 @@ impl Config {
             .overrides
             .iter()
             .filter(|entry| entry.applies_to(target))
+            .filter(|entry| {
+                candidate_crates.contains(&entry.crate_name)
+                    || !logical_items
+                        .iter()
+                        .any(|item| item.crate_name == entry.crate_name)
+            })
         {
             let matching_items = logical_items
                 .iter()
@@ -848,6 +855,7 @@ mod tests {
             protocol_version: crate::protocol::ProtocolVersion,
             package_name: "library".into(),
             crate_name: "library".into(),
+            compilation_target: "aarch64-apple-darwin".into(),
             crate_id: test_id("library"),
             crate_root: Some("library/src/lib.rs".into()),
             is_product_root: false,
@@ -1040,11 +1048,79 @@ reason = "known retained public surface"
             &target("aarch64-apple-darwin", &["unix"]),
             &fragments,
             &[],
+            &candidate_crates(),
             findings,
         );
 
         assert!(applied.findings.is_empty());
         assert!(applied.config_diagnostics.is_empty());
+    }
+
+    #[test]
+    fn overrides_outside_the_candidate_crates_are_ignored() {
+        let directory = tempfile::tempdir().expect("temporary configuration directory");
+        let path = directory.path().join("hawk.toml");
+        std::fs::write(
+            &path,
+            r#"
+[[override]]
+lint = "hawk::dead_public"
+crate = "library"
+item = "unused"
+level = "expect"
+reason = "separate library audit"
+"#,
+        )
+        .expect("write configuration");
+        let config = Config::load(directory.path(), Some(&path)).expect("load configuration");
+        let fragments = vec![fragment()];
+        let candidates = HashSet::from(["selected_library".to_owned()]);
+
+        let applied = config.apply(
+            &target("aarch64-apple-darwin", &["unix"]),
+            &fragments,
+            &[],
+            &candidates,
+            vec![],
+        );
+
+        assert!(applied.findings.is_empty());
+        assert!(applied.config_diagnostics.is_empty());
+    }
+
+    #[test]
+    fn unknown_crate_overrides_are_still_reported_outside_the_candidate_crates() {
+        let directory = tempfile::tempdir().expect("temporary configuration directory");
+        let path = directory.path().join("hawk.toml");
+        std::fs::write(
+            &path,
+            r#"
+[[override]]
+lint = "hawk::dead_public"
+crate = "unknown_library"
+item = "unused"
+level = "expect"
+reason = "detect misspelled crate selectors"
+"#,
+        )
+        .expect("write configuration");
+        let config = Config::load(directory.path(), Some(&path)).expect("load configuration");
+        let fragments = vec![fragment()];
+        let candidates = HashSet::from(["selected_library".to_owned()]);
+
+        let applied = config.apply(
+            &target("aarch64-apple-darwin", &["unix"]),
+            &fragments,
+            &[],
+            &candidates,
+            vec![],
+        );
+
+        assert_eq!(applied.config_diagnostics.len(), 1);
+        assert_eq!(
+            applied.config_diagnostics[0].kind,
+            ConfigDiagnosticKind::UnknownItem
+        );
     }
 
     #[test]
@@ -1097,6 +1173,7 @@ reason = "retain every compiled cfg alternative"
             &target("aarch64-apple-darwin", &["unix"]),
             &production_fragments,
             &test_fragments,
+            &candidate_crates(),
             findings,
         );
 
@@ -1128,6 +1205,7 @@ reason = "detect stale selectors"
             &target("aarch64-apple-darwin", &["unix"]),
             &fragments,
             &[],
+            &candidate_crates(),
             findings,
         );
 
@@ -1164,6 +1242,7 @@ reason = "ambiguous Rust namespace"
             &target("aarch64-apple-darwin", &["unix"]),
             &fragments,
             &[],
+            &candidate_crates(),
             findings,
         );
 
@@ -1200,6 +1279,7 @@ reason = "retain the type alias"
             &target("aarch64-apple-darwin", &["unix"]),
             &fragments,
             &[],
+            &candidate_crates(),
             findings,
         );
 
@@ -1235,6 +1315,7 @@ reason = "only retained on Windows"
             &target("x86_64-pc-windows-msvc", &["windows"]),
             &fragments,
             &[],
+            &candidate_crates(),
             analyze(&fragments, &[], &candidate_crates(), &HashSet::new()),
         );
         assert!(windows.findings.is_empty());
@@ -1244,6 +1325,7 @@ reason = "only retained on Windows"
             &target("aarch64-apple-darwin", &["unix"]),
             &fragments,
             &[],
+            &candidate_crates(),
             analyze(&fragments, &[], &candidate_crates(), &HashSet::new()),
         );
         assert_eq!(unix.findings.len(), 1);
@@ -1275,6 +1357,7 @@ reason = "only compiled on Windows"
             &target("aarch64-apple-darwin", &["unix"]),
             &fragments,
             &[],
+            &candidate_crates(),
             findings,
         );
 
@@ -1303,6 +1386,7 @@ reason = "generated public declarations"
             &target("aarch64-apple-darwin", &["unix"]),
             &fragments,
             &[],
+            &candidate_crates(),
             analyze(&fragments, &[], &candidate_crates(), &HashSet::new()),
         );
 
@@ -1338,6 +1422,7 @@ reason = "not actually a module"
             &target("aarch64-apple-darwin", &["unix"]),
             &fragments,
             &[],
+            &candidate_crates(),
             analyze(&fragments, &[], &candidate_crates(), &HashSet::new()),
         );
 
@@ -1365,6 +1450,7 @@ reason = "generated source file"
             &target("aarch64-apple-darwin", &["unix"]),
             &fragments,
             &[],
+            &candidate_crates(),
             analyze(&fragments, &[], &candidate_crates(), &HashSet::new()),
         );
 
@@ -1401,6 +1487,7 @@ reason = "generated only on Windows"
             &target("x86_64-pc-windows-msvc", &["windows"]),
             &fragments,
             &[],
+            &candidate_crates(),
             analyze(&fragments, &[], &candidate_crates(), &HashSet::new()),
         );
         assert_eq!(windows.findings.len(), 2);
@@ -1409,6 +1496,7 @@ reason = "generated only on Windows"
             &target("aarch64-apple-darwin", &["unix"]),
             &fragments,
             &[],
+            &candidate_crates(),
             analyze(&fragments, &[], &candidate_crates(), &HashSet::new()),
         );
         assert_eq!(unix.findings.len(), 4);

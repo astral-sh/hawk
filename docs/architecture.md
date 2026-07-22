@@ -93,7 +93,8 @@ reason = "internal library consumed only within this workspace"
 
 Binary entries seed the production graph at their executable entry points.
 Library entries instead seed reachability from their private implementation and
-actual cross-crate workspace callers; their public declarations remain
+ordinary cross-crate workspace callers; references originating in a test harness
+contribute only to non-production reachability. Their public declarations remain
 diagnostic candidates. When every entry selects a library, findings are scoped
 to the configured library crates. Hawk also
 compiles workspace non-production targets under
@@ -177,8 +178,8 @@ not findings, during the collection phase.
 The wrapper records a `Fragment` for each compiled workspace crate. A fragment
 contains:
 
-- the owning Cargo package name and rustc crate identity, which are tracked
-  separately;
+- the owning Cargo package name, rustc crate identity, and compilation target,
+  which distinguish target libraries from host-side build dependencies;
 - definitions, including source location, item kind, lexical module scope,
   and whether the item is a public-surface, restricted-visibility, or
   crate-visible candidate;

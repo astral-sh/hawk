@@ -816,11 +816,142 @@ fn library_production_targets_are_described_in_json_reports() {
     context.assert_success(&output);
     let report: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("stdout contains one JSON report");
+    assert_eq!(report["schema_version"], 4);
     assert_eq!(
         report["summary"]["production"],
         serde_json::json!([{"package": "internal-api", "library": "internal_api"}])
     );
     assert_eq!(report["summary"]["diagnostic_count"], 2);
+}
+
+#[test]
+fn library_production_targets_preserve_test_only_caller_classification() {
+    let context = HawkTestContext::new("library_products");
+    let library_path = context.workspace().join("api/src/lib.rs");
+    let mut library = fs::read_to_string(&library_path).expect("read library source");
+    library.push_str(
+        "\npub fn used_only_by_tests() {\n    used_only_within_tests();\n}\n\npub fn used_only_within_tests() {}\n",
+    );
+    fs::write(library_path, library).expect("add test-only library exports");
+    let consumer_path = context.workspace().join("consumer/src/lib.rs");
+    let mut consumer = fs::read_to_string(&consumer_path).expect("read consumer source");
+    consumer.push_str(
+        "\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn uses_library() {\n        internal_api::used_only_by_tests();\n    }\n}\n",
+    );
+    fs::write(consumer_path, consumer).expect("add test-only library caller");
+
+    let output = context.run(&["--output-format=json"]);
+
+    context.assert_success(&output);
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout contains one JSON report");
+    let diagnostic = report["diagnostics"]
+        .as_array()
+        .expect("diagnostics is an array")
+        .iter()
+        .find(|diagnostic| diagnostic["identity"]["item"] == "used_only_within_tests")
+        .expect("test-only helper diagnostic");
+    assert_eq!(diagnostic["code"], "hawk::unnecessary_public");
+    assert_eq!(diagnostic["test_only"], true);
+}
+
+#[test]
+fn library_production_targets_ignore_unselected_workspace_expectations() {
+    let context = HawkTestContext::new("library_products");
+    let consumer_path = context.workspace().join("consumer/src/lib.rs");
+    let mut consumer = fs::read_to_string(&consumer_path).expect("read consumer source");
+    consumer.push_str("\npub fn unused_consumer() {}\n");
+    fs::write(consumer_path, consumer).expect("add unselected consumer export");
+    let configuration_path = context.workspace().join("hawk.toml");
+    let mut configuration =
+        fs::read_to_string(&configuration_path).expect("read production configuration");
+    configuration.push_str(
+        "\n[[override]]\nlint = \"hawk::dead_public\"\ncrate = \"consumer\"\nitem = \"unused_consumer\"\nlevel = \"expect\"\nreason = \"separate consumer package expectation\"\n",
+    );
+    fs::write(configuration_path, configuration).expect("add out-of-scope expectation");
+
+    let output = context.run(&["-A", "warnings", "-D", "hawk::unfulfilled_expectation"]);
+
+    context.assert_success(&output);
+}
+
+#[test]
+fn library_production_targets_select_the_requested_compilation_target() {
+    let rustc_version = Command::new("rustc")
+        .arg("-vV")
+        .output()
+        .expect("read Rust compiler version");
+    assert!(rustc_version.status.success());
+    let rustc_version = String::from_utf8(rustc_version.stdout).expect("Rust compiler version");
+    let host_target = rustc_version
+        .lines()
+        .find_map(|line| line.strip_prefix("host: "))
+        .expect("Rust compiler host target");
+    let host_arch = host_target
+        .split_once('-')
+        .expect("host target has an architecture")
+        .0;
+    let installed_targets = Command::new("rustup")
+        .args(["target", "list", "--installed"])
+        .output()
+        .expect("list installed Rust targets");
+    assert!(installed_targets.status.success());
+    let installed_targets =
+        String::from_utf8(installed_targets.stdout).expect("installed Rust targets");
+    let Some(target) = installed_targets.lines().find(|target| {
+        target
+            .split_once('-')
+            .is_some_and(|(arch, _)| arch != host_arch)
+    }) else {
+        return;
+    };
+    let target_arch = target
+        .split_once('-')
+        .expect("target has an architecture")
+        .0;
+    let context = HawkTestContext::new("library_products");
+    fs::write(
+        context.workspace().join("api/src/lib.rs"),
+        format!(
+            "#[cfg(target_arch = \"{host_arch}\")]\npub fn host_api() {{ host_helper(); }}\n#[cfg(target_arch = \"{host_arch}\")]\npub fn host_helper() {{}}\n\n#[cfg(target_arch = \"{target_arch}\")]\npub fn target_api() {{ target_helper(); }}\n#[cfg(target_arch = \"{target_arch}\")]\npub fn target_helper() {{}}\n\npub fn unused() {{}}\n"
+        ),
+    )
+    .expect("write target-specific library source");
+    fs::write(
+        context.workspace().join("consumer/src/lib.rs"),
+        "pub fn consume() { internal_api::target_api(); }\n",
+    )
+    .expect("write target-specific consumer source");
+    fs::write(
+        context.workspace().join("consumer/build.rs"),
+        "fn main() { internal_api::host_api(); }\n",
+    )
+    .expect("write host-only build script");
+    let manifest_path = context.workspace().join("consumer/Cargo.toml");
+    let mut manifest = fs::read_to_string(&manifest_path).expect("read consumer manifest");
+    manifest.push_str("\n[build-dependencies]\ninternal-api = { path = \"../api\" }\n");
+    fs::write(manifest_path, manifest).expect("add host-only library dependency");
+    let configuration_path = context.workspace().join("hawk.toml");
+    let mut configuration =
+        fs::read_to_string(&configuration_path).expect("read production configuration");
+    configuration.push_str(
+        "\n[[production]]\npackage = \"consumer\"\nlib = \"consumer\"\nreason = \"cross-target workspace library consumer\"\n",
+    );
+    fs::write(configuration_path, configuration).expect("add consumer library product");
+
+    let output = context.run(&["--target", target, "--output-format=json"]);
+
+    context.assert_success(&output);
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout contains one JSON report");
+    let helper = report["diagnostics"]
+        .as_array()
+        .expect("diagnostics is an array")
+        .iter()
+        .find(|diagnostic| diagnostic["identity"]["item"] == "target_helper")
+        .expect("target helper diagnostic");
+    assert_eq!(helper["code"], "hawk::unnecessary_public");
+    assert_eq!(helper["test_only"], false);
 }
 
 #[test]
@@ -1123,7 +1254,7 @@ fn emits_versioned_json_diagnostics_and_keeps_cargo_output_on_stderr() {
     );
     let report: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("stdout contains one JSON report");
-    assert_eq!(report["schema_version"], 3);
+    assert_eq!(report["schema_version"], 4);
     assert_eq!(report["summary"]["diagnostic_count"], 41);
     assert_eq!(
         report["summary"]["production"],
@@ -1259,7 +1390,7 @@ fn emits_an_empty_json_report_when_all_warnings_are_allowed() {
     context.assert_success(&output);
     let report: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("stdout contains one JSON report");
-    assert_eq!(report["schema_version"], 3);
+    assert_eq!(report["schema_version"], 4);
     assert_eq!(report["summary"]["diagnostic_count"], 0);
     assert_eq!(report["diagnostics"], serde_json::json!([]));
 }
@@ -1543,7 +1674,7 @@ fn json_byte_offsets_delete_unicode_declarations() {
     context.assert_success(&output);
     let report: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("stdout contains one JSON report");
-    assert_eq!(report["schema_version"], 3);
+    assert_eq!(report["schema_version"], 4);
     let diagnostic = report["diagnostics"]
         .as_array()
         .expect("diagnostics is an array")
@@ -1605,7 +1736,7 @@ fn json_still_emits_a_report_when_stderr_is_closed() {
     assert!(output.stderr.is_empty());
     let report: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("stdout contains one JSON report");
-    assert_eq!(report["schema_version"], 3);
+    assert_eq!(report["schema_version"], 4);
 }
 
 #[cfg(unix)]
@@ -2339,7 +2470,7 @@ fn reports_only_dead_public_findings_as_json() {
     context.assert_success(&output);
     let report: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("stdout contains one JSON report");
-    assert_eq!(report["schema_version"], 3);
+    assert_eq!(report["schema_version"], 4);
     assert_eq!(report["summary"]["diagnostic_count"], 17);
     let diagnostics = report["diagnostics"]
         .as_array()
