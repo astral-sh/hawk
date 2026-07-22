@@ -40,6 +40,9 @@ retains `pub`. When every configured production target is a library, diagnostics
 are limited to those selected library crates; other workspace crates are
 compiled as consumers without becoming audit targets.
 
+Ordinary library targets can use explicit Rust library crate types, including
+`crate-type = ["rlib"]`.
+
 Every package and target must belong to the selected Cargo workspace. At least
 one production target must apply to the analyzed target.
 

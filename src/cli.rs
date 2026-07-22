@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use anstyle::Style;
 use anyhow::{Context, Result, bail};
-use cargo_metadata::{MetadataCommand, TargetKind};
+use cargo_metadata::{DependencyKind, MetadataCommand, Target, TargetKind};
 use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use tempfile::NamedTempFile;
 
@@ -401,6 +401,8 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
     } else {
         workspace_crates
     };
+    let production_consumer_packages =
+        production_workspace_packages(&metadata, &production_products, &analysis_target);
     let doctest_packages = config
         .doctest_packages()
         .map(|packages| {
@@ -498,6 +500,7 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
             CollectionOptions::new(config.preserve_uniform_field_visibility())
         },
         doctest_packages: doctest_packages.as_deref(),
+        production_consumer_packages: &production_consumer_packages,
     };
     let mut production_fragments = Vec::new();
     let mut test_fragments = Vec::new();
@@ -955,6 +958,7 @@ struct InstrumentedCargo<'a> {
     toolchain: &'a RustToolchain,
     collection_options: CollectionOptions,
     doctest_packages: Option<&'a [String]>,
+    production_consumer_packages: &'a HashSet<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1372,6 +1376,15 @@ impl InstrumentedCargo<'_> {
         )?;
 
         let mut production = read_fragments(production_graph_dir)?;
+        let mut non_production = read_fragments(non_production_graph_dir)?;
+        for fragment in production.iter_mut().chain(&mut non_production) {
+            if !self
+                .production_consumer_packages
+                .contains(&fragment.package_name)
+            {
+                fragment.non_production_consumer = true;
+            }
+        }
         for product in production_products {
             let ProductionProduct::Library(library) = product.product else {
                 continue;
@@ -1397,17 +1410,11 @@ impl InstrumentedCargo<'_> {
             // Promote the retained fragment without invalidating the shared Cargo fingerprint.
             fragment.is_product_root = true;
             fragment.product_root_kind = Some(protocol::ProductionTargetKind::Library);
-            fragment.roots = fragment
-                .definitions
-                .iter()
-                .filter(|definition| !definition.public_api)
-                .map(|definition| definition.id)
-                .collect();
         }
 
         Ok(CollectedFragments {
             production,
-            non_production: read_fragments(non_production_graph_dir)?,
+            non_production,
         })
     }
 }
@@ -1639,9 +1646,7 @@ fn fix_packages(metadata: &cargo_metadata::Metadata, fix_plan: &FixPlan) -> Resu
     let mut packages = Vec::new();
     for package in &metadata.packages {
         for target in &package.targets {
-            if target.kind.contains(&TargetKind::Lib)
-                && remaining.remove(&target.name.replace('-', "_"))
-            {
+            if is_library_target(target) && remaining.remove(&target.name.replace('-', "_")) {
                 packages.push(package.name.to_string());
             }
         }
@@ -1655,11 +1660,24 @@ fn fix_packages(metadata: &cargo_metadata::Metadata, fix_plan: &FixPlan) -> Resu
     Ok(packages)
 }
 
+fn is_library_target(target: &Target) -> bool {
+    target.kind.iter().any(|kind| {
+        matches!(
+            kind,
+            TargetKind::Lib
+                | TargetKind::RLib
+                | TargetKind::DyLib
+                | TargetKind::CDyLib
+                | TargetKind::StaticLib
+        )
+    })
+}
+
 fn workspace_library_crates(metadata: &cargo_metadata::Metadata) -> Result<HashSet<String>> {
     let mut packages_by_crate: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for package in metadata.workspace_packages() {
         for target in &package.targets {
-            if target.kind.contains(&TargetKind::Lib) {
+            if is_library_target(target) {
                 packages_by_crate
                     .entry(target.name.replace('-', "_"))
                     .or_default()
@@ -1690,6 +1708,55 @@ fn workspace_library_crates(metadata: &cargo_metadata::Metadata) -> Result<HashS
     }
 
     Ok(packages_by_crate.into_keys().collect())
+}
+
+fn production_workspace_packages(
+    metadata: &cargo_metadata::Metadata,
+    production_products: &[ProductionSelection<'_>],
+    analysis_target: &AnalysisTarget,
+) -> HashSet<String> {
+    let packages: HashSet<&str> = metadata
+        .workspace_packages()
+        .iter()
+        .map(|package| package.name.as_str())
+        .collect();
+    let mut incoming = HashSet::new();
+    let mut normal_dependencies: HashMap<&str, Vec<&str>> = HashMap::new();
+    for package in metadata.workspace_packages() {
+        for dependency in &package.dependencies {
+            if !packages.contains(dependency.name.as_str())
+                || dependency
+                    .target
+                    .as_ref()
+                    .is_some_and(|platform| !analysis_target.matches_platform(platform))
+            {
+                continue;
+            }
+            incoming.insert(dependency.name.as_str());
+            if dependency.kind == DependencyKind::Normal {
+                normal_dependencies
+                    .entry(package.name.as_str())
+                    .or_default()
+                    .push(dependency.name.as_str());
+            }
+        }
+    }
+
+    let mut pending: Vec<&str> = packages
+        .iter()
+        .copied()
+        .filter(|package| !incoming.contains(package))
+        .chain(production_products.iter().map(|product| product.package))
+        .collect();
+    let mut production_packages = HashSet::new();
+    while let Some(package) = pending.pop() {
+        if production_packages.insert(package.to_owned())
+            && let Some(dependencies) = normal_dependencies.get(package)
+        {
+            pending.extend(dependencies);
+        }
+    }
+    production_packages
 }
 
 fn validate_excluded_crates(
@@ -1736,15 +1803,13 @@ fn validate_product(
     product: &ProductionProduct,
 ) -> Result<()> {
     let package = workspace_package(metadata, package)?;
-    let target_kind = match product {
-        ProductionProduct::Binary(_) => TargetKind::Bin,
-        ProductionProduct::Library(_) => TargetKind::Lib,
-    };
-    if !package
-        .targets
-        .iter()
-        .any(|target| target.name == product.name() && target.kind.contains(&target_kind))
-    {
+    if !package.targets.iter().any(|target| {
+        target.name == product.name()
+            && match product {
+                ProductionProduct::Binary(_) => target.kind.contains(&TargetKind::Bin),
+                ProductionProduct::Library(_) => is_library_target(target),
+            }
+    }) {
         bail!(
             "package `{}` has no {} target `{}`",
             package.name,
@@ -2043,6 +2108,7 @@ mod tests {
             is_product_root: false,
             product_root_kind: None,
             test_surface: false,
+            non_production_consumer: false,
             definitions,
             edges: vec![],
             roots: vec![],

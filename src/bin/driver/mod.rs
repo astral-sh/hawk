@@ -391,6 +391,9 @@ fn emit_fragment(
     };
     let root_kind =
         (is_product_root && !is_non_production).then_some(protocol::ProductionTargetKind::Binary);
+    let non_production_consumer = test_surface
+        || is_non_production && is_product_root
+        || !is_product_root && tcx.entry_fn(()).is_some();
     let suffix = crate_id.to_string();
     let fragment = collect_fragment(
         tcx,
@@ -400,6 +403,7 @@ fn emit_fragment(
         is_product_root,
         root_kind,
         test_surface,
+        non_production_consumer,
         collection_options,
     );
     let path = output_dir.join(format!("{crate_name}-{suffix}.json"));
@@ -430,6 +434,7 @@ fn collect_fragment(
     is_product_root: bool,
     root_kind: Option<protocol::ProductionTargetKind>,
     test_surface: bool,
+    non_production_consumer: bool,
     collection_options: CollectionOptions,
 ) -> Fragment {
     let mut definitions = Vec::new();
@@ -829,6 +834,7 @@ fn collect_fragment(
         is_product_root,
         product_root_kind: root_kind,
         test_surface,
+        non_production_consumer,
         definitions,
         edges,
         roots,
@@ -1551,6 +1557,7 @@ mod tests {
             is_product_root: false,
             product_root_kind: None,
             test_surface: false,
+            non_production_consumer: false,
             definitions: vec![],
             edges: vec![],
             roots: vec![],

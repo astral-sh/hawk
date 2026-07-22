@@ -92,9 +92,11 @@ reason = "internal library consumed only within this workspace"
 ```
 
 Binary entries seed the production graph at their executable entry points.
-Library entries instead seed reachability from their private implementation and
-ordinary cross-crate workspace callers; references originating in a test harness
-contribute only to non-production reachability. Their public declarations remain
+Library entries instead seed reachability from ordinary cross-crate workspace
+callers and conservative retained-code roots; unreachable private declarations do
+not become entry points. Test harnesses, examples, benchmarks, build scripts, and
+libraries reached only through development dependencies contribute only to
+non-production reachability. Their public declarations remain
 diagnostic candidates. When every entry selects a library, findings are scoped
 to the configured library crates. Hawk also
 compiles workspace non-production targets under
@@ -178,8 +180,9 @@ not findings, during the collection phase.
 The wrapper records a `Fragment` for each compiled workspace crate. A fragment
 contains:
 
-- the owning Cargo package name, rustc crate identity, and compilation target,
-  which distinguish target libraries from host-side build dependencies;
+- the owning Cargo package name, rustc crate identity, compilation target, and
+  consumer provenance, which distinguish target libraries from host-side build
+  dependencies and non-production consumers;
 - definitions, including source location, item kind, lexical module scope,
   and whether the item is a public-surface, restricted-visibility, or
   crate-visible candidate;
@@ -234,9 +237,8 @@ their diagnostic paths instead.
 
 The analysis then computes two reachability closures:
 
-- **production live** begins at configured binary entry points, private
-  implementation in selected libraries, and actual workspace references into
-  those selected libraries;
+- **production live** begins at configured binary entry points and actual
+  production workspace references into selected libraries;
 - **non-production live** begins at executable entry points compiled for
   tests, benches, examples, or doctests.
 

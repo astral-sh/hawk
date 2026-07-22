@@ -75,6 +75,7 @@ pub struct Fragment {
     pub is_product_root: bool,
     pub product_root_kind: Option<ProductionTargetKind>,
     pub test_surface: bool,
+    pub non_production_consumer: bool,
     pub definitions: Vec<Definition>,
     pub edges: Vec<Edge>,
     pub roots: Vec<DefinitionId>,
@@ -444,12 +445,27 @@ pub fn analyze_with_options<'a>(
         })
         .flat_map(|fragment| fragment.definitions.iter().map(|definition| definition.id))
         .collect();
+    let mut production_targets: FxHashSet<&str> = production_fragments
+        .iter()
+        .filter(|fragment| fragment.is_product_root)
+        .map(|fragment| fragment.compilation_target.as_str())
+        .collect();
+    if production_targets.is_empty() {
+        production_targets.extend(
+            production_fragments
+                .iter()
+                .map(|fragment| fragment.compilation_target.as_str()),
+        );
+    }
     let workspace_library_roots = edges
         .iter()
         .filter(|edge| {
             definition_fragments
                 .get(&edge.from)
-                .is_some_and(|fragment| !fragment.test_surface)
+                .is_some_and(|fragment| {
+                    !fragment.non_production_consumer
+                        && production_targets.contains(fragment.compilation_target.as_str())
+                })
                 && definition_crate_ids
                     .get(&edge.from)
                     .zip(definition_crate_ids.get(&edge.to))
@@ -548,17 +564,24 @@ pub fn analyze_with_options<'a>(
         .flat_map(|fragment| &fragment.definitions)
         .map(definition_identity)
         .collect();
-    for definition in production_fragments
+    for (fragment, definition) in production_fragments
         .iter()
-        .flat_map(|fragment| &fragment.definitions)
-        .chain(
-            test_fragments
+        .flat_map(|fragment| {
+            fragment
+                .definitions
                 .iter()
-                .flat_map(|fragment| &fragment.definitions),
-        )
+                .map(move |definition| (fragment, definition))
+        })
+        .chain(test_fragments.iter().flat_map(|fragment| {
+            fragment
+                .definitions
+                .iter()
+                .map(move |definition| (fragment, definition))
+        }))
     {
         let identity = definition_identity(definition);
-        if !definition.public_api
+        if !production_targets.contains(fragment.compilation_target.as_str())
+            || !definition.public_api
             || definition.dead_code_allowed
             || (production_definitions.contains(&identity)
                 && !production_candidates.contains(&identity))
@@ -607,17 +630,24 @@ pub fn analyze_with_options<'a>(
         });
     }
 
-    for definition in production_fragments
+    for (fragment, definition) in production_fragments
         .iter()
-        .flat_map(|fragment| &fragment.definitions)
-        .chain(
-            test_fragments
+        .flat_map(|fragment| {
+            fragment
+                .definitions
                 .iter()
-                .flat_map(|fragment| &fragment.definitions),
-        )
+                .map(move |definition| (fragment, definition))
+        })
+        .chain(test_fragments.iter().flat_map(|fragment| {
+            fragment
+                .definitions
+                .iter()
+                .map(move |definition| (fragment, definition))
+        }))
     {
         let identity = definition_identity(definition);
-        if !definition.restricted_visible_api
+        if !production_targets.contains(fragment.compilation_target.as_str())
+            || !definition.restricted_visible_api
             || definition.dead_code_allowed
             || (production_definitions.contains(&identity)
                 && !production_restricted_visible_candidates.contains(&identity))
@@ -1374,6 +1404,7 @@ mod tests {
                 is_product_root: true,
                 product_root_kind: Some(ProductionTargetKind::Binary),
                 test_surface: false,
+                non_production_consumer: false,
                 definitions: vec![node("main", "app", false)],
                 edges: vec![],
                 roots: vec![test_id("main")],
@@ -1390,6 +1421,7 @@ mod tests {
                 is_product_root: false,
                 product_root_kind: None,
                 test_surface: false,
+                non_production_consumer: false,
                 definitions,
                 edges,
                 roots: vec![],
@@ -1411,6 +1443,7 @@ mod tests {
                 is_product_root: true,
                 product_root_kind: None,
                 test_surface: true,
+                non_production_consumer: true,
                 definitions: vec![node("test_main", "integration_test", false)],
                 edges: vec![Edge {
                     from: test_id("test_main"),
@@ -1431,6 +1464,7 @@ mod tests {
                 is_product_root: false,
                 product_root_kind: None,
                 test_surface: false,
+                non_production_consumer: false,
                 definitions,
                 edges,
                 roots: vec![],
@@ -1552,6 +1586,7 @@ mod tests {
             is_product_root: false,
             product_root_kind: None,
             test_surface: false,
+            non_production_consumer: false,
             definitions: vec![node("consumer", "consumer", false)],
             edges: vec![Edge {
                 from: test_id("consumer"),
@@ -1577,6 +1612,36 @@ mod tests {
                 ),
                 (FindingKind::DeadPublic, "unused".into(), false, false),
             ]
+        );
+    }
+
+    #[test]
+    fn unreachable_private_library_code_does_not_keep_public_callees_live() {
+        let mut production = fragments(
+            vec![
+                node("unreachable_private_caller", "lib", false),
+                node("unreachable_public_callee", "lib", true),
+            ],
+            vec![Edge {
+                from: test_id("unreachable_private_caller"),
+                to: test_id("unreachable_public_callee"),
+                kind: EdgeKind::Body,
+            }],
+        );
+        production.remove(0);
+        production[0].is_product_root = true;
+        production[0].product_root_kind = Some(ProductionTargetKind::Library);
+
+        let findings = analyze_with_tests(&production, &[], &candidate_crates(), &HashSet::new());
+
+        assert_eq!(
+            finding_summaries(findings),
+            vec![(
+                FindingKind::DeadPublic,
+                "unreachable_public_callee".into(),
+                false,
+                false,
+            )]
         );
     }
 
@@ -1610,6 +1675,7 @@ mod tests {
                 is_product_root: true,
                 product_root_kind: None,
                 test_surface: true,
+                non_production_consumer: true,
                 definitions: vec![node("consumer_test", "consumer", false)],
                 edges: vec![Edge {
                     from: test_id("consumer_test"),
@@ -1632,6 +1698,91 @@ mod tests {
                 FindingKind::UnnecessaryPublic,
                 "crate_helper".into(),
                 true,
+                false,
+            )]
+        );
+    }
+
+    #[test]
+    fn library_products_keep_non_production_executables_out_of_production_reachability() {
+        let mut production = fragments(
+            vec![
+                node("workspace_api", "lib", true),
+                node("crate_helper", "lib", true),
+            ],
+            vec![Edge {
+                from: test_id("workspace_api"),
+                to: test_id("crate_helper"),
+                kind: EdgeKind::Body,
+            }],
+        );
+        production.remove(0);
+        production[0].is_product_root = true;
+        production[0].product_root_kind = Some(ProductionTargetKind::Library);
+        let mut library_dependency = production[0].clone();
+        library_dependency.is_product_root = false;
+        library_dependency.product_root_kind = None;
+        let tests = vec![
+            Fragment {
+                protocol_version: ProtocolVersion,
+                package_name: "consumer".into(),
+                crate_name: "example".into(),
+                compilation_target: "aarch64-apple-darwin".into(),
+                crate_id: test_id("consumer-example"),
+                crate_root: Some("consumer/examples/example.rs".into()),
+                is_product_root: true,
+                product_root_kind: None,
+                test_surface: false,
+                non_production_consumer: true,
+                definitions: vec![node("example_main", "example", false)],
+                edges: vec![Edge {
+                    from: test_id("example_main"),
+                    to: test_id("workspace_api"),
+                    kind: EdgeKind::Body,
+                }],
+                roots: vec![test_id("example_main")],
+                conservative_roots: vec![],
+                required_public_roots: vec![],
+            },
+            library_dependency,
+        ];
+
+        let findings =
+            analyze_with_tests(&production, &tests, &candidate_crates(), &HashSet::new());
+
+        assert_eq!(
+            finding_summaries(findings),
+            vec![(
+                FindingKind::UnnecessaryPublic,
+                "crate_helper".into(),
+                true,
+                false,
+            )]
+        );
+    }
+
+    #[test]
+    fn library_products_do_not_report_definitions_compiled_only_for_the_host() {
+        let mut production = fragments(vec![node("target_unused", "lib", true)], vec![]);
+        production.remove(0);
+        production[0].is_product_root = true;
+        production[0].product_root_kind = Some(ProductionTargetKind::Library);
+        let mut host = production[0].clone();
+        host.compilation_target = "x86_64-apple-darwin".into();
+        host.crate_id = test_id("host-lib");
+        host.is_product_root = false;
+        host.product_root_kind = None;
+        host.definitions = vec![node("host_unused", "lib", true)];
+        production.push(host);
+
+        let findings = analyze_with_tests(&production, &[], &candidate_crates(), &HashSet::new());
+
+        assert_eq!(
+            finding_summaries(findings),
+            vec![(
+                FindingKind::DeadPublic,
+                "target_unused".into(),
+                false,
                 false,
             )]
         );
@@ -2607,6 +2758,7 @@ mod tests {
             is_product_root: false,
             product_root_kind: None,
             test_surface: false,
+            non_production_consumer: false,
             definitions: vec![duplicate],
             edges: vec![],
             roots: vec![],
@@ -2718,6 +2870,7 @@ mod tests {
             is_product_root: false,
             product_root_kind: None,
             test_surface: false,
+            non_production_consumer: false,
             definitions: vec![generated_dead],
             edges: vec![],
             roots: vec![],
@@ -2763,6 +2916,7 @@ mod tests {
             is_product_root: false,
             product_root_kind: None,
             test_surface: false,
+            non_production_consumer: false,
             definitions: vec![generated_dead],
             edges: vec![],
             roots: vec![],
@@ -2814,6 +2968,7 @@ mod tests {
                 is_product_root: true,
                 product_root_kind: Some(ProductionTargetKind::Binary),
                 test_surface: false,
+                non_production_consumer: false,
                 definitions: vec![node("binary_main", "lib", false), generated_binary],
                 edges: vec![Edge {
                     from: test_id("binary_main"),
@@ -2872,6 +3027,7 @@ mod tests {
                 is_product_root: false,
                 product_root_kind: None,
                 test_surface: true,
+                non_production_consumer: true,
                 definitions: vec![node("test", "lib", false), generated_test],
                 edges: vec![Edge {
                     from: test_id("test"),

@@ -747,6 +747,10 @@ impl AnalysisTarget {
             .collect::<Result<Vec<_>>>()?;
         Ok(Self { name, cfgs })
     }
+
+    pub(crate) fn matches_platform(&self, platform: &Platform) -> bool {
+        platform.matches(&self.name, &self.cfgs)
+    }
 }
 
 impl LintOverride {
@@ -861,6 +865,7 @@ mod tests {
             is_product_root: false,
             product_root_kind: None,
             test_surface: false,
+            non_production_consumer: false,
             definitions: vec![Definition {
                 id: test_id("unused"),
                 crate_name: "library".into(),
