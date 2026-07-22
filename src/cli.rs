@@ -338,6 +338,10 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
         .with_context(|| format!("read Cargo metadata from {}", args.manifest_path.display()))?;
 
     let workspace_root = metadata.workspace_root.clone().into_std_path_buf();
+    #[cfg(unix)]
+    let workspace_root = workspace_root
+        .canonicalize()
+        .with_context(|| format!("resolve workspace root {}", workspace_root.display()))?;
     let manifest_path = args
         .manifest_path
         .canonicalize()

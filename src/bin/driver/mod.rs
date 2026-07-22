@@ -1381,8 +1381,27 @@ fn normalize_source_path(workspace_root: &Path, working_directory: &Path, path: 
     // Resolving against the session working directory makes the result
     // independent of which directory Cargo happened to compile from.
     let path = lexically_normalize(&working_directory.join(path));
-    let path = path.strip_prefix(workspace_root).unwrap_or(&path);
+    let relative = if cfg!(windows) {
+        strip_prefix_ignore_ascii_case(&path, workspace_root)
+    } else {
+        path.strip_prefix(workspace_root).ok()
+    };
+    let path = relative.unwrap_or(&path);
     path.to_string_lossy().replace(MAIN_SEPARATOR, "/")
+}
+
+fn strip_prefix_ignore_ascii_case<'a>(path: &'a Path, prefix: &Path) -> Option<&'a Path> {
+    let mut components = path.components();
+    for prefix_component in prefix.components() {
+        let component = components.next()?;
+        if !component
+            .as_os_str()
+            .eq_ignore_ascii_case(prefix_component.as_os_str())
+        {
+            return None;
+        }
+    }
+    Some(components.as_path())
 }
 
 fn lexically_normalize(path: &Path) -> PathBuf {
@@ -1607,8 +1626,9 @@ mod tests {
     use super::{
         FragmentClassification, classify_fragment, compact_visibility_modifier,
         normalize_source_path, parse_collection_options, parse_consumer_mode, parse_run_id,
-        parse_workspace_root, source_item_at_or_after, type_alias_interface_targets,
-        uniform_field_group, validate_frontend_protocol_version, write_fragment,
+        parse_workspace_root, source_item_at_or_after, strip_prefix_ignore_ascii_case,
+        type_alias_interface_targets, uniform_field_group, validate_frontend_protocol_version,
+        write_fragment,
     };
     use cargo_hawk_internal::graph::{CollectionOptions, Edge, EdgeKind, Fragment};
     use rustc_session::config::CrateType;
@@ -1999,6 +2019,49 @@ mod tests {
                 ),
                 "library/src/shared.rs"
             );
+            assert_eq!(
+                normalize_source_path(
+                    Path::new("C:\\Workspace"),
+                    Path::new("c:\\WORKSPACE\\Library"),
+                    Path::new("src\\Shared.rs")
+                ),
+                "Library/src/Shared.rs"
+            );
+        } else {
+            assert_eq!(
+                normalize_source_path(
+                    Path::new("/workspace"),
+                    Path::new("/WORKSPACE/Library"),
+                    Path::new("src/Shared.rs")
+                ),
+                "/WORKSPACE/Library/src/Shared.rs"
+            );
         }
+    }
+
+    #[test]
+    fn workspace_prefix_matching_ignores_ascii_case() {
+        let path = Path::new("/WORKSPACE/Library/src/Shared.rs");
+        let prefix = Path::new("/workspace");
+
+        assert_eq!(
+            strip_prefix_ignore_ascii_case(path, prefix),
+            Some(Path::new("Library/src/Shared.rs"))
+        );
+        assert_eq!(
+            strip_prefix_ignore_ascii_case(path, Path::new("/workspace/library/src/shared.rs")),
+            Some(Path::new(""))
+        );
+        assert_eq!(
+            strip_prefix_ignore_ascii_case(path, Path::new("/workspace-other")),
+            None
+        );
+        assert_eq!(
+            strip_prefix_ignore_ascii_case(
+                Path::new("/workspace"),
+                Path::new("/workspace/library")
+            ),
+            None
+        );
     }
 }
