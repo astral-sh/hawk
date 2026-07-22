@@ -3,8 +3,8 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// Version of the protocol shared by the Hawk frontend and compiler driver.
 ///
-/// Increment this whenever the serialized graph or fix-plan schema changes.
-pub const VERSION: u32 = 7;
+/// Increment this whenever the graph schema, fix-plan schema, or driver contract changes.
+pub const VERSION: u32 = 8;
 
 pub const VERSION_ARGUMENT: &str = "--hawk-protocol-version";
 
@@ -34,6 +34,22 @@ pub const ENVIRONMENT_VARIABLES: &[&str] = &[
 pub enum ConsumerMode {
     Production,
     NonProduction,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProductionTargetKind {
+    Binary,
+    Library,
+}
+
+impl ProductionTargetKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Binary => "binary",
+            Self::Library => "library",
+        }
+    }
 }
 
 impl ConsumerMode {
@@ -83,7 +99,7 @@ impl<'de> Deserialize<'de> for ProtocolVersion {
 
 #[cfg(test)]
 mod tests {
-    use super::{ConsumerMode, ProtocolVersion};
+    use super::{ConsumerMode, ProductionTargetKind, ProtocolVersion};
 
     #[test]
     fn consumer_modes_round_trip() {
@@ -95,13 +111,19 @@ mod tests {
     }
 
     #[test]
+    fn production_target_kinds_are_named() {
+        assert_eq!(ProductionTargetKind::Binary.as_str(), "binary");
+        assert_eq!(ProductionTargetKind::Library.as_str(), "library");
+    }
+
+    #[test]
     fn rejects_mismatched_serialized_version() {
         let error = serde_json::from_str::<ProtocolVersion>("1")
             .expect_err("mismatched protocol version should fail");
 
         assert_eq!(
             error.to_string(),
-            "unsupported Hawk protocol version 1; expected 7"
+            "unsupported Hawk protocol version 1; expected 8"
         );
     }
 }

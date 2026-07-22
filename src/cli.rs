@@ -15,7 +15,9 @@ use cargo_metadata::{MetadataCommand, TargetKind};
 use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use tempfile::NamedTempFile;
 
-use crate::config::{AnalysisTarget, Config, ConfigDiagnosticKind, FeatureProfile};
+use crate::config::{
+    AnalysisTarget, Config, ConfigDiagnosticKind, FeatureProfile, ProductionProduct,
+};
 use crate::diagnostics::{DiagnosticRenderer, EMPHASIS, ERROR, WARNING, styled};
 use crate::protocol;
 use crate::toolchain::{
@@ -30,7 +32,7 @@ use cargo_hawk_internal::graph::{
 #[command(
     name = "cargo hawk",
     bin_name = "cargo hawk",
-    about = "Find unnecessary public surface in a Cargo binary product",
+    about = "Find unnecessary public surface in a Cargo workspace product",
     version
 )]
 struct Args {
@@ -334,8 +336,8 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
         .no_deps()
         .exec()
         .with_context(|| format!("read Cargo metadata from {}", args.manifest_path.display()))?;
-    let candidate_crates = workspace_library_crates(&metadata)?;
-    validate_excluded_crates(&args.excluded_crates, &candidate_crates)?;
+    let workspace_crates = workspace_library_crates(&metadata)?;
+    validate_excluded_crates(&args.excluded_crates, &workspace_crates)?;
 
     let workspace_root = metadata.workspace_root.clone().into_std_path_buf();
     let manifest_path = args
@@ -360,7 +362,7 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
         let config_path = config
             .path()
             .expect("configured production consumer has a configuration path");
-        validate_product(&metadata, &consumer.package, &consumer.binary).with_context(|| {
+        validate_product(&metadata, &consumer.package, &consumer.product).with_context(|| {
             format!(
                 "validate production consumer in {}:{}:{}: {}",
                 config_path.display(),
@@ -369,13 +371,12 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
                 consumer.reason
             )
         })?;
-        if !production_products
-            .iter()
-            .any(|product| product.package == consumer.package && product.binary == consumer.binary)
-        {
+        if !production_products.iter().any(|product| {
+            product.package == consumer.package && product.product == &consumer.product
+        }) {
             production_products.push(ProductionSelection {
                 package: &consumer.package,
-                binary: &consumer.binary,
+                product: &consumer.product,
             });
         }
     }
@@ -385,10 +386,21 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
             .map(Path::to_path_buf)
             .unwrap_or_else(|| workspace_root.join("hawk.toml"));
         bail!(
-            "no applicable production binaries configured in {}; add a `[[production]]` entry",
+            "no applicable production targets configured in {}; add a `[[production]]` entry",
             config_path.display()
         );
     }
+    let candidate_crates = if production_products
+        .iter()
+        .all(|product| matches!(product.product, ProductionProduct::Library(_)))
+    {
+        production_products
+            .iter()
+            .map(|product| product.product.name().replace('-', "_"))
+            .collect()
+    } else {
+        workspace_crates
+    };
     let doctest_packages = config
         .doctest_packages()
         .map(|packages| {
@@ -640,9 +652,15 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
         definition_packages(&production_fragments, &test_fragments, &emitted_finding_ids);
     let mut has_denied_diagnostic = false;
     let production_description = if production_products.len() == 1 {
-        format!("binary `{}`", production_products[0].binary)
-    } else {
+        let product = production_products[0].product;
+        format!("{} `{}`", product.kind().as_str(), product.name())
+    } else if production_products
+        .iter()
+        .all(|product| matches!(product.product, ProductionProduct::Binary(_)))
+    {
         "the configured production binaries".to_owned()
+    } else {
+        "the configured production targets".to_owned()
     };
     for finding in &findings.findings {
         if args.only.is_some_and(|only| !only.includes(finding.kind)) {
@@ -721,10 +739,16 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
                     "target": args.target.as_deref().unwrap_or(toolchain.host()),
                     "production": production_products
                         .iter()
-                        .map(|product| serde_json::json!({
-                            "package": product.package,
-                            "binary": product.binary,
-                        }))
+                        .map(|product| match product.product {
+                            ProductionProduct::Binary(binary) => serde_json::json!({
+                                "package": product.package,
+                                "binary": binary,
+                            }),
+                            ProductionProduct::Library(library) => serde_json::json!({
+                                "package": product.package,
+                                "library": library,
+                            }),
+                        })
                         .collect::<Vec<_>>(),
                     "feature_profiles": config
                         .feature_profiles()
@@ -934,7 +958,7 @@ struct InstrumentedCargo<'a> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ProductionSelection<'a> {
     package: &'a str,
-    binary: &'a str,
+    product: &'a ProductionProduct,
 }
 
 struct FeatureProfileGraph<'a> {
@@ -1104,14 +1128,19 @@ impl<'a> CargoInvocation<'a> {
         match self {
             Self::CheckProduction(product) => CargoInvocationSpec {
                 subcommand: "check",
-                selection_arguments: vec![
+                selection_arguments: [
                     "--package".into(),
                     product.package.into(),
-                    "--bin".into(),
-                    product.binary.into(),
-                ],
+                    product.product.cargo_flag().into(),
+                ]
+                .into_iter()
+                .chain(
+                    matches!(product.product, ProductionProduct::Binary(_))
+                        .then(|| product.product.name().into()),
+                )
+                .collect(),
                 consumer_mode: protocol::ConsumerMode::Production,
-                root_crate: product.binary.replace('-', "_"),
+                root_crate: product.product.name().replace('-', "_"),
                 fix: None,
                 doctests: false,
             },
@@ -1315,7 +1344,7 @@ impl InstrumentedCargo<'_> {
     ) -> Result<CollectedFragments> {
         // Every production product uses the same compiler mode and feature set. Reuse one
         // dependency fingerprint across the product builds so Cargo can retain fragments from
-        // shared dependencies instead of compiling them once per configured binary.
+        // shared dependencies instead of compiling them once per configured target.
         let production_run_id = format!("{run_id}-production");
         for product in production_products.iter().copied() {
             self.run(
@@ -1340,8 +1369,40 @@ impl InstrumentedCargo<'_> {
             feature_profile,
         )?;
 
+        let mut production = read_fragments(production_graph_dir)?;
+        for product in production_products {
+            let ProductionProduct::Library(library) = product.product else {
+                continue;
+            };
+            let crate_name = library.replace('-', "_");
+            let fragment = production
+                .iter_mut()
+                .find(|fragment| {
+                    fragment.package_name == product.package
+                        && fragment.crate_name == crate_name
+                        && fragment.product_root_kind
+                            != Some(protocol::ProductionTargetKind::Binary)
+                })
+                .with_context(|| {
+                    format!(
+                        "no instrumented fragment was emitted for configured library `{}` in package `{}`",
+                        library, product.package
+                    )
+                })?;
+            // This library may already have been compiled as another product's dependency.
+            // Promote the retained fragment without invalidating the shared Cargo fingerprint.
+            fragment.is_product_root = true;
+            fragment.product_root_kind = Some(protocol::ProductionTargetKind::Library);
+            fragment.roots = fragment
+                .definitions
+                .iter()
+                .filter(|definition| !definition.public_api)
+                .map(|definition| definition.id)
+                .collect();
+        }
+
         Ok(CollectedFragments {
-            production: read_fragments(production_graph_dir)?,
+            production,
             non_production: read_fragments(non_production_graph_dir)?,
         })
     }
@@ -1368,7 +1429,7 @@ fn collect_profile_fragments(
         .any(|fragment| fragment.is_product_root)
     {
         bail!(
-            "no instrumented fragment was emitted for a configured production binary under feature profile `{}`; rerun with a fresh --target-dir",
+            "no instrumented fragment was emitted for a configured production target under feature profile `{}`; rerun with a fresh --target-dir",
             profile_graph.feature_profile.name()
         );
     }
@@ -1385,20 +1446,42 @@ fn production_summary(
             let cargo_arguments = feature_profiles[0].cargo_arguments_description();
             let separator = if cargo_arguments.is_empty() { "" } else { " " };
             return format!(
-                "`{} --bin {}{separator}{cargo_arguments}`",
-                product.package, product.binary
+                "`{} {}{}{separator}{cargo_arguments}`",
+                product.package,
+                product.product.cargo_flag(),
+                match product.product {
+                    ProductionProduct::Binary(binary) => format!(" {binary}"),
+                    ProductionProduct::Library(_) => String::new(),
+                }
             );
         }
         return format!(
-            "`{} --bin {}` across {} feature profiles",
+            "`{} {}{}` across {} feature profiles",
             product.package,
-            product.binary,
+            product.product.cargo_flag(),
+            match product.product {
+                ProductionProduct::Binary(binary) => format!(" {binary}"),
+                ProductionProduct::Library(_) => String::new(),
+            },
             feature_profiles.len()
         );
     }
 
+    let product_kind = if production_products
+        .iter()
+        .all(|product| matches!(product.product, ProductionProduct::Binary(_)))
+    {
+        "binaries"
+    } else if production_products
+        .iter()
+        .all(|product| matches!(product.product, ProductionProduct::Library(_)))
+    {
+        "libraries"
+    } else {
+        "targets"
+    };
     let summary = format!(
-        "{} configured production binaries",
+        "{} configured production {product_kind}",
         production_products.len()
     );
     if feature_profiles.len() == 1 {
@@ -1646,15 +1729,24 @@ fn validate_excluded_crates(
 fn validate_product(
     metadata: &cargo_metadata::Metadata,
     package: &str,
-    binary: &str,
+    product: &ProductionProduct,
 ) -> Result<()> {
     let package = workspace_package(metadata, package)?;
+    let target_kind = match product {
+        ProductionProduct::Binary(_) => TargetKind::Bin,
+        ProductionProduct::Library(_) => TargetKind::Lib,
+    };
     if !package
         .targets
         .iter()
-        .any(|target| target.name == binary && target.kind.contains(&TargetKind::Bin))
+        .any(|target| target.name == product.name() && target.kind.contains(&target_kind))
     {
-        bail!("package `{}` has no binary target `{binary}`", package.name);
+        bail!(
+            "package `{}` has no {} target `{}`",
+            package.name,
+            product.kind().as_str(),
+            product.name()
+        );
     }
     Ok(())
 }
@@ -1760,8 +1852,9 @@ mod tests {
 
     use super::{
         Args, CargoInvocation, DEFAULT_TARGET_DIR_COMPONENT_MAX_BYTES, DiagnosticRenderer,
-        LintLevel, LintLevels, ProductionSelection, default_target_dir, definition_packages,
-        fix_plan_signature, json_definition_kind, json_finding_kind, validate_excluded_crates,
+        LintLevel, LintLevels, ProductionProduct, ProductionSelection, default_target_dir,
+        definition_packages, fix_plan_signature, json_definition_kind, json_finding_kind,
+        validate_excluded_crates,
     };
 
     fn render_diagnostic(finding: &Finding<'_>) -> String {
@@ -1943,6 +2036,7 @@ mod tests {
             crate_id: test_id(package_name),
             crate_root: None,
             is_product_root: false,
+            product_root_kind: None,
             test_surface: false,
             definitions,
             edges: vec![],
@@ -2010,16 +2104,30 @@ mod tests {
     fn cargo_invocations_encode_valid_subcommands_and_modes() {
         let packages = vec!["library".to_owned(), "support".to_owned()];
         let fix_plan = Path::new("fix-plan.json");
+        let binary = ProductionProduct::Binary("app-cli".to_owned());
+        let library = ProductionProduct::Library("public-api".to_owned());
 
         assert_cargo_invocation(
             CargoInvocation::CheckProduction(ProductionSelection {
                 package: "app-package",
-                binary: "app-cli",
+                product: &binary,
             }),
             "check",
             &["--package", "app-package", "--bin", "app-cli"],
             ConsumerMode::Production,
             "app_cli",
+            None,
+            false,
+        );
+        assert_cargo_invocation(
+            CargoInvocation::CheckProduction(ProductionSelection {
+                package: "api-package",
+                product: &library,
+            }),
+            "check",
+            &["--package", "api-package", "--lib"],
+            ConsumerMode::Production,
+            "public_api",
             None,
             false,
         );

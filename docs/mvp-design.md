@@ -2,31 +2,33 @@
 
 ## Product model
 
-The analyzed surface is the workspace library dependencies compiled into
-configured same-workspace production binary targets or workspace
-non-production targets. They are considered closed-world unless their crates
-are explicitly excluded. The configured production targets establish
-production reachability. Workspace tests are compiled as part of a separate
-non-production graph and can also introduce test-only declarations;
-benches, examples, and doctests in that graph preserve any public visibility
-they require.
+The analyzed surface is configured workspace library targets and the workspace
+library dependencies compiled into configured production binary targets or
+workspace non-production targets. They are considered closed-world unless their
+crates are explicitly excluded. Configured binary entry points and actual
+workspace callers of configured library targets establish production
+reachability. Workspace tests are compiled as part of a separate non-production
+graph and can also introduce test-only declarations; benches, examples, and
+doctests in that graph preserve any public visibility they require.
 
 The analysis includes:
 
-- one or more configured same-workspace binary targets;
+- one or more configured same-workspace binary or internal library targets;
 - one or more feature profiles, defaulting to `--all-features`;
 - one selected compilation target, defaulting to the host target;
-- production reachability from those binary targets;
+- production reachability from binary entry points and workspace library uses;
 - test reachability and visibility requirements from workspace
   non-production targets, including doctests.
 
-Binaries are never inferred as roots: every shipped binary must be listed
-explicitly in `hawk.toml`.
+Production targets are never inferred: every shipped binary or audited library
+must be listed explicitly in `hawk.toml`.
 
 ## Diagnostics
 
-Configured production targets seed production reachability but do not
-themselves receive `hawk` diagnostics. Non-production targets can preserve
+Configured production binaries seed production reachability but do not
+themselves receive `hawk` diagnostics. Configured libraries remain diagnostic
+candidates and use cross-crate workspace references to establish their live
+surface. Non-production targets can preserve
 public visibility; tests additionally establish test-only reachability and
 introduce diagnostic candidates from dev-dependencies or `#[cfg(test)]`
 source. Compiled workspace library declarations in either graph can
@@ -124,11 +126,12 @@ diagnostic policy, overrides, and broad diagnostic exclusions. The opt-in
 `preserve-uniform-field-visibility` policy omits reducible field-visibility
 findings when a complete, uniformly visible field group has a sibling that
 semantically requires the current visibility. A `[[production]]` entry names a
-package and binary target in the selected workspace, optionally scoped to a
-Cargo-style target name or `cfg(...)` platform expression, and its compiled
-references participate in production reachability and required-public
-analysis. An `[[override]]` entry identifies an exact lint, crate, and item
-path under the same optional target scoping, with an optional item kind to
+package and either a binary or library target in the selected workspace,
+optionally scoped to a Cargo-style target name or `cfg(...)` platform
+expression, and its compiled references participate in production reachability
+and required-public analysis. An `[[override]]` entry identifies an exact lint,
+crate, and item path under the same optional target scoping, with an optional
+item kind to
 disambiguate declarations in separate Rust namespaces. `allow` suppresses a
 matching finding; `expect` also produces an unfulfilled-expectation diagnostic
 when its finding disappears on an applicable target. Overrides that refer to

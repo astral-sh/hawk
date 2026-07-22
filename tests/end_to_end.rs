@@ -783,6 +783,102 @@ fn production_binary_named_like_a_library_does_not_suppress_its_findings() {
 }
 
 #[test]
+fn library_production_targets_audit_actual_workspace_uses() {
+    let context = HawkTestContext::new("library_products");
+    let output = context.run(&[]);
+
+    context.assert_success(&output);
+    let stdout = context.normalized_stdout(&output);
+    assert!(
+        stdout.contains("warning[hawk::dead_public]: `unused` is public"),
+        "unused library export was not diagnosed:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("warning[hawk::unnecessary_public]: `used_only_within_crate` is public"),
+        "crate-local library export was not diagnosed:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("`used_across_workspace`"),
+        "cross-crate workspace use was not preserved:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("`consume`"),
+        "unselected workspace consumer became a diagnostic target:\n{stdout}"
+    );
+    assert!(stdout.contains("`internal-api --lib --all-features`"));
+}
+
+#[test]
+fn library_production_targets_are_described_in_json_reports() {
+    let context = HawkTestContext::new("library_products");
+    let output = context.run(&["--output-format=json"]);
+
+    context.assert_success(&output);
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout contains one JSON report");
+    assert_eq!(
+        report["summary"]["production"],
+        serde_json::json!([{"package": "internal-api", "library": "internal_api"}])
+    );
+    assert_eq!(report["summary"]["diagnostic_count"], 2);
+}
+
+#[test]
+fn library_production_targets_apply_safe_visibility_fixes() {
+    let context = HawkTestContext::new("library_products");
+    let output = context.run(&["--fix", "--allow-no-vcs"]);
+
+    context.assert_success(&output);
+    let library = fs::read_to_string(context.workspace().join("api/src/lib.rs"))
+        .expect("read fixed library source");
+    assert!(library.contains("pub fn used_across_workspace()"));
+    assert!(
+        !library.contains("pub fn used_only_within_crate()")
+            && library.contains("fn used_only_within_crate()"),
+        "crate-local visibility was not reduced:\n{library}"
+    );
+    assert!(library.contains("pub fn unused()"));
+}
+
+#[test]
+fn mixed_binary_and_library_products_reuse_dependency_fragments() {
+    let context = HawkTestContext::new("production_consumers");
+    let configuration = context.workspace().join("hawk.toml");
+    let mut source = fs::read_to_string(&configuration).expect("read production configuration");
+    source.push_str(
+        "\n[[production]]\npackage = \"library\"\nlib = \"library\"\nreason = \"audit internal library exports\"\n",
+    );
+    fs::write(configuration, source).expect("add library production target");
+
+    let output = context.run(&[]);
+
+    context.assert_success(&output);
+    let stdout = context.normalized_stdout(&output);
+    assert!(stdout.contains("warning[hawk::dead_public]: `unused` is public"));
+    assert!(stdout.contains("3 configured production targets"));
+}
+
+#[test]
+fn rejects_unknown_library_production_targets() {
+    let context = HawkTestContext::new("library_products");
+    let configuration = context.workspace().join("hawk.toml");
+    fs::write(
+        configuration,
+        "[[production]]\npackage = \"internal-api\"\nlib = \"missing\"\nreason = \"invalid library\"\n",
+    )
+    .expect("write invalid library configuration");
+
+    let output = context.run(&[]);
+
+    assert!(!output.status.success());
+    assert!(
+        context
+            .normalized_stderr(&output)
+            .contains("package `internal-api` has no library target `missing`")
+    );
+}
+
+#[test]
 fn distinct_spanless_expansions_do_not_keep_a_library_item_live() {
     for binary_name in [None, Some("same")] {
         let context = HawkTestContext::new("spanless_target_collision");
@@ -927,7 +1023,7 @@ fn rejects_fixes_with_multiple_feature_profiles() {
 }
 
 #[test]
-fn requires_a_configured_production_binary() {
+fn requires_a_configured_production_target() {
     let context = HawkTestContext::new("basic");
     let configuration = tempfile::NamedTempFile::new().expect("temporary empty configuration");
     let output = context
@@ -941,7 +1037,7 @@ fn requires_a_configured_production_binary() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains('\u{1b}'));
     let stderr = anstream::adapter::strip_str(&stderr).to_string();
-    assert!(stderr.contains("error: no applicable production binaries configured"));
+    assert!(stderr.contains("error: no applicable production targets configured"));
 }
 
 #[test]
@@ -1817,7 +1913,7 @@ fn reports_operational_json_errors_on_stderr() {
     assert!(
         context
             .normalized_stderr(&output)
-            .contains("error: no applicable production binaries configured")
+            .contains("error: no applicable production targets configured")
     );
 }
 

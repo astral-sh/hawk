@@ -58,10 +58,38 @@ enum ExclusionSelector {
 #[derive(Clone, Debug)]
 pub(crate) struct ProductionConsumer {
     pub(crate) package: String,
-    pub(crate) binary: String,
+    pub(crate) product: ProductionProduct,
     pub(crate) reason: String,
     pub(crate) target: Option<Platform>,
     pub(crate) span: ConfigSpan,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum ProductionProduct {
+    Binary(String),
+    Library(String),
+}
+
+impl ProductionProduct {
+    pub(crate) fn name(&self) -> &str {
+        match self {
+            Self::Binary(name) | Self::Library(name) => name,
+        }
+    }
+
+    pub(crate) const fn kind(&self) -> crate::protocol::ProductionTargetKind {
+        match self {
+            Self::Binary(_) => crate::protocol::ProductionTargetKind::Binary,
+            Self::Library(_) => crate::protocol::ProductionTargetKind::Library,
+        }
+    }
+
+    pub(crate) const fn cargo_flag(&self) -> &'static str {
+        match self {
+            Self::Binary(_) => "--bin",
+            Self::Library(_) => "--lib",
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -185,7 +213,9 @@ struct RawDiagnosticExclusion {
 struct RawProductionConsumer {
     package: String,
     #[serde(rename = "bin")]
-    binary: String,
+    binary: Option<String>,
+    #[serde(rename = "lib")]
+    library: Option<String>,
     reason: String,
     target: Option<String>,
 }
@@ -449,6 +479,22 @@ impl Config {
                     span.column
                 );
             }
+            let product = match (entry.binary, entry.library) {
+                (Some(binary), None) if !binary.trim().is_empty() => {
+                    ProductionProduct::Binary(binary)
+                }
+                (None, Some(library)) if !library.trim().is_empty() => {
+                    ProductionProduct::Library(library)
+                }
+                _ => {
+                    bail!(
+                        "production consumer in {}:{}:{} must provide exactly one non-empty `bin` or `lib` target",
+                        path.display(),
+                        span.line,
+                        span.column
+                    );
+                }
+            };
             let target = entry
                 .target
                 .map(|target| {
@@ -464,7 +510,7 @@ impl Config {
                 .transpose()?;
             production.push(ProductionConsumer {
                 package: entry.package,
-                binary: entry.binary,
+                product,
                 reason: entry.reason,
                 target,
                 span,
@@ -785,7 +831,7 @@ mod tests {
 
     use cargo_platform::Cfg;
 
-    use super::{AnalysisTarget, Config, ConfigDiagnosticKind};
+    use super::{AnalysisTarget, Config, ConfigDiagnosticKind, ProductionProduct};
     use cargo_hawk_internal::graph::{
         Definition, DefinitionId, DefinitionKind, FindingKind, Fragment, Span, analyze,
     };
@@ -805,6 +851,7 @@ mod tests {
             crate_id: test_id("library"),
             crate_root: Some("library/src/lib.rs".into()),
             is_product_root: false,
+            product_root_kind: None,
             test_surface: false,
             definitions: vec![Definition {
                 id: test_id("unused"),
@@ -1414,7 +1461,10 @@ reason = "shipped on Windows"
             .collect::<Vec<_>>();
         assert_eq!(windows.len(), 1);
         assert_eq!(windows[0].package, "windows-runner");
-        assert_eq!(windows[0].binary, "windows-runner");
+        assert_eq!(
+            windows[0].product,
+            ProductionProduct::Binary("windows-runner".to_owned())
+        );
 
         assert_eq!(
             config
@@ -1422,6 +1472,56 @@ reason = "shipped on Windows"
                 .count(),
             0
         );
+    }
+
+    #[test]
+    fn accepts_library_production_consumers() {
+        let directory = tempfile::tempdir().expect("temporary configuration directory");
+        let path = directory.path().join("hawk.toml");
+        std::fs::write(
+            &path,
+            r#"
+[[production]]
+package = "internal-api"
+lib = "internal_api"
+reason = "internal library API"
+"#,
+        )
+        .expect("write configuration");
+        let config = Config::load(directory.path(), Some(&path)).expect("load configuration");
+
+        let products = config
+            .production_consumers(&target("aarch64-apple-darwin", &["unix"]))
+            .collect::<Vec<_>>();
+        assert_eq!(products.len(), 1);
+        assert_eq!(products[0].package, "internal-api");
+        assert_eq!(
+            products[0].product,
+            ProductionProduct::Library("internal_api".to_owned())
+        );
+    }
+
+    #[test]
+    fn production_consumers_require_exactly_one_target() {
+        for targets in ["", "bin = \"app\"\nlib = \"library\"", "lib = \"\""] {
+            let directory = tempfile::tempdir().expect("temporary configuration directory");
+            let path = directory.path().join("hawk.toml");
+            std::fs::write(
+                &path,
+                format!(
+                    "[[production]]\npackage = \"app\"\n{targets}\nreason = \"production target\"\n"
+                ),
+            )
+            .expect("write configuration");
+
+            let error = Config::load(directory.path(), Some(&path))
+                .expect_err("reject missing or ambiguous production target");
+            assert!(
+                error
+                    .to_string()
+                    .contains("must provide exactly one non-empty `bin` or `lib` target")
+            );
+        }
     }
 
     #[test]

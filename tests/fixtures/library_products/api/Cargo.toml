@@ -1,0 +1,7 @@
+[package]
+name = "internal-api"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "internal_api"

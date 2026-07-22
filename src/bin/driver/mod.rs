@@ -389,6 +389,8 @@ fn emit_fragment(
     } else {
         crate_name == root_crate && tcx.entry_fn(()).is_some()
     };
+    let root_kind =
+        (is_product_root && !is_non_production).then_some(protocol::ProductionTargetKind::Binary);
     let suffix = crate_id.to_string();
     let fragment = collect_fragment(
         tcx,
@@ -396,6 +398,7 @@ fn emit_fragment(
         crate_name.clone(),
         crate_id,
         is_product_root,
+        root_kind,
         test_surface,
         collection_options,
     );
@@ -425,6 +428,7 @@ fn collect_fragment(
     crate_name: String,
     crate_id: DefinitionId,
     is_product_root: bool,
+    root_kind: Option<protocol::ProductionTargetKind>,
     test_surface: bool,
     collection_options: CollectionOptions,
 ) -> Fragment {
@@ -822,6 +826,7 @@ fn collect_fragment(
         crate_id,
         crate_root: span(tcx, CRATE_DEF_ID).map(|span| span.file),
         is_product_root,
+        product_root_kind: root_kind,
         test_surface,
         definitions,
         edges,
@@ -1529,7 +1534,7 @@ mod tests {
 
         assert_eq!(
             error.to_string(),
-            "Hawk frontend uses compiler driver protocol 1, but this driver uses protocol 7; install `cargo-hawk` and `cargo-hawk-driver` from the same release"
+            "Hawk frontend uses compiler driver protocol 1, but this driver uses protocol 8; install `cargo-hawk` and `cargo-hawk-driver` from the same release"
         );
     }
 
@@ -1542,6 +1547,7 @@ mod tests {
             crate_id: cargo_hawk_internal::graph::DefinitionId::new(0, 1),
             crate_root: Some("library/src/lib.rs".into()),
             is_product_root: false,
+            product_root_kind: None,
             test_surface: false,
             definitions: vec![],
             edges: vec![],

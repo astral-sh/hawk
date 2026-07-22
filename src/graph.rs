@@ -4,7 +4,7 @@ use std::fmt::{self, Display, Formatter};
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 
-use crate::protocol::ProtocolVersion;
+use crate::protocol::{ProductionTargetKind, ProtocolVersion};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct CollectionOptions {
@@ -72,6 +72,7 @@ pub struct Fragment {
     pub crate_id: DefinitionId,
     pub crate_root: Option<String>,
     pub is_product_root: bool,
+    pub product_root_kind: Option<ProductionTargetKind>,
     pub test_surface: bool,
     pub definitions: Vec<Definition>,
     pub edges: Vec<Edge>,
@@ -434,10 +435,29 @@ pub fn analyze_with_options<'a>(
         adjacency(&production_edges, &equivalents, &production_definition_ids);
     let test_adjacency = adjacency(&test_edges, &equivalents, &test_definition_ids);
 
+    let library_root_definition_ids: FxHashSet<DefinitionId> = production_fragments
+        .iter()
+        .filter(|fragment| {
+            fragment.is_product_root
+                && fragment.product_root_kind == Some(ProductionTargetKind::Library)
+        })
+        .flat_map(|fragment| fragment.definitions.iter().map(|definition| definition.id))
+        .collect();
+    let workspace_library_roots = edges
+        .iter()
+        .filter(|edge| {
+            definition_crate_ids
+                .get(&edge.from)
+                .zip(definition_crate_ids.get(&edge.to))
+                .is_some_and(|(source, target)| source != target)
+        })
+        .flat_map(|edge| std::iter::once(edge.to).chain(equivalents.group(edge.to).iter().copied()))
+        .filter(|target| library_root_definition_ids.contains(target));
     let production_roots = production_fragments
         .iter()
         .filter(|fragment| fragment.is_product_root)
         .flat_map(|fragment| fragment.roots.iter().copied())
+        .chain(workspace_library_roots)
         .chain(
             production_fragments
                 .iter()
@@ -511,7 +531,10 @@ pub fn analyze_with_options<'a>(
         .collect();
     let production_root_definitions: FxHashSet<_> = production_fragments
         .iter()
-        .filter(|fragment| fragment.is_product_root)
+        .filter(|fragment| {
+            fragment.is_product_root
+                && fragment.product_root_kind != Some(ProductionTargetKind::Library)
+        })
         .flat_map(|fragment| &fragment.definitions)
         .map(definition_identity)
         .collect();
@@ -1135,7 +1158,7 @@ mod tests {
         analyze as analyze_with_tests, analyze_with_options, equivalent_definitions,
         extend_equivalence_edges, reachable, reexport_index,
     };
-    use crate::protocol::ProtocolVersion;
+    use crate::protocol::{ProductionTargetKind, ProtocolVersion};
     use rustc_hash::{FxHashMap, FxHashSet};
     use std::collections::HashSet;
 
@@ -1344,6 +1367,7 @@ mod tests {
                 crate_id: test_id("app"),
                 crate_root: Some("app/src/main.rs".into()),
                 is_product_root: true,
+                product_root_kind: Some(ProductionTargetKind::Binary),
                 test_surface: false,
                 definitions: vec![node("main", "app", false)],
                 edges: vec![],
@@ -1358,6 +1382,7 @@ mod tests {
                 crate_id: test_id("lib"),
                 crate_root: Some("lib/src/lib.rs".into()),
                 is_product_root: false,
+                product_root_kind: None,
                 test_surface: false,
                 definitions,
                 edges,
@@ -1377,6 +1402,7 @@ mod tests {
                 crate_id: test_id("integration_test"),
                 crate_root: Some("integration_test/tests/test.rs".into()),
                 is_product_root: true,
+                product_root_kind: None,
                 test_surface: true,
                 definitions: vec![node("test_main", "integration_test", false)],
                 edges: vec![Edge {
@@ -1395,6 +1421,7 @@ mod tests {
                 crate_id: test_id("lib"),
                 crate_root: Some("lib/src/lib.rs".into()),
                 is_product_root: false,
+                product_root_kind: None,
                 test_surface: false,
                 definitions,
                 edges,
@@ -1487,6 +1514,60 @@ mod tests {
             findings
                 .iter()
                 .all(|finding| finding.kind == FindingKind::DeadPublic)
+        );
+    }
+
+    #[test]
+    fn library_products_are_audited_against_workspace_callers() {
+        let mut production = fragments(
+            vec![
+                node("workspace_api", "lib", true),
+                node("crate_helper", "lib", true),
+                node("unused", "lib", true),
+            ],
+            vec![Edge {
+                from: test_id("workspace_api"),
+                to: test_id("crate_helper"),
+                kind: EdgeKind::Body,
+            }],
+        );
+        production.remove(0);
+        production[0].is_product_root = true;
+        production[0].product_root_kind = Some(ProductionTargetKind::Library);
+        let callers = vec![Fragment {
+            protocol_version: ProtocolVersion,
+            package_name: "consumer".into(),
+            crate_name: "consumer".into(),
+            crate_id: test_id("consumer"),
+            crate_root: Some("consumer/src/lib.rs".into()),
+            is_product_root: false,
+            product_root_kind: None,
+            test_surface: false,
+            definitions: vec![node("consumer", "consumer", false)],
+            edges: vec![Edge {
+                from: test_id("consumer"),
+                to: test_id("workspace_api"),
+                kind: EdgeKind::Body,
+            }],
+            roots: vec![],
+            conservative_roots: vec![],
+            required_public_roots: vec![],
+        }];
+
+        let findings =
+            analyze_with_tests(&production, &callers, &candidate_crates(), &HashSet::new());
+
+        assert_eq!(
+            finding_summaries(findings),
+            vec![
+                (
+                    FindingKind::UnnecessaryPublic,
+                    "crate_helper".into(),
+                    false,
+                    false,
+                ),
+                (FindingKind::DeadPublic, "unused".into(), false, false),
+            ]
         );
     }
 
@@ -2457,6 +2538,7 @@ mod tests {
             crate_id: test_id("lib-test"),
             crate_root: Some("lib/src/lib.rs".into()),
             is_product_root: false,
+            product_root_kind: None,
             test_surface: false,
             definitions: vec![duplicate],
             edges: vec![],
@@ -2566,6 +2648,7 @@ mod tests {
             crate_id: test_id("test_support"),
             crate_root: Some("test_support/src/lib.rs".into()),
             is_product_root: false,
+            product_root_kind: None,
             test_surface: false,
             definitions: vec![generated_dead],
             edges: vec![],
@@ -2609,6 +2692,7 @@ mod tests {
             crate_id: test_id("test_support"),
             crate_root: Some("test_support/src/lib.rs".into()),
             is_product_root: false,
+            product_root_kind: None,
             test_surface: false,
             definitions: vec![generated_dead],
             edges: vec![],
@@ -2658,6 +2742,7 @@ mod tests {
                 crate_id: test_id(&format!("{package_name}-bin")),
                 crate_root: Some(other_root.into()),
                 is_product_root: true,
+                product_root_kind: Some(ProductionTargetKind::Binary),
                 test_surface: false,
                 definitions: vec![node("binary_main", "lib", false), generated_binary],
                 edges: vec![Edge {
@@ -2714,6 +2799,7 @@ mod tests {
                 crate_id: test_id("lib-test"),
                 crate_root: Some("lib/src/lib.rs".into()),
                 is_product_root: false,
+                product_root_kind: None,
                 test_surface: true,
                 definitions: vec![node("test", "lib", false), generated_test],
                 edges: vec![Edge {

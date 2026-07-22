@@ -5,7 +5,8 @@ Hawk reads `hawk.toml` from the workspace root by default. Use
 
 ## Production targets
 
-Declare every shipped binary in the analysis with a `[[production]]` entry:
+Declare every shipped binary or audited internal library with a `[[production]]`
+entry:
 
 ```toml
 [[production]]
@@ -23,14 +24,26 @@ package = "windows-helper"
 bin = "windows-helper"
 target = "cfg(windows)"
 reason = "Windows-only binary shipped from this workspace"
+
+[[production]]
+package = "internal-api"
+lib = "internal_api"
+reason = "internal library consumed only within this workspace"
 ```
 
-Each applicable production target is built for analysis, so declarations
-required by that binary are not reported as dead or unnecessarily public.
-Every package and binary must be a target of the selected Cargo workspace. At
-least one production target must apply to the analyzed target.
+Each entry must specify exactly one of `bin` or `lib`. Binary targets establish
+production reachability from their entry points. Library targets remain
+diagnostic candidates: a public item with no workspace uses is reported as
+`hawk::dead_public`, an item used only within its own crate is reported as
+`hawk::unnecessary_public`, and an item used across a workspace crate boundary
+retains `pub`. When every configured production target is a library, diagnostics
+are limited to those selected library crates; other workspace crates are
+compiled as consumers without becoming audit targets.
 
-All configured binaries are analyzed with the same feature profiles and
+Every package and target must belong to the selected Cargo workspace. At least
+one production target must apply to the analyzed target.
+
+All configured targets are analyzed with the same feature profiles and
 compilation target. Hawk intentionally does not infer production targets from
 the workspace: configure each intended target explicitly.
 
@@ -69,7 +82,7 @@ no-default-features = true
 features = ["serde"]
 ```
 
-Hawk compiles every production binary, workspace non-production target, and
+Hawk compiles every production target, workspace non-production target, and
 selected doctest package under each profile. Fragments are stored separately for
 each profile, then their reachability and visibility requirements are combined
 before diagnostics are produced. A declaration required in any configured

@@ -18,8 +18,8 @@ Optionally, it can suggest restricting `pub(crate)` declarations to
 ## Motivation
 
 Hawk is intended for projects like [Ruff](https://github.com/astral-sh/ruff)
-and [uv](https://github.com/astral-sh/uv), where the product is a binary but
-the workspace itself is decomposed into many crates. In such projects, the
+and [uv](https://github.com/astral-sh/uv), where a binary or internal library
+product is decomposed into many workspace crates. In such projects, the
 workspace is largely the only client of its `pub` APIs: `pub` is commonly
 needed only to make symbols visible across crates within the workspace.
 
@@ -99,13 +99,19 @@ installed package.
 
 ## Getting started
 
-Declare each shipped binary in a workspace-root `hawk.toml`:
+Declare each shipped binary or audited internal library in a workspace-root
+`hawk.toml`:
 
 ```toml
 [[production]]
 package = "app"
 bin = "app"
 reason = "shipped application binary"
+
+[[production]]
+package = "internal-api"
+lib = "internal_api"
+reason = "internal library whose callers are in this workspace"
 ```
 
 Run `cargo hawk` to see the available commands. Analyze the workspace with
@@ -146,7 +152,8 @@ cargo hawk check \
 ## Status
 
 Hawk is experimental. It assumes workspace library crates are internal to the
-configured binary product unless they are explicitly excluded from analysis.
+configured binary or library product unless they are explicitly excluded from
+analysis.
 Because it integrates with compiler internals, it is pinned to Rust 1.97.1.
 Hawk was authored entirely by [Codex](https://openai.com/codex/).
 

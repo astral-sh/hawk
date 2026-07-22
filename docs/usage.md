@@ -112,8 +112,8 @@ stderr and do not produce a JSON report:
 
 The JSON report is versioned with `schema_version` (currently `3`); breaking
 schema changes increment this version. Its `summary` describes the compilation
-target, configured production binaries, feature profiles, non-production
-coverage, and emitted diagnostic count.
+target, configured production binaries or libraries, feature profiles,
+non-production coverage, and emitted diagnostic count.
 Every entry in `diagnostics` includes its category, lint code, and severity.
 Finding entries additionally include their finding kind, semantic identity
 (`package`, `crate`, `item`, definition `kind`, parent, and module scope),

@@ -4,12 +4,12 @@ Hawk applies a Clippy-shaped user experience to a question that cannot be
 answered by a single crate compilation: which public declarations are
 actually needed by a closed-world Cargo workspace product?
 
-A binary product such as `uv` or `ruff` may be split across many internal
-library crates. Rust requires cross-crate references to cross a `pub`
-boundary, even when no external library API is intended. Rustc and Clippy see
-each of those crate boundaries; Hawk additionally knows which workspace
-binaries constitute the production targets and which workspace targets consume
-code only outside production.
+A binary product such as `uv` or `ruff`, or an internal library product, may be
+split across many workspace crates. Rust requires cross-crate references to
+cross a `pub` boundary, even when no external library API is intended. Rustc
+and Clippy see each of those crate boundaries; Hawk additionally knows which
+workspace binaries or libraries constitute the production targets and which
+workspace targets consume code only outside production.
 
 This document describes the implementation on `main`. It compares Hawk with
 Clippy's architecture and tooling model, not with the implementation of any
@@ -76,17 +76,26 @@ compatible with arbitrary compiler versions.
 
 Hawk treats workspace library crates as internal implementation crates unless
 the caller excludes them with `--exclude-crate`. It does not infer production
-targets from every binary that happens to compile. Each production target is
-stated in `hawk.toml`:
+targets from every target that happens to compile. Each production binary or
+audited internal library is stated in `hawk.toml`:
 
 ```toml
 [[production]]
 package = "uv"
 bin = "uv"
 reason = "shipped package manager binary"
+
+[[production]]
+package = "uv-distribution"
+lib = "uv_distribution"
+reason = "internal library consumed only within this workspace"
 ```
 
-Applicable `[[production]]` entries seed the production graph. Hawk also
+Binary entries seed the production graph at their executable entry points.
+Library entries instead seed reachability from their private implementation and
+actual cross-crate workspace callers; their public declarations remain
+diagnostic candidates. When every entry selects a library, findings are scoped
+to the configured library crates. Hawk also
 compiles workspace non-production targets under
 `cargo check --workspace --all-targets` and compile-only doctests under
 `cargo test --workspace --doc`. Configured `[[doctest]]` entries replace the
@@ -127,7 +136,8 @@ An analysis run proceeds as follows:
      |
      | read Cargo metadata, hawk.toml, lint levels, and target cfg
      v
- cargo check --package <package> --bin <target>    (once per target and feature profile)
+ cargo check --package <package> --bin <target>    (once per binary and feature profile)
+ cargo check --package <package> --lib             (once per library and feature profile)
  cargo check --workspace --all-targets              (once per feature profile)
  cargo test --workspace|--package <package> --doc   (once per feature profile)
      |
@@ -223,7 +233,9 @@ their diagnostic paths instead.
 
 The analysis then computes two reachability closures:
 
-- **production live** begins at each configured production target entry point;
+- **production live** begins at configured binary entry points, private
+  implementation in selected libraries, and actual workspace references into
+  those selected libraries;
 - **non-production live** begins at executable entry points compiled for
   tests, benches, examples, or doctests.
 
@@ -251,8 +263,9 @@ For each public candidate in a non-excluded workspace library crate:
 | Live in production or non-production, but not required public     | `hawk::unnecessary_public` |
 | Required public by a compiled cross-crate consumer or interface   | no visibility finding      |
 
-A selected production target is not a library surface to reduce, so its crate
-does not receive these findings.
+A selected production binary is not a library surface to reduce, so its crate
+does not receive these findings. Selected library targets remain eligible for
+both public and restricted-visibility findings.
 
 For each explicit restricted-visibility candidate, Hawk separately finds every
 compiled reference across production and non-production fragments:

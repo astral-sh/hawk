@@ -1,0 +1,4 @@
+[[production]]
+package = "internal-api"
+lib = "internal_api"
+reason = "internal library consumed by other workspace crates"
