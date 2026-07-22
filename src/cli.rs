@@ -15,6 +15,7 @@ use cargo_metadata::{MetadataCommand, TargetKind};
 use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use tempfile::NamedTempFile;
 
+use crate::baseline::Baseline;
 use crate::config::{AnalysisTarget, Config, ConfigDiagnosticKind, FeatureProfile};
 use crate::diagnostics::{DiagnosticRenderer, EMPHASIS, ERROR, WARNING, styled};
 use crate::protocol;
@@ -109,6 +110,22 @@ struct CheckArgs {
     /// Select the diagnostic output format.
     #[arg(long, value_enum, default_value_t, value_name = "FORMAT")]
     output_format: OutputFormat,
+
+    /// Path to a baseline of known findings. Matching findings are suppressed so
+    /// CI can deny only new debt when Hawk is adopted on a large workspace.
+    #[arg(long, value_name = "PATH")]
+    baseline: Option<PathBuf>,
+
+    /// Write the current findings into the baseline file (creates or rewrites).
+    /// Fixed findings are dropped; remaining debt is re-recorded. Requires
+    /// `--baseline`.
+    #[arg(long, requires = "baseline")]
+    update_baseline: bool,
+
+    /// Fail when the baseline contains entries that no longer match any finding.
+    /// Use this to force pruning as debt is paid down. Requires `--baseline`.
+    #[arg(long, requires = "baseline")]
+    deny_unused_baseline: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -622,47 +639,104 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
             config.preserve_uniform_field_visibility(),
         ),
     );
+
+    // Baseline is applied after overrides/exclusions so intentional policy in
+    // hawk.toml remains authoritative; the baseline is only a debt snapshot.
+    let mut baseline = match &args.baseline {
+        Some(path) => {
+            let path = if path.is_absolute() {
+                path.clone()
+            } else {
+                workspace_root.join(path)
+            };
+            let loaded = Baseline::load(&path)?;
+            Some((path, loaded))
+        }
+        None => None,
+    };
+    if args.update_baseline {
+        let (path, _) = baseline
+            .as_ref()
+            .expect("--update-baseline requires --baseline");
+        let path = path.clone();
+        let updated = Baseline::from_findings(&findings.findings);
+        let count = updated.len();
+        updated.write(&path)?;
+        // Keep the in-memory baseline in sync so this run also filters against
+        // the freshly written snapshot (zero new findings, no unused entries).
+        if let Some((_, stored)) = baseline.as_mut() {
+            *stored = updated;
+        }
+        eprintln!(
+            "hawk: wrote {count} finding(s) to baseline {}",
+            path.display()
+        );
+    }
+
+    let unused_baseline_entries = baseline
+        .as_ref()
+        .map(|(_, stored)| stored.unused_entries(&findings.findings))
+        .unwrap_or_default();
+    let mut baselined_count = 0usize;
+
     let mut renderer = DiagnosticRenderer::new(&workspace_root);
     let mut json_diagnostics = Vec::new();
     let mut diagnostic_count = 0;
     let mut diagnostic_counts = BTreeMap::<&str, BTreeMap<&str, usize>>::new();
-    let emitted_finding_ids: HashSet<_> = findings
-        .findings
-        .iter()
-        .filter(|finding| args.only.is_none_or(|only| only.includes(finding.kind)))
-        .filter(|finding| lint_levels.level(finding.kind).is_emitted())
-        .map(|finding| finding.definition.id)
-        .collect();
-    let definition_packages =
-        definition_packages(&production_fragments, &test_fragments, &emitted_finding_ids);
     let mut has_denied_diagnostic = false;
     let production_description = if production_products.len() == 1 {
         format!("binary `{}`", production_products[0].binary)
     } else {
         "the configured production binaries".to_owned()
     };
+
+    // Pre-compute which findings will be emitted so package indexing stays
+    // aligned with the final report (excludes baselined findings).
+    let emitted_finding_ids: HashSet<_> = findings
+        .findings
+        .iter()
+        .filter(|finding| args.only.is_none_or(|only| only.includes(finding.kind)))
+        .filter(|finding| lint_levels.level(finding.kind).is_emitted())
+        .filter(|finding| {
+            baseline
+                .as_ref()
+                .is_none_or(|(_, stored)| !stored.contains(finding))
+        })
+        .map(|finding| finding.definition.id)
+        .collect();
+    let definition_packages =
+        definition_packages(&production_fragments, &test_fragments, &emitted_finding_ids);
+
     for finding in &findings.findings {
         if args.only.is_some_and(|only| !only.includes(finding.kind)) {
             continue;
         }
         let level = lint_levels.level(finding.kind);
-        if level.is_emitted() {
-            diagnostic_count += 1;
-            let package = definition_packages.get(&finding.definition.id).copied();
-            if args.output_format == OutputFormat::Text {
-                *diagnostic_counts
-                    .entry(finding.kind.code())
-                    .or_default()
-                    .entry(package.unwrap_or(&finding.definition.crate_name))
-                    .or_default() += 1;
-            }
-            has_denied_diagnostic |= level == LintLevel::Deny;
-            match args.output_format {
-                OutputFormat::Text => renderer
-                    .write_diagnostic(finding, &production_description, level)
-                    .expect("formatting diagnostics into a string cannot fail"),
-                OutputFormat::Json => json_diagnostics.push(json_finding(finding, level, package)),
-            }
+        if !level.is_emitted() {
+            continue;
+        }
+        if baseline
+            .as_ref()
+            .is_some_and(|(_, stored)| stored.contains(finding))
+        {
+            baselined_count += 1;
+            continue;
+        }
+        diagnostic_count += 1;
+        let package = definition_packages.get(&finding.definition.id).copied();
+        if args.output_format == OutputFormat::Text {
+            *diagnostic_counts
+                .entry(finding.kind.code())
+                .or_default()
+                .entry(package.unwrap_or(&finding.definition.crate_name))
+                .or_default() += 1;
+        }
+        has_denied_diagnostic |= level == LintLevel::Deny;
+        match args.output_format {
+            OutputFormat::Text => renderer
+                .write_diagnostic(finding, &production_description, level)
+                .expect("formatting diagnostics into a string cannot fail"),
+            OutputFormat::Json => json_diagnostics.push(json_finding(finding, level, package)),
         }
     }
     for diagnostic in &findings.config_diagnostics {
@@ -690,6 +764,12 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
             }
         }
     }
+
+    let unused_baseline_count = unused_baseline_entries.len();
+    if args.deny_unused_baseline && unused_baseline_count > 0 {
+        has_denied_diagnostic = true;
+    }
+
     let compilation_target = args.target.as_deref().map_or_else(
         || "the host target".to_owned(),
         |target| format!("target `{target}`"),
@@ -705,31 +785,106 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
                     &compilation_target,
                 )
                 .expect("formatting diagnostics into a string cannot fail");
-            let diagnostics = renderer.into_output();
-            anstream::AutoStream::new(std::io::stdout(), args.color.into())
-                .write_all(diagnostics.as_bytes())
-                .context("write diagnostic output")?;
+            if baselined_count > 0 || unused_baseline_count > 0 {
+                let mut baseline_notes = String::new();
+                if baselined_count > 0 {
+                    writeln!(
+                        baseline_notes,
+                        "hawk: {baselined_count} finding(s) suppressed by baseline"
+                    )
+                    .expect("formatting baseline notes cannot fail");
+                }
+                if unused_baseline_count > 0 {
+                    let severity = if args.deny_unused_baseline {
+                        "error"
+                    } else {
+                        "note"
+                    };
+                    writeln!(
+                        baseline_notes,
+                        "hawk: {severity}: {unused_baseline_count} baseline entr{} no longer match any finding; run with `--update-baseline` to prune",
+                        if unused_baseline_count == 1 {
+                            "y"
+                        } else {
+                            "ies"
+                        }
+                    )
+                    .expect("formatting baseline notes cannot fail");
+                    for entry in unused_baseline_entries.iter().take(10) {
+                        writeln!(
+                            baseline_notes,
+                            "  - {} {}::{}{}",
+                            entry.lint.code(),
+                            entry.crate_name,
+                            entry.item,
+                            entry
+                                .kind
+                                .map(|kind| format!(" ({})", json_definition_kind(kind)))
+                                .unwrap_or_default()
+                        )
+                        .expect("formatting baseline entry cannot fail");
+                    }
+                    if unused_baseline_count > 10 {
+                        writeln!(
+                            baseline_notes,
+                            "  - … and {} more",
+                            unused_baseline_count - 10
+                        )
+                        .expect("formatting baseline entry cannot fail");
+                    }
+                }
+                let mut output = renderer.into_output();
+                output.push_str(&baseline_notes);
+                anstream::AutoStream::new(std::io::stdout(), args.color.into())
+                    .write_all(output.as_bytes())
+                    .context("write diagnostic output")?;
+            } else {
+                let diagnostics = renderer.into_output();
+                anstream::AutoStream::new(std::io::stdout(), args.color.into())
+                    .write_all(diagnostics.as_bytes())
+                    .context("write diagnostic output")?;
+            }
         }
         OutputFormat::Json => {
+            let mut summary = serde_json::json!({
+                "diagnostic_count": diagnostic_count,
+                "target": args.target.as_deref().unwrap_or(toolchain.host()),
+                "production": production_products
+                    .iter()
+                    .map(|product| serde_json::json!({
+                        "package": product.package,
+                        "binary": product.binary,
+                    }))
+                    .collect::<Vec<_>>(),
+                "feature_profiles": config
+                    .feature_profiles()
+                    .iter()
+                    .map(FeatureProfile::name)
+                    .collect::<Vec<_>>(),
+                "includes_non_production_targets": true,
+            });
+            if args.baseline.is_some() {
+                summary["baselined_count"] = serde_json::json!(baselined_count);
+                summary["unused_baseline_count"] = serde_json::json!(unused_baseline_count);
+                if unused_baseline_count > 0 {
+                    summary["unused_baseline"] = serde_json::json!(
+                        unused_baseline_entries
+                            .iter()
+                            .map(|entry| {
+                                serde_json::json!({
+                                    "lint": entry.lint.code(),
+                                    "crate": entry.crate_name,
+                                    "item": entry.item,
+                                    "kind": entry.kind.map(json_definition_kind),
+                                })
+                            })
+                            .collect::<Vec<_>>()
+                    );
+                }
+            }
             let output = serde_json::json!({
                 "schema_version": 3,
-                "summary": {
-                    "diagnostic_count": diagnostic_count,
-                    "target": args.target.as_deref().unwrap_or(toolchain.host()),
-                    "production": production_products
-                        .iter()
-                        .map(|product| serde_json::json!({
-                            "package": product.package,
-                            "binary": product.binary,
-                        }))
-                        .collect::<Vec<_>>(),
-                    "feature_profiles": config
-                        .feature_profiles()
-                        .iter()
-                        .map(FeatureProfile::name)
-                        .collect::<Vec<_>>(),
-                    "includes_non_production_targets": true,
-                },
+                "summary": summary,
                 "diagnostics": json_diagnostics,
             });
             let stdout = std::io::stdout();

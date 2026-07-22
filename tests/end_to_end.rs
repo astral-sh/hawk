@@ -938,6 +938,185 @@ fn ordered_lint_levels_control_severity_and_exit_status() {
 }
 
 #[test]
+fn baseline_suppresses_existing_findings_and_fails_only_on_new_debt() {
+    let context = HawkTestContext::new("basic");
+    let baseline = context.workspace().join("hawk-baseline.json");
+
+    // Snapshot today's findings so -D warnings can pass on a dirty workspace.
+    let update = context.run(&["--baseline", "hawk-baseline.json", "--update-baseline"]);
+    context.assert_success(&update);
+    assert!(
+        baseline.exists(),
+        "baseline file should be created: {}",
+        context.normalized_stderr(&update)
+    );
+    let stderr = context.normalized_stderr(&update);
+    assert!(
+        stderr.contains("wrote") && stderr.contains("finding(s) to baseline"),
+        "expected write confirmation, got:\n{stderr}"
+    );
+
+    let baselined = context.run(&[
+        "--baseline",
+        "hawk-baseline.json",
+        "-D",
+        "warnings",
+        // Config diagnostics are not baselined; allow them so the gate is
+        // about finding debt only.
+        "-A",
+        "hawk::unknown_item",
+        "-A",
+        "hawk::unfulfilled_expectation",
+        "-A",
+        "hawk::ambiguous_item",
+    ]);
+    context.assert_success(&baselined);
+    let stdout = context.normalized_stdout(&baselined);
+    assert!(
+        stdout.contains("suppressed by baseline"),
+        "expected baselined summary, got:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("error[hawk::dead_public]"),
+        "baselined dead_public should not be emitted:\n{stdout}"
+    );
+
+    // Introduce a brand-new dead public item; CI should fail under -D warnings.
+    let library = context.workspace().join("library/src/lib.rs");
+    let source = fs::read_to_string(&library).expect("read library");
+    fs::write(
+        &library,
+        format!("{source}\n/// newly introduced debt\npub fn brand_new_dead_api() {{}}\n"),
+    )
+    .expect("append new dead public API");
+
+    let with_new_debt = context.run(&[
+        "--baseline",
+        "hawk-baseline.json",
+        "-D",
+        "warnings",
+        "-A",
+        "hawk::unknown_item",
+        "-A",
+        "hawk::unfulfilled_expectation",
+        "-A",
+        "hawk::ambiguous_item",
+    ]);
+    assert!(
+        !with_new_debt.status.success(),
+        "new finding must fail CI:\n{}",
+        context.normalized_stdout(&with_new_debt)
+    );
+    let stdout = context.normalized_stdout(&with_new_debt);
+    assert!(
+        stdout.contains("brand_new_dead_api"),
+        "expected new finding in output:\n{stdout}"
+    );
+}
+
+#[test]
+fn baseline_reports_unused_entries_and_can_deny_them() {
+    let context = HawkTestContext::new("basic");
+
+    let update = context.run(&["--baseline", "hawk-baseline.json", "--update-baseline"]);
+    context.assert_success(&update);
+
+    // Inject a stale baseline entry that no longer matches any finding.
+    let baseline_path = context.workspace().join("hawk-baseline.json");
+    let mut baseline: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&baseline_path).expect("read baseline"))
+            .expect("parse baseline");
+    let findings = baseline["findings"]
+        .as_array_mut()
+        .expect("findings array");
+    findings.push(serde_json::json!({
+        "lint": "hawk::dead_public",
+        "crate": "library",
+        "item": "long_gone_api",
+        "kind": "function"
+    }));
+    fs::write(
+        &baseline_path,
+        serde_json::to_string_pretty(&baseline).expect("serialize") + "\n",
+    )
+    .expect("write stale baseline");
+
+    let note_only = context.run(&[
+        "--baseline",
+        "hawk-baseline.json",
+        "-A",
+        "warnings",
+        "-A",
+        "hawk::unknown_item",
+        "-A",
+        "hawk::unfulfilled_expectation",
+        "-A",
+        "hawk::ambiguous_item",
+    ]);
+    context.assert_success(&note_only);
+    let stdout = context.normalized_stdout(&note_only);
+    assert!(
+        stdout.contains("baseline entr") && stdout.contains("long_gone_api"),
+        "expected unused-baseline note:\n{stdout}"
+    );
+
+    let denied = context.run(&[
+        "--baseline",
+        "hawk-baseline.json",
+        "--deny-unused-baseline",
+        "-A",
+        "warnings",
+        "-A",
+        "hawk::unknown_item",
+        "-A",
+        "hawk::unfulfilled_expectation",
+        "-A",
+        "hawk::ambiguous_item",
+    ]);
+    assert!(
+        !denied.status.success(),
+        "unused baseline entries should fail with --deny-unused-baseline:\n{}",
+        context.normalized_stdout(&denied)
+    );
+    let stdout = context.normalized_stdout(&denied);
+    assert!(
+        stdout.contains("error:") && stdout.contains("long_gone_api"),
+        "expected unused-baseline error:\n{stdout}"
+    );
+}
+
+#[test]
+fn baseline_json_summary_reports_baselined_and_unused_counts() {
+    let context = HawkTestContext::new("basic");
+    let update = context.run(&["--baseline", "hawk-baseline.json", "--update-baseline"]);
+    context.assert_success(&update);
+
+    let output = context.run(&[
+        "--baseline",
+        "hawk-baseline.json",
+        "--output-format=json",
+        "-A",
+        "hawk::unknown_item",
+        "-A",
+        "hawk::unfulfilled_expectation",
+        "-A",
+        "hawk::ambiguous_item",
+    ]);
+    context.assert_success(&output);
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout contains one JSON report");
+    assert_eq!(report["summary"]["diagnostic_count"], 0);
+    assert!(
+        report["summary"]["baselined_count"]
+            .as_u64()
+            .is_some_and(|count| count > 0),
+        "expected baselined_count > 0: {}",
+        report["summary"]
+    );
+    assert_eq!(report["summary"]["unused_baseline_count"], 0);
+}
+
+#[test]
 fn emits_versioned_json_diagnostics_and_keeps_cargo_output_on_stderr() {
     let context = HawkTestContext::new("basic");
     let output = context.run(&[
