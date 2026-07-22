@@ -401,8 +401,6 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
     } else {
         workspace_crates
     };
-    let production_consumer_packages =
-        production_workspace_packages(&metadata, &production_products, &analysis_target);
     let doctest_packages = config
         .doctest_packages()
         .map(|packages| {
@@ -459,6 +457,24 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
         .into_owned();
     let mut profile_graphs = Vec::new();
     for (index, feature_profile) in config.feature_profiles().iter().enumerate() {
+        let mut metadata_command = MetadataCommand::new();
+        metadata_command
+            .manifest_path(&manifest_path)
+            .other_options(vec![
+                "--locked".to_owned(),
+                "--filter-platform".to_owned(),
+                args.target
+                    .as_deref()
+                    .unwrap_or(toolchain.host())
+                    .to_owned(),
+            ]);
+        feature_profile.configure_metadata(&mut metadata_command);
+        let resolved_metadata = metadata_command.exec().with_context(|| {
+            format!(
+                "resolve Cargo dependencies for feature profile `{}`",
+                feature_profile.name()
+            )
+        })?;
         let profile_graph_dir = graph_dir
             .join("feature-profiles")
             .join(format!("{index}-{}", feature_profile.name()));
@@ -481,6 +497,11 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
             run_id: format!("{run_id}-feature-profile-{index}"),
             production_dir,
             non_production_dir,
+            production_consumer_packages: production_workspace_packages(
+                &resolved_metadata,
+                &production_products,
+                &analysis_target,
+            )?,
         });
     }
 
@@ -500,7 +521,6 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
             CollectionOptions::new(config.preserve_uniform_field_visibility())
         },
         doctest_packages: doctest_packages.as_deref(),
-        production_consumer_packages: &production_consumer_packages,
     };
     let mut production_fragments = Vec::new();
     let mut test_fragments = Vec::new();
@@ -958,7 +978,6 @@ struct InstrumentedCargo<'a> {
     toolchain: &'a RustToolchain,
     collection_options: CollectionOptions,
     doctest_packages: Option<&'a [String]>,
-    production_consumer_packages: &'a HashSet<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -972,6 +991,7 @@ struct FeatureProfileGraph<'a> {
     run_id: String,
     production_dir: PathBuf,
     non_production_dir: PathBuf,
+    production_consumer_packages: HashSet<String>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1347,6 +1367,7 @@ impl InstrumentedCargo<'_> {
         production_graph_dir: &Path,
         non_production_graph_dir: &Path,
         feature_profile: &FeatureProfile,
+        production_consumer_packages: &HashSet<String>,
     ) -> Result<CollectedFragments> {
         // Every production product uses the same compiler mode and feature set. Reuse one
         // dependency fingerprint across the product builds so Cargo can retain fragments from
@@ -1378,10 +1399,7 @@ impl InstrumentedCargo<'_> {
         let mut production = read_fragments(production_graph_dir)?;
         let mut non_production = read_fragments(non_production_graph_dir)?;
         for fragment in production.iter_mut().chain(&mut non_production) {
-            if !self
-                .production_consumer_packages
-                .contains(&fragment.package_name)
-            {
+            if !production_consumer_packages.contains(&fragment.package_name) {
                 fragment.non_production_consumer = true;
             }
         }
@@ -1434,6 +1452,7 @@ fn collect_profile_fragments(
         &profile_graph.production_dir,
         &profile_graph.non_production_dir,
         profile_graph.feature_profile,
+        &profile_graph.production_consumer_packages,
     )?;
     if !production_fragments
         .iter()
@@ -1714,38 +1733,131 @@ fn production_workspace_packages(
     metadata: &cargo_metadata::Metadata,
     production_products: &[ProductionSelection<'_>],
     analysis_target: &AnalysisTarget,
-) -> HashSet<String> {
-    let packages: HashSet<&str> = metadata
-        .workspace_packages()
+) -> Result<HashSet<String>> {
+    let workspace_packages = metadata.workspace_packages();
+    let packages: HashMap<_, _> = workspace_packages
         .iter()
-        .map(|package| package.name.as_str())
+        .map(|package| (&package.id, package.name.as_str()))
         .collect();
-    let mut incoming = HashSet::new();
+    let resolve = metadata
+        .resolve
+        .as_ref()
+        .context("Cargo metadata did not contain a resolved dependency graph")?;
+    let mut dependencies: HashMap<&str, Vec<&str>> = HashMap::new();
+    let mut incoming: HashMap<&str, Vec<&str>> = HashMap::new();
+    let mut non_production_incoming: HashMap<&str, Vec<&str>> = HashMap::new();
     let mut normal_dependencies: HashMap<&str, Vec<&str>> = HashMap::new();
-    for package in metadata.workspace_packages() {
-        for dependency in &package.dependencies {
-            if !packages.contains(dependency.name.as_str())
-                || dependency
-                    .target
-                    .as_ref()
-                    .is_some_and(|platform| !analysis_target.matches_platform(platform))
-            {
+    for node in &resolve.nodes {
+        let Some(&package) = packages.get(&node.id) else {
+            continue;
+        };
+        for dependency in &node.deps {
+            let Some(&dependency_package) = packages.get(&dependency.pkg) else {
                 continue;
-            }
-            incoming.insert(dependency.name.as_str());
-            if dependency.kind == DependencyKind::Normal {
+            };
+            let mut applicable = dependency.dep_kinds.iter().filter(|kind| {
+                kind.target
+                    .as_ref()
+                    .is_none_or(|platform| analysis_target.matches_platform(platform))
+            });
+            let Some(first_kind) = applicable.next() else {
+                continue;
+            };
+            dependencies
+                .entry(package)
+                .or_default()
+                .push(dependency_package);
+            incoming
+                .entry(dependency_package)
+                .or_default()
+                .push(package);
+            if first_kind.kind == DependencyKind::Normal
+                || applicable.any(|kind| kind.kind == DependencyKind::Normal)
+            {
                 normal_dependencies
-                    .entry(package.name.as_str())
+                    .entry(package)
                     .or_default()
-                    .push(dependency.name.as_str());
+                    .push(dependency_package);
+            } else {
+                non_production_incoming
+                    .entry(dependency_package)
+                    .or_default()
+                    .push(package);
             }
         }
     }
 
-    let mut pending: Vec<&str> = packages
-        .iter()
-        .copied()
-        .filter(|package| !incoming.contains(package))
+    let mut visited = HashSet::new();
+    let mut ordered = Vec::with_capacity(packages.len());
+    for package in packages.values().copied() {
+        let mut pending = vec![(package, false)];
+        while let Some((package, expanded)) = pending.pop() {
+            if expanded {
+                ordered.push(package);
+            } else if visited.insert(package) {
+                pending.push((package, true));
+                if let Some(dependencies) = dependencies.get(package) {
+                    pending.extend(dependencies.iter().map(|dependency| (*dependency, false)));
+                }
+            }
+        }
+    }
+
+    let mut components: Vec<Vec<&str>> = Vec::new();
+    let mut component_by_package = HashMap::new();
+    while let Some(package) = ordered.pop() {
+        if component_by_package.contains_key(package) {
+            continue;
+        }
+        let component_index = components.len();
+        let mut component = Vec::new();
+        let mut pending = vec![package];
+        while let Some(package) = pending.pop() {
+            if component_by_package.contains_key(package) {
+                continue;
+            }
+            component_by_package.insert(package, component_index);
+            component.push(package);
+            if let Some(dependents) = incoming.get(package) {
+                pending.extend(dependents);
+            }
+        }
+        components.push(component);
+    }
+
+    let mut root_components = vec![true; components.len()];
+    for (&package, dependents) in &incoming {
+        let component = component_by_package[package];
+        if dependents
+            .iter()
+            .any(|dependent| component_by_package[dependent] != component)
+        {
+            root_components[component] = false;
+        }
+    }
+
+    let mut pending: Vec<&str> = components
+        .into_iter()
+        .enumerate()
+        .filter(|(index, _)| root_components[*index])
+        .flat_map(|(index, component)| {
+            // A dev-dependency cycle has no package with zero incoming edges.
+            // Start outside its dev/build-only edges so fixtures remain non-production.
+            let roots: Vec<_> = component
+                .iter()
+                .copied()
+                .filter(|package| {
+                    non_production_incoming
+                        .get(package)
+                        .is_none_or(|dependents| {
+                            dependents
+                                .iter()
+                                .all(|dependent| component_by_package[dependent] != index)
+                        })
+                })
+                .collect();
+            if roots.is_empty() { component } else { roots }
+        })
         .chain(production_products.iter().map(|product| product.package))
         .collect();
     let mut production_packages = HashSet::new();
@@ -1756,7 +1868,7 @@ fn production_workspace_packages(
             pending.extend(dependencies);
         }
     }
-    production_packages
+    Ok(production_packages)
 }
 
 fn validate_excluded_crates(

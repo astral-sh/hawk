@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
+use cargo_metadata::{CargoOpt, MetadataCommand};
 use cargo_platform::{Cfg, Platform};
 use serde::Deserialize;
 
@@ -257,6 +258,18 @@ impl FeatureProfile {
 
     pub(crate) fn configure_cargo(&self, command: &mut Command) {
         command.args(self.cargo_arguments());
+    }
+
+    pub(crate) fn configure_metadata(&self, command: &mut MetadataCommand) {
+        if self.all_features {
+            command.features(CargoOpt::AllFeatures);
+        }
+        if self.no_default_features {
+            command.features(CargoOpt::NoDefaultFeatures);
+        }
+        if !self.features.is_empty() {
+            command.features(CargoOpt::SomeFeatures(self.features.clone()));
+        }
     }
 
     pub(crate) fn cargo_arguments_description(&self) -> String {
@@ -592,12 +605,14 @@ impl Config {
         let known_items: HashSet<KnownItemIdentity<'_>> = production_fragments
             .iter()
             .chain(test_fragments)
+            .filter(|fragment| fragment.compilation_target == target.name)
             .flat_map(|fragment| &fragment.definitions)
             .map(known_item_identity)
             .collect();
         let logical_items: HashSet<LogicalItemIdentity<'_>> = production_fragments
             .iter()
             .chain(test_fragments)
+            .filter(|fragment| fragment.compilation_target == target.name)
             .flat_map(|fragment| {
                 fragment.definitions.iter().map(|definition| {
                     logical_item_identity(fragment.package_name.as_str(), definition)
@@ -1224,6 +1239,42 @@ reason = "detect stale selectors"
     }
 
     #[test]
+    fn host_only_item_is_unknown_for_analysis_target() {
+        let directory = tempfile::tempdir().expect("temporary configuration directory");
+        let path = directory.path().join("hawk.toml");
+        std::fs::write(
+            &path,
+            r#"
+[[override]]
+lint = "hawk::dead_public"
+crate = "library"
+item = "host_only"
+level = "expect"
+reason = "detect selectors outside the analyzed target"
+"#,
+        )
+        .expect("write configuration");
+        let config = Config::load(directory.path(), Some(&path)).expect("load configuration");
+        let mut host_fragment = fragment();
+        host_fragment.compilation_target = "x86_64-apple-darwin".into();
+        host_fragment.definitions[0].name = "host_only".into();
+
+        let applied = config.apply(
+            &target("aarch64-apple-darwin", &["unix"]),
+            &[host_fragment],
+            &[],
+            &candidate_crates(),
+            Vec::new(),
+        );
+
+        assert_eq!(applied.config_diagnostics.len(), 1);
+        assert_eq!(
+            applied.config_diagnostics[0].kind,
+            ConfigDiagnosticKind::UnknownItem
+        );
+    }
+
+    #[test]
     fn ambiguous_item_selector_suppresses_no_findings() {
         let directory = tempfile::tempdir().expect("temporary configuration directory");
         let path = directory.path().join("hawk.toml");
@@ -1315,13 +1366,21 @@ reason = "only retained on Windows"
         .expect("write configuration");
         let config = Config::load(directory.path(), Some(&path)).expect("load configuration");
         let fragments = vec![fragment()];
+        let mut windows_fragment = fragment();
+        windows_fragment.compilation_target = "x86_64-pc-windows-msvc".into();
+        let windows_fragments = vec![windows_fragment];
 
         let windows = config.apply(
             &target("x86_64-pc-windows-msvc", &["windows"]),
-            &fragments,
+            &windows_fragments,
             &[],
             &candidate_crates(),
-            analyze(&fragments, &[], &candidate_crates(), &HashSet::new()),
+            analyze(
+                &windows_fragments,
+                &[],
+                &candidate_crates(),
+                &HashSet::new(),
+            ),
         );
         assert!(windows.findings.is_empty());
         assert!(windows.config_diagnostics.is_empty());
@@ -1487,13 +1546,21 @@ reason = "generated only on Windows"
         .expect("write configuration");
         let config = Config::load(directory.path(), Some(&path)).expect("load configuration");
         let fragments = vec![scoped_fragment()];
+        let mut windows_fragment = scoped_fragment();
+        windows_fragment.compilation_target = "x86_64-pc-windows-msvc".into();
+        let windows_fragments = vec![windows_fragment];
 
         let windows = config.apply(
             &target("x86_64-pc-windows-msvc", &["windows"]),
-            &fragments,
+            &windows_fragments,
             &[],
             &candidate_crates(),
-            analyze(&fragments, &[], &candidate_crates(), &HashSet::new()),
+            analyze(
+                &windows_fragments,
+                &[],
+                &candidate_crates(),
+                &HashSet::new(),
+            ),
         );
         assert_eq!(windows.findings.len(), 2);
 
