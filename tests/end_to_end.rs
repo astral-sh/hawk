@@ -1302,6 +1302,55 @@ fn library_production_targets_support_explicit_rlib_crate_types() {
 }
 
 #[test]
+fn library_production_targets_allow_unrelated_duplicate_workspace_crate_names() {
+    let context = HawkTestContext::new("library_products");
+    let workspace_manifest_path = context.workspace().join("Cargo.toml");
+    let workspace_manifest = fs::read_to_string(&workspace_manifest_path)
+        .expect("read workspace manifest")
+        .replace(
+            "members = [\"api\", \"consumer\"]",
+            "members = [\"api\", \"consumer\", \"duplicate-a\", \"duplicate-b\"]",
+        );
+    fs::write(workspace_manifest_path, workspace_manifest)
+        .expect("add unrelated duplicate workspace libraries");
+
+    for (package, function) in [
+        ("duplicate-a", "first_unrelated_export"),
+        ("duplicate-b", "second_unrelated_export"),
+    ] {
+        let package_path = context.workspace().join(package);
+        fs::create_dir_all(package_path.join("src")).expect("create unrelated library package");
+        fs::write(
+            package_path.join("Cargo.toml"),
+            format!(
+                "[package]\nname = \"{package}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[lib]\nname = \"shared\"\n"
+            ),
+        )
+        .expect("write unrelated library manifest");
+        fs::write(
+            package_path.join("src/lib.rs"),
+            format!("pub fn {function}() {{}}\n"),
+        )
+        .expect("write unrelated library source");
+    }
+    regenerate_fixture_lockfile(&context);
+
+    let output = context.run(&["--output-format=json"]);
+
+    context.assert_success(&output);
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout contains one JSON report");
+    assert!(
+        report["diagnostics"]
+            .as_array()
+            .expect("diagnostics is an array")
+            .iter()
+            .all(|diagnostic| diagnostic["identity"]["crate"] == "internal_api"),
+        "unrelated duplicate libraries became diagnostic targets: {report}"
+    );
+}
+
+#[test]
 fn library_production_targets_ignore_unselected_workspace_expectations() {
     let context = HawkTestContext::new("library_products");
     let consumer_path = context.workspace().join("consumer/src/lib.rs");
@@ -1528,6 +1577,22 @@ fn rejects_duplicate_workspace_library_crate_names() {
         "conflicting names: `shared` (`library-a`, `library-b`). Hawk identifies graph definitions and fix targets by crate name"
     ));
     assert!(stderr.contains("give each `[lib]` target a unique `name`"));
+}
+
+#[test]
+fn rejects_duplicate_audited_library_crate_names() {
+    let context = HawkTestContext::new("duplicate_library_names");
+    fs::write(
+        context.workspace().join("hawk.toml"),
+        "[[production]]\npackage = \"library-a\"\nlib = \"shared\"\nreason = \"library product under analysis\"\n",
+    )
+    .expect("select an ambiguous library product");
+
+    let output = context.run(&[]);
+
+    assert!(!output.status.success());
+    let stderr = context.normalized_stderr(&output);
+    assert!(stderr.contains("conflicting names: `shared` (`library-a`, `library-b`)"));
 }
 
 #[test]

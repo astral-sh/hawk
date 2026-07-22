@@ -336,8 +336,6 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
         .no_deps()
         .exec()
         .with_context(|| format!("read Cargo metadata from {}", args.manifest_path.display()))?;
-    let workspace_crates = workspace_library_crates(&metadata)?;
-    validate_excluded_crates(&args.excluded_crates, &workspace_crates)?;
 
     let workspace_root = metadata.workspace_root.clone().into_std_path_buf();
     let manifest_path = args
@@ -390,17 +388,18 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
             config_path.display()
         );
     }
-    let candidate_crates = if production_products
+    let audited_library_crates = production_products
         .iter()
         .all(|product| matches!(product.product, ProductionProduct::Library(_)))
-    {
-        production_products
-            .iter()
-            .map(|product| product.product.name().replace('-', "_"))
-            .collect()
-    } else {
-        workspace_crates
-    };
+        .then(|| {
+            production_products
+                .iter()
+                .map(|product| product.product.name().replace('-', "_"))
+                .collect::<HashSet<_>>()
+        });
+    let workspace_crates = workspace_library_crates(&metadata, audited_library_crates.as_ref())?;
+    validate_excluded_crates(&args.excluded_crates, &workspace_crates)?;
+    let candidate_crates = audited_library_crates.unwrap_or(workspace_crates);
     let doctest_packages = config
         .doctest_packages()
         .map(|packages| {
@@ -1693,7 +1692,10 @@ fn is_library_target(target: &Target) -> bool {
     })
 }
 
-fn workspace_library_crates(metadata: &cargo_metadata::Metadata) -> Result<HashSet<String>> {
+fn workspace_library_crates(
+    metadata: &cargo_metadata::Metadata,
+    audited_crates: Option<&HashSet<String>>,
+) -> Result<HashSet<String>> {
     let mut packages_by_crate: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for package in metadata.workspace_packages() {
         for target in &package.targets {
@@ -1708,7 +1710,10 @@ fn workspace_library_crates(metadata: &cargo_metadata::Metadata) -> Result<HashS
 
     let conflicts = packages_by_crate
         .iter()
-        .filter(|(_, packages)| packages.len() > 1)
+        .filter(|(crate_name, packages)| {
+            packages.len() > 1
+                && audited_crates.is_none_or(|audited_crates| audited_crates.contains(*crate_name))
+        })
         .map(|(crate_name, packages)| {
             format!(
                 "`{crate_name}` ({})",
