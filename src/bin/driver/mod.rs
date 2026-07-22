@@ -1241,20 +1241,8 @@ fn declaration_span(
     let end = item_span.hi();
     let start_location = source_map.lookup_char_pos(start);
     let end_location = source_map.lookup_char_pos(end);
-    let file = normalize_source_path(
-        &start_location
-            .file
-            .name
-            .prefer_local_unconditionally()
-            .to_string(),
-    );
-    let end_file = normalize_source_path(
-        &end_location
-            .file
-            .name
-            .prefer_local_unconditionally()
-            .to_string(),
-    );
+    let file = source_file_path(tcx, &start_location.file.name);
+    let end_file = source_file_path(tcx, &end_location.file.name);
     (file == end_file).then_some(DeclarationSpan {
         file,
         byte_start: start_location
@@ -1272,21 +1260,35 @@ fn declaration_span(
 fn source_span(tcx: TyCtxt<'_>, span: rustc_span::Span) -> Span {
     let location = tcx.sess.source_map().lookup_char_pos(span.lo());
     Span {
-        file: normalize_source_path(
-            &location
-                .file
-                .name
-                .prefer_local_unconditionally()
-                .to_string(),
-        ),
+        file: source_file_path(tcx, &location.file.name),
         line: location.line,
         column: location.col.to_usize() + 1,
     }
 }
 
-fn normalize_source_path(path: &str) -> String {
+/// Returns the canonical path of a source file.
+///
+/// Real file names are resolved against the compilation's working directory
+/// and lexically normalized, so the same source file receives an identical
+/// path in every compilation regardless of the invoking workspace.
+fn source_file_path(tcx: TyCtxt<'_>, name: &FileName) -> String {
+    match name {
+        FileName::Real(name) => {
+            let path = name.local_path_if_available();
+            if path.is_absolute() {
+                normalize_source_path(path)
+            } else {
+                let working_dir = tcx.sess.opts.working_dir.local_path_if_available();
+                normalize_source_path(&working_dir.join(path))
+            }
+        }
+        _ => name.prefer_local_unconditionally().to_string(),
+    }
+}
+
+fn normalize_source_path(path: &Path) -> String {
     let mut normalized = PathBuf::new();
-    for component in Path::new(&path).components() {
+    for component in path.components() {
         match component {
             Component::CurDir => {}
             Component::ParentDir => match normalized.components().next_back() {
@@ -1714,9 +1716,16 @@ mod tests {
     #[test]
     fn source_paths_are_lexically_normalized() {
         assert_eq!(
-            normalize_source_path("library/tests/../src/shared.rs"),
+            normalize_source_path(Path::new("library/tests/../src/shared.rs")),
             "library/src/shared.rs"
         );
-        assert_eq!(normalize_source_path("../shared.rs"), "../shared.rs");
+        assert_eq!(
+            normalize_source_path(Path::new("../shared.rs")),
+            "../shared.rs"
+        );
+        assert_eq!(
+            normalize_source_path(Path::new("/workspace/library/../src/lib.rs")),
+            "/workspace/src/lib.rs"
+        );
     }
 }

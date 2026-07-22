@@ -16,14 +16,14 @@ use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser, Subcommand, Value
 use tempfile::NamedTempFile;
 
 use crate::config::{AnalysisTarget, Config, ConfigDiagnosticKind, FeatureProfile};
-use crate::diagnostics::{DiagnosticRenderer, EMPHASIS, ERROR, WARNING, styled};
+use crate::diagnostics::{DiagnosticRenderer, EMPHASIS, ERROR, WARNING, display_path, styled};
 use crate::protocol;
 use crate::toolchain::{
     RustToolchain, clear_protocol_environment, driver_executable, validate_driver_protocol,
 };
 use cargo_hawk_internal::graph::{
     CollectionOptions, Definition, DefinitionId, DefinitionIdentity, DefinitionKind, Finding,
-    FindingKind, FixPlan, FixTarget, Fragment, analyze_with_options,
+    FindingKind, FixPlan, FixTarget, Fragment, Span, analyze_with_options,
 };
 
 #[derive(Debug, Parser)]
@@ -664,7 +664,9 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
                 OutputFormat::Text => renderer
                     .write_diagnostic(finding, &production_description, level)
                     .expect("formatting diagnostics into a string cannot fail"),
-                OutputFormat::Json => json_diagnostics.push(json_finding(finding, level, package)),
+                OutputFormat::Json => {
+                    json_diagnostics.push(json_finding(finding, level, package, &workspace_root));
+                }
             }
         }
     }
@@ -753,6 +755,7 @@ fn json_finding(
     finding: &Finding<'_>,
     level: LintLevel,
     package: Option<&str>,
+    workspace_root: &Path,
 ) -> serde_json::Value {
     let definition = finding.definition;
     serde_json::json!({
@@ -761,7 +764,7 @@ fn json_finding(
         "severity": level.severity(),
         "kind": json_finding_kind(finding.kind),
         "identity": {
-            "id": stable_finding_id(definition, package),
+            "id": stable_finding_id(definition, package, workspace_root),
             "compiler_id": definition.id.to_string(),
             "package": package,
             "crate": definition.crate_name,
@@ -771,13 +774,9 @@ fn json_finding(
             "module_scope": definition.module_scope,
         },
         "location": definition.declaration_span.as_ref().map_or_else(
-            || definition.span.as_ref().map(|span| serde_json::json!({
-                "file": span.file,
-                "line": span.line,
-                "column": span.column,
-            })),
+            || definition.span.as_ref().map(|span| json_span(span, workspace_root)),
             |span| Some(serde_json::json!({
-                "file": span.file,
+                "file": display_path(&span.file, workspace_root),
                 "byte_start": span.byte_start,
                 "byte_end": span.byte_end,
                 "line": span.start_line,
@@ -786,14 +785,29 @@ fn json_finding(
                 "end_column": span.end_column,
             })),
         ),
-        "expansion": definition.expansion_span,
+        "expansion": definition.expansion_span.as_ref().map(|expansion| serde_json::json!({
+            "definition": json_span(&expansion.definition, workspace_root),
+            "callsite": json_span(&expansion.callsite, workspace_root),
+        })),
         "test_only": finding.test_only,
         "test_compiled_only": finding.test_compiled_only,
     })
 }
 
+fn json_span(span: &Span, workspace_root: &Path) -> serde_json::Value {
+    serde_json::json!({
+        "file": display_path(&span.file, workspace_root),
+        "line": span.line,
+        "column": span.column,
+    })
+}
+
 /// Builds a target-independent finding identity from length-prefixed semantic and source components.
-fn stable_finding_id(definition: &Definition, package: Option<&str>) -> String {
+fn stable_finding_id(
+    definition: &Definition,
+    package: Option<&str>,
+    workspace_root: &Path,
+) -> String {
     let source = definition
         .span
         .as_ref()
@@ -819,6 +833,12 @@ fn stable_finding_id(definition: &Definition, package: Option<&str>) -> String {
             })
         })
         .unwrap_or(("none", "", 0, 0));
+    let source = (
+        source.0,
+        display_path(source.1, workspace_root),
+        source.2,
+        source.3,
+    );
     let mut id = String::from("v1");
     for component in [
         package.unwrap_or(""),
@@ -1761,7 +1781,8 @@ mod tests {
     use super::{
         Args, CargoInvocation, DEFAULT_TARGET_DIR_COMPONENT_MAX_BYTES, DiagnosticRenderer,
         LintLevel, LintLevels, ProductionSelection, default_target_dir, definition_packages,
-        fix_plan_signature, json_definition_kind, json_finding_kind, validate_excluded_crates,
+        fix_plan_signature, json_definition_kind, json_finding_kind, stable_finding_id,
+        validate_excluded_crates,
     };
 
     fn render_diagnostic(finding: &Finding<'_>) -> String {
@@ -2166,6 +2187,57 @@ mod tests {
           = help: change this declaration to `pub(crate)`
 
         "###);
+    }
+
+    #[test]
+    fn canonical_span_paths_render_relative_to_the_workspace() {
+        let definition = Definition {
+            id: test_id("internal_helper"),
+            crate_name: "library".into(),
+            name: "internal_helper".into(),
+            kind: DefinitionKind::Function,
+            span: Some(Span {
+                file: format!(
+                    "{}/tests/fixtures/basic/library/src/lib.rs",
+                    env!("CARGO_MANIFEST_DIR")
+                ),
+                line: 5,
+                column: 1,
+            }),
+            declaration_span: None,
+            expansion_span: None,
+            public_api: true,
+            restricted_visible_api: false,
+            crate_visible_api: false,
+            visible_reexport_api: false,
+            module_scope: vec![],
+            uniform_field_group: None,
+            dead_code_allowed: false,
+        };
+        let finding = Finding {
+            kind: FindingKind::UnnecessaryPublic,
+            definition: &definition,
+            test_only: false,
+            test_compiled_only: false,
+        };
+        let output = render_diagnostic(&finding);
+        let output = anstream::adapter::strip_str(&output).to_string();
+        assert!(
+            output.contains("--> tests/fixtures/basic/library/src/lib.rs:5:1"),
+            "expected workspace-relative location in:\n{output}"
+        );
+        assert!(
+            output.contains("pub fn internal_helper() {}"),
+            "expected source line loaded from the canonical path in:\n{output}"
+        );
+
+        let id = stable_finding_id(
+            &definition,
+            Some("library"),
+            Path::new(env!("CARGO_MANIFEST_DIR")),
+        );
+        assert!(id.contains("tests/fixtures/basic/library/src/lib.rs"));
+        assert!(!id.contains(env!("CARGO_MANIFEST_DIR")));
     }
 
     #[test]

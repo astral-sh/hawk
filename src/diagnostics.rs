@@ -22,6 +22,19 @@ fn load_source(path: &Path) -> std::io::Result<String> {
     fs::read_to_string(path)
 }
 
+/// Returns a source path for user-facing output, relative to the workspace
+/// root when the file is inside it.
+///
+/// Analysis spans carry canonical paths so definitions compare equal across
+/// compilations; this is the one place that translates them for display.
+pub(crate) fn display_path<'a>(file: &'a str, workspace_root: &Path) -> &'a str {
+    Path::new(file)
+        .strip_prefix(workspace_root)
+        .ok()
+        .and_then(Path::to_str)
+        .unwrap_or(file)
+}
+
 struct CachedSource {
     source: String,
     line_starts: Vec<usize>,
@@ -101,6 +114,7 @@ where
             production_description,
             source_line.as_deref(),
             level,
+            self.workspace_root,
         )
     }
 
@@ -169,6 +183,7 @@ fn write_diagnostic(
     production_description: &str,
     source_line: Option<&str>,
     level: LintLevel,
+    workspace_root: &Path,
 ) -> std::fmt::Result {
     let dead_reachability_source = if finding.test_compiled_only {
         "any workspace test"
@@ -300,7 +315,7 @@ fn write_diagnostic(
     if let Some(span) = &finding.definition.span {
         let width = write_annotated_location(
             output,
-            &span.file,
+            display_path(&span.file, workspace_root),
             span.line,
             span.column,
             source_line,
