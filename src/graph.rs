@@ -333,6 +333,36 @@ impl EquivalenceGroups {
     }
 }
 
+/// Returns whether a compiler fragment belongs to the selected library target.
+///
+/// Binary-product workflows continue to audit every workspace library. When
+/// only libraries are selected, the package, target, and crate-root provenance
+/// distinguish their test harnesses from same-named integration-test binaries.
+#[must_use]
+pub fn is_audited_fragment(production_fragments: &[Fragment], fragment: &Fragment) -> bool {
+    if production_fragments.iter().any(|product| {
+        product.is_product_root && product.product_root_kind != Some(ProductionTargetKind::Library)
+    }) {
+        return true;
+    }
+
+    let has_library_product = production_fragments.iter().any(|product| {
+        product.is_product_root && product.product_root_kind == Some(ProductionTargetKind::Library)
+    });
+    if !has_library_product {
+        return true;
+    }
+
+    production_fragments.iter().any(|product| {
+        product.is_product_root
+            && product.product_root_kind == Some(ProductionTargetKind::Library)
+            && product.package_name == fragment.package_name
+            && product.crate_name == fragment.crate_name
+            && product.compilation_target == fragment.compilation_target
+            && product.crate_root == fragment.crate_root
+    })
+}
+
 pub fn analyze<'a>(
     production_fragments: &'a [Fragment],
     test_fragments: &'a [Fragment],
@@ -576,18 +606,14 @@ pub fn analyze_with_options<'a>(
         .collect();
     for (fragment, definition) in production_fragments
         .iter()
+        .chain(test_fragments)
+        .filter(|fragment| is_audited_fragment(production_fragments, fragment))
         .flat_map(|fragment| {
             fragment
                 .definitions
                 .iter()
                 .map(move |definition| (fragment, definition))
         })
-        .chain(test_fragments.iter().flat_map(|fragment| {
-            fragment
-                .definitions
-                .iter()
-                .map(move |definition| (fragment, definition))
-        }))
     {
         let identity = definition_identity(definition);
         if !production_targets.contains(fragment.compilation_target.as_str())
@@ -642,18 +668,14 @@ pub fn analyze_with_options<'a>(
 
     for (fragment, definition) in production_fragments
         .iter()
+        .chain(test_fragments)
+        .filter(|fragment| is_audited_fragment(production_fragments, fragment))
         .flat_map(|fragment| {
             fragment
                 .definitions
                 .iter()
                 .map(move |definition| (fragment, definition))
         })
-        .chain(test_fragments.iter().flat_map(|fragment| {
-            fragment
-                .definitions
-                .iter()
-                .map(move |definition| (fragment, definition))
-        }))
     {
         let identity = definition_identity(definition);
         if !production_targets.contains(fragment.compilation_target.as_str())

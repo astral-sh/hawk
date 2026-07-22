@@ -933,6 +933,107 @@ fn library_production_targets_are_described_in_json_reports() {
 }
 
 #[test]
+fn library_production_targets_ignore_same_named_integration_tests() {
+    let context = HawkTestContext::new("library_products");
+    let library_path = context.workspace().join("api/src/lib.rs");
+    let mut library = fs::read_to_string(&library_path).expect("read library source");
+    library.push_str(
+        "\n#[cfg(test)]\npub fn library_test_helper() {}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn uses_library_test_helper() {\n        super::library_test_helper();\n    }\n}\n",
+    );
+    fs::write(&library_path, library).expect("add test-only library declaration");
+
+    let integration_path = context.workspace().join("api/tests/internal_api.rs");
+    fs::create_dir_all(
+        integration_path
+            .parent()
+            .expect("integration test directory"),
+    )
+    .expect("create integration test directory");
+    let integration_source = "pub fn integration_test_helper() {\n    internal_api::used_across_workspace();\n}\n\npub fn unused_integration_test_helper() {}\n\n#[test]\nfn exercises_public_api() {\n    integration_test_helper();\n}\n";
+    fs::write(&integration_path, integration_source).expect("add same-named integration test");
+
+    let output = context.run(&["--output-format=json"]);
+
+    context.assert_success(&output);
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout contains one JSON report");
+    let diagnostics = report["diagnostics"]
+        .as_array()
+        .expect("diagnostics is an array");
+    assert!(
+        diagnostics
+            .iter()
+            .all(|diagnostic| { diagnostic["location"]["file"] != "api/tests/internal_api.rs" }),
+        "same-named integration test expanded the library diagnostic surface: {report}"
+    );
+    let test_helper = diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic["identity"]["item"] == "library_test_helper")
+        .expect("library test-harness declaration remains a diagnostic candidate");
+    assert_eq!(test_helper["code"], "hawk::unnecessary_public");
+    assert_eq!(test_helper["test_only"], true);
+    assert_eq!(test_helper["test_compiled_only"], true);
+
+    let output = context.run(&["--fix", "--allow-no-vcs"]);
+
+    context.assert_success(&output);
+    assert_eq!(
+        fs::read_to_string(&integration_path).expect("read integration test after fixing"),
+        integration_source,
+        "library-only fixing modified the same-named integration-test target"
+    );
+    let library = fs::read_to_string(library_path).expect("read fixed library source");
+    assert!(library.contains("fn library_test_helper()"));
+    assert!(!library.contains("pub fn library_test_helper()"));
+}
+
+#[test]
+fn library_production_targets_ignore_same_named_integration_test_overrides() {
+    let context = HawkTestContext::new("library_products");
+    let integration_path = context.workspace().join("api/tests/internal_api.rs");
+    fs::create_dir_all(
+        integration_path
+            .parent()
+            .expect("integration test directory"),
+    )
+    .expect("create integration test directory");
+    fs::write(
+        integration_path,
+        "pub fn integration_only() {}\n\n#[test]\nfn integration_test() {}\n",
+    )
+    .expect("add same-named integration test");
+
+    let configuration_path = context.workspace().join("hawk.toml");
+    let mut configuration =
+        fs::read_to_string(&configuration_path).expect("read production configuration");
+    configuration.push_str(
+        "\n[[override]]\nlint = \"hawk::dead_public\"\ncrate = \"internal_api\"\nitem = \"integration_only\"\nlevel = \"expect\"\nreason = \"integration targets are outside the library audit\"\n",
+    );
+    fs::write(configuration_path, configuration).expect("add integration-target override");
+
+    let output = context.run(&["--output-format=json"]);
+
+    context.assert_success(&output);
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout contains one JSON report");
+    let diagnostics = report["diagnostics"]
+        .as_array()
+        .expect("diagnostics is an array");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic["code"] == "hawk::unknown_item"),
+        "an integration-test declaration was accepted as an audited library item: {report}"
+    );
+    assert!(
+        !diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic["code"] == "hawk::unfulfilled_expectation"),
+        "an integration-test override became an unfulfilled library expectation: {report}"
+    );
+}
+
+#[test]
 fn library_production_targets_preserve_test_only_caller_classification() {
     let context = HawkTestContext::new("library_products");
     let library_path = context.workspace().join("api/src/lib.rs");

@@ -9,7 +9,9 @@ use cargo_metadata::{CargoOpt, MetadataCommand};
 use cargo_platform::{Cfg, Platform};
 use serde::Deserialize;
 
-use cargo_hawk_internal::graph::{Definition, DefinitionKind, Finding, FindingKind, Fragment};
+use cargo_hawk_internal::graph::{
+    Definition, DefinitionKind, Finding, FindingKind, Fragment, is_audited_fragment,
+};
 
 #[derive(Debug)]
 pub(crate) struct Config {
@@ -606,6 +608,10 @@ impl Config {
             .iter()
             .chain(test_fragments)
             .filter(|fragment| fragment.compilation_target == target.name)
+            .filter(|fragment| {
+                !candidate_crates.contains(&fragment.crate_name)
+                    || is_audited_fragment(production_fragments, fragment)
+            })
             .flat_map(|fragment| &fragment.definitions)
             .map(known_item_identity)
             .collect();
@@ -613,6 +619,10 @@ impl Config {
             .iter()
             .chain(test_fragments)
             .filter(|fragment| fragment.compilation_target == target.name)
+            .filter(|fragment| {
+                !candidate_crates.contains(&fragment.crate_name)
+                    || is_audited_fragment(production_fragments, fragment)
+            })
             .flat_map(|fragment| {
                 fragment.definitions.iter().map(|definition| {
                     logical_item_identity(fragment.package_name.as_str(), definition)
