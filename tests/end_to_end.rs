@@ -409,6 +409,59 @@ fn resolves_relative_target_directory_from_the_launch_directory() {
 }
 
 #[test]
+fn resolves_workspace_cargo_configuration_from_an_external_launch_directory() {
+    let context = HawkTestContext::new("basic");
+    let patched_dependency = tempfile::tempdir().expect("temporary patched dependency");
+    fs::create_dir(patched_dependency.path().join("src")).expect("create patched dependency");
+    fs::write(
+        patched_dependency.path().join("Cargo.toml"),
+        "[package]\nname = \"hawk-metadata-config-support\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .expect("write patched dependency manifest");
+    fs::write(
+        patched_dependency.path().join("src/lib.rs"),
+        "pub fn fixture() {}\n",
+    )
+    .expect("write patched dependency source");
+
+    let app_manifest_path = context.workspace().join("app/Cargo.toml");
+    let app_manifest = fs::read_to_string(&app_manifest_path)
+        .expect("read app manifest")
+        .replace(
+            "[dependencies]\n",
+            "[dependencies]\nhawk-metadata-config-support = \"0.1.0\"\n",
+        );
+    fs::write(app_manifest_path, app_manifest).expect("add patched dependency");
+
+    let cargo_config = context.workspace().join(".cargo");
+    fs::create_dir(&cargo_config).expect("create Cargo configuration directory");
+    fs::write(
+        cargo_config.join("config.toml"),
+        format!(
+            "[patch.crates-io]\nhawk-metadata-config-support = {{ path = \"{}\" }}\n",
+            patched_dependency
+                .path()
+                .to_string_lossy()
+                .replace('\\', "\\\\")
+                .replace('"', "\\\"")
+        ),
+    )
+    .expect("write Cargo dependency patch configuration");
+    regenerate_fixture_lockfile(&context);
+
+    let launch_directory = tempfile::tempdir().expect("temporary launch directory");
+    let output = context
+        .command()
+        .current_dir(launch_directory.path())
+        .arg("-A")
+        .arg("warnings")
+        .output()
+        .expect("run cargo-hawk outside its configured workspace");
+
+    context.assert_success(&output);
+}
+
+#[test]
 fn ignores_stale_fix_plan_during_analysis() {
     let context = HawkTestContext::new("basic");
     let output = context

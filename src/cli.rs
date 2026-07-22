@@ -459,6 +459,7 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
     for (index, feature_profile) in config.feature_profiles().iter().enumerate() {
         let mut metadata_command = MetadataCommand::new();
         metadata_command
+            .current_dir(&workspace_root)
             .manifest_path(&manifest_path)
             .other_options(vec![
                 "--locked".to_owned(),
