@@ -1637,9 +1637,7 @@ fn validate_excluded_crates(
         .join(", ");
 
     bail!(
-        "unknown --exclude-crate value(s): {}; valid workspace library crate names: {}",
-        unknown_crates,
-        valid_crates,
+        "unknown --exclude-crate value(s): {unknown_crates}; valid workspace library crate names: {valid_crates}"
     );
 }
 
