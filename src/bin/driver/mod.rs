@@ -1378,16 +1378,36 @@ fn workspace_root() -> &'static Path {
 }
 
 fn normalize_source_path(workspace_root: &Path, working_directory: &Path, path: &Path) -> String {
+    normalize_source_path_with_case_sensitivity(
+        workspace_root,
+        working_directory,
+        path,
+        cfg!(windows),
+    )
+}
+
+fn normalize_source_path_with_case_sensitivity(
+    workspace_root: &Path,
+    working_directory: &Path,
+    path: &Path,
+    case_insensitive: bool,
+) -> String {
     // Resolving against the session working directory makes the result
     // independent of which directory Cargo happened to compile from.
     let path = lexically_normalize(&working_directory.join(path));
-    let relative = if cfg!(windows) {
+    let relative = if case_insensitive {
         strip_prefix_ignore_ascii_case(&path, workspace_root)
     } else {
         path.strip_prefix(workspace_root).ok()
     };
-    let path = relative.unwrap_or(&path);
-    path.to_string_lossy().replace(MAIN_SEPARATOR, "/")
+    let mut identity = relative
+        .unwrap_or(&path)
+        .to_string_lossy()
+        .replace(MAIN_SEPARATOR, "/");
+    if case_insensitive {
+        identity.make_ascii_lowercase();
+    }
+    identity
 }
 
 fn strip_prefix_ignore_ascii_case<'a>(path: &'a Path, prefix: &Path) -> Option<&'a Path> {
@@ -1625,10 +1645,10 @@ mod tests {
 
     use super::{
         FragmentClassification, classify_fragment, compact_visibility_modifier,
-        normalize_source_path, parse_collection_options, parse_consumer_mode, parse_run_id,
-        parse_workspace_root, source_item_at_or_after, strip_prefix_ignore_ascii_case,
-        type_alias_interface_targets, uniform_field_group, validate_frontend_protocol_version,
-        write_fragment,
+        normalize_source_path, normalize_source_path_with_case_sensitivity,
+        parse_collection_options, parse_consumer_mode, parse_run_id, parse_workspace_root,
+        source_item_at_or_after, strip_prefix_ignore_ascii_case, type_alias_interface_targets,
+        uniform_field_group, validate_frontend_protocol_version, write_fragment,
     };
     use cargo_hawk_internal::graph::{CollectionOptions, Edge, EdgeKind, Fragment};
     use rustc_session::config::CrateType;
@@ -1955,7 +1975,7 @@ mod tests {
         };
         let package_root = workspace_root.join("library");
         let outside = if cfg!(windows) {
-            "C:/elsewhere/vendored.rs"
+            "c:/elsewhere/vendored.rs"
         } else {
             "/elsewhere/vendored.rs"
         };
@@ -2025,7 +2045,7 @@ mod tests {
                     Path::new("c:\\WORKSPACE\\Library"),
                     Path::new("src\\Shared.rs")
                 ),
-                "Library/src/Shared.rs"
+                "library/src/shared.rs"
             );
         } else {
             assert_eq!(
@@ -2037,6 +2057,54 @@ mod tests {
                 "/WORKSPACE/Library/src/Shared.rs"
             );
         }
+    }
+
+    #[test]
+    fn case_insensitive_source_paths_share_one_identity() {
+        let workspace_root = Path::new("/workspace");
+
+        for (working_directory, path) in [
+            ("/WORKSPACE/Library", "src/Shared.rs"),
+            ("/workspace/library", "SRC/shared.rs"),
+            ("/Workspace/LIBRARY", "SRC/SHARED.RS"),
+        ] {
+            assert_eq!(
+                normalize_source_path_with_case_sensitivity(
+                    workspace_root,
+                    Path::new(working_directory),
+                    Path::new(path),
+                    true,
+                ),
+                "library/src/shared.rs"
+            );
+        }
+
+        for path in ["/ELSEWHERE/Vendored.rs", "/elsewhere/vendored.rs"] {
+            assert_eq!(
+                normalize_source_path_with_case_sensitivity(
+                    workspace_root,
+                    Path::new(""),
+                    Path::new(path),
+                    true,
+                ),
+                "/elsewhere/vendored.rs"
+            );
+        }
+
+        assert_ne!(
+            normalize_source_path_with_case_sensitivity(
+                workspace_root,
+                Path::new("/workspace/Library"),
+                Path::new("src/Shared.rs"),
+                false,
+            ),
+            normalize_source_path_with_case_sensitivity(
+                workspace_root,
+                Path::new("/workspace/library"),
+                Path::new("src/shared.rs"),
+                false,
+            ),
+        );
     }
 
     #[test]

@@ -817,9 +817,9 @@ impl DiagnosticExclusion {
                 ExclusionSelector::Module(module) => {
                     item.kind == DefinitionKind::Module && item.item == module
                 }
-                ExclusionSelector::File(file) => {
-                    item.file.is_some_and(|item_file| item_file == file)
-                }
+                ExclusionSelector::File(file) => item
+                    .file
+                    .is_some_and(|item_file| source_file_matches(item_file, file, cfg!(windows))),
             }
     }
 
@@ -838,8 +838,16 @@ impl DiagnosticExclusion {
                     .definition
                     .span
                     .as_ref()
-                    .is_some_and(|span| span.file == *file),
+                    .is_some_and(|span| source_file_matches(&span.file, file, cfg!(windows))),
             }
+    }
+}
+
+fn source_file_matches(source: &str, configured: &str, case_insensitive: bool) -> bool {
+    if case_insensitive {
+        source.eq_ignore_ascii_case(configured)
+    } else {
+        source == configured
     }
 }
 
@@ -868,7 +876,9 @@ mod tests {
 
     use cargo_platform::Cfg;
 
-    use super::{AnalysisTarget, Config, ConfigDiagnosticKind, ProductionProduct};
+    use super::{
+        AnalysisTarget, Config, ConfigDiagnosticKind, ProductionProduct, source_file_matches,
+    };
     use cargo_hawk_internal::graph::{
         Definition, DefinitionId, DefinitionKind, FindingKind, Fragment, Span, analyze,
     };
@@ -1538,6 +1548,25 @@ reason = "generated source file"
             vec!["outside", "generatedish"]
         );
         assert!(applied.config_diagnostics.is_empty());
+    }
+
+    #[test]
+    fn file_exclusions_follow_filesystem_case_sensitivity() {
+        assert!(source_file_matches(
+            "library/src/shared.rs",
+            "Library/src/Shared.rs",
+            true,
+        ));
+        assert!(!source_file_matches(
+            "library/src/shared.rs",
+            "Library/src/Shared.rs",
+            false,
+        ));
+        assert!(!source_file_matches(
+            "library/src/shared.rs",
+            "library/src/other.rs",
+            true,
+        ));
     }
 
     #[test]
