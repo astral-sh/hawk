@@ -521,6 +521,7 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
             CollectionOptions::new(config.preserve_uniform_field_visibility())
         },
         doctest_packages: doctest_packages.as_deref(),
+        workspace_library_sources: workspace_library_sources(&metadata),
     };
     let mut production_fragments = Vec::new();
     let mut test_fragments = Vec::new();
@@ -978,6 +979,13 @@ struct InstrumentedCargo<'a> {
     toolchain: &'a RustToolchain,
     collection_options: CollectionOptions,
     doctest_packages: Option<&'a [String]>,
+    workspace_library_sources: HashMap<String, WorkspaceLibrarySource>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct WorkspaceLibrarySource {
+    crate_name: String,
+    path: PathBuf,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1398,6 +1406,13 @@ impl InstrumentedCargo<'_> {
 
         let mut production = read_fragments(production_graph_dir)?;
         let mut non_production = read_fragments(non_production_graph_dir)?;
+        for fragment in &mut non_production {
+            classify_non_production_target(
+                fragment,
+                &self.workspace_library_sources,
+                self.workspace_root,
+            );
+        }
         for fragment in production.iter_mut().chain(&mut non_production) {
             if !production_consumer_packages.contains(&fragment.package_name) {
                 fragment.non_production_consumer = true;
@@ -1435,6 +1450,60 @@ impl InstrumentedCargo<'_> {
             non_production,
         })
     }
+}
+
+fn classify_non_production_target(
+    fragment: &mut Fragment,
+    workspace_library_sources: &HashMap<String, WorkspaceLibrarySource>,
+    workspace_root: &Path,
+) {
+    if fragment.is_product_root || fragment.test_surface {
+        return;
+    }
+
+    let Some(crate_root) = fragment.crate_root.as_deref().map(Path::new) else {
+        return;
+    };
+    let crate_root = if crate_root.is_absolute() {
+        crate_root.to_path_buf()
+    } else {
+        workspace_root.join(crate_root)
+    };
+    let crate_root = normalize_workspace_source_path(&crate_root);
+    if workspace_library_sources
+        .get(&fragment.package_name)
+        .is_some_and(|source| source.crate_name == fragment.crate_name && source.path == crate_root)
+    {
+        return;
+    }
+
+    // Rustdoc bundles and library-format examples are library-shaped compiler
+    // invocations, but they are not the owning package's production library.
+    fragment.is_product_root = true;
+    fragment.non_production_consumer = true;
+    fragment.roots.extend(
+        fragment
+            .definitions
+            .iter()
+            .filter(|definition| definition.public_api)
+            .map(|definition| definition.id),
+    );
+    fragment.roots.sort();
+    fragment.roots.dedup();
+}
+
+fn normalize_workspace_source_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            component => normalized.push(component.as_os_str()),
+        }
+    }
+    normalized
 }
 
 fn collect_profile_fragments(
@@ -1690,6 +1759,27 @@ fn is_library_target(target: &Target) -> bool {
                 | TargetKind::StaticLib
         )
     })
+}
+
+fn workspace_library_sources(
+    metadata: &cargo_metadata::Metadata,
+) -> HashMap<String, WorkspaceLibrarySource> {
+    metadata
+        .workspace_packages()
+        .into_iter()
+        .filter_map(|package| {
+            let target = package.targets.iter().find(|target| {
+                is_library_target(target) || target.kind.contains(&TargetKind::ProcMacro)
+            })?;
+            Some((
+                package.name.to_string(),
+                WorkspaceLibrarySource {
+                    crate_name: target.name.replace('-', "_"),
+                    path: normalize_workspace_source_path(target.src_path.as_std_path()),
+                },
+            ))
+        })
+        .collect()
 }
 
 fn workspace_library_crates(
@@ -2017,7 +2107,7 @@ fn clear_fragments(graph_dir: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
     use std::ffi::OsString;
     use std::path::{Path, PathBuf};
 
@@ -2039,9 +2129,9 @@ mod tests {
 
     use super::{
         Args, CargoInvocation, DEFAULT_TARGET_DIR_COMPONENT_MAX_BYTES, DiagnosticRenderer,
-        LintLevel, LintLevels, ProductionProduct, ProductionSelection, default_target_dir,
-        definition_packages, fix_plan_signature, json_definition_kind, json_finding_kind,
-        validate_excluded_crates,
+        LintLevel, LintLevels, ProductionProduct, ProductionSelection, WorkspaceLibrarySource,
+        classify_non_production_target, default_target_dir, definition_packages,
+        fix_plan_signature, json_definition_kind, json_finding_kind, validate_excluded_crates,
     };
 
     fn render_diagnostic(finding: &Finding<'_>) -> String {
@@ -2264,6 +2354,78 @@ mod tests {
         assert!(!packages.contains_key(&test_id("production-suppressed")));
         assert!(!packages.contains_key(&test_id("test-suppressed")));
         assert!(definition_packages(&production, &tests, &HashSet::new()).is_empty());
+    }
+
+    #[test]
+    fn non_production_library_targets_are_classified_by_their_source_paths() {
+        let sources = HashMap::from([(
+            "consumer".to_owned(),
+            WorkspaceLibrarySource {
+                crate_name: "consumer".to_owned(),
+                path: PathBuf::from("/workspace/consumer/src/lib.rs"),
+            },
+        )]);
+        let definition = Definition {
+            id: test_id("non-production-entry"),
+            crate_name: "consumer".into(),
+            name: "entry".into(),
+            kind: DefinitionKind::Function,
+            span: None,
+            declaration_span: None,
+            expansion_span: None,
+            public_api: true,
+            restricted_visible_api: false,
+            crate_visible_api: false,
+            visible_reexport_api: false,
+            module_scope: vec![],
+            uniform_field_group: None,
+            dead_code_allowed: false,
+        };
+        let fragment = |crate_root: &str| Fragment {
+            protocol_version: crate::protocol::ProtocolVersion,
+            package_name: "consumer".into(),
+            crate_name: "consumer".into(),
+            compilation_target: "aarch64-apple-darwin".into(),
+            crate_id: test_id("consumer"),
+            crate_root: Some(crate_root.into()),
+            is_product_root: false,
+            product_root_kind: None,
+            test_surface: false,
+            non_production_consumer: false,
+            definitions: vec![definition.clone()],
+            edges: vec![],
+            roots: vec![],
+            conservative_roots: vec![],
+            required_public_roots: vec![],
+        };
+
+        let mut library = fragment("consumer/src/lib.rs");
+        classify_non_production_target(&mut library, &sources, Path::new("/workspace"));
+        assert!(!library.is_product_root);
+        assert!(!library.non_production_consumer);
+        assert!(library.roots.is_empty());
+
+        let mut normalized_library = fragment("consumer/src/../src/./lib.rs");
+        classify_non_production_target(&mut normalized_library, &sources, Path::new("/workspace"));
+        assert!(!normalized_library.is_product_root);
+        assert!(!normalized_library.non_production_consumer);
+
+        let mut same_source_example = fragment("consumer/src/lib.rs");
+        same_source_example.crate_name = "example_library".into();
+        classify_non_production_target(&mut same_source_example, &sources, Path::new("/workspace"));
+        assert!(same_source_example.is_product_root);
+        assert!(same_source_example.non_production_consumer);
+
+        for crate_root in [
+            "consumer/examples/library.rs",
+            "/tmp/rustdoctest/doctest_bundle_2024.rs",
+        ] {
+            let mut non_production = fragment(crate_root);
+            classify_non_production_target(&mut non_production, &sources, Path::new("/workspace"));
+            assert!(non_production.is_product_root);
+            assert!(non_production.non_production_consumer);
+            assert_eq!(non_production.roots, vec![test_id("non-production-entry")]);
+        }
     }
 
     #[test]

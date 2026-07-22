@@ -1121,6 +1121,76 @@ fn library_production_targets_classify_example_callers_as_non_production() {
 }
 
 #[test]
+fn library_production_targets_classify_library_format_examples_as_non_production() {
+    let context = HawkTestContext::new("library_products");
+    let library_path = context.workspace().join("api/src/lib.rs");
+    let mut library = fs::read_to_string(&library_path).expect("read library source");
+    library.push_str(
+        "\npub fn used_only_by_library_example() {\n    library_example_helper();\n}\n\npub fn library_example_helper() {}\n",
+    );
+    fs::write(library_path, library).expect("add library-format example exports");
+
+    let manifest_path = context.workspace().join("consumer/Cargo.toml");
+    let mut manifest = fs::read_to_string(&manifest_path).expect("read consumer manifest");
+    manifest.push_str(
+        "\n[[example]]\nname = \"library_example\"\npath = \"examples/library_example.rs\"\ncrate-type = [\"rlib\"]\n",
+    );
+    fs::write(manifest_path, manifest).expect("add library-format example target");
+    let examples = context.workspace().join("consumer/examples");
+    fs::create_dir_all(&examples).expect("create consumer example directory");
+    fs::write(
+        examples.join("library_example.rs"),
+        "pub fn example_entry() { internal_api::used_only_by_library_example(); }\n",
+    )
+    .expect("write library-format example consumer");
+
+    let output = context.run(&["--output-format=json"]);
+
+    context.assert_success(&output);
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout contains one JSON report");
+    let diagnostic = report["diagnostics"]
+        .as_array()
+        .expect("diagnostics is an array")
+        .iter()
+        .find(|diagnostic| diagnostic["identity"]["item"] == "library_example_helper")
+        .expect("library-format example helper diagnostic");
+    assert_eq!(diagnostic["code"], "hawk::unnecessary_public");
+    assert_eq!(diagnostic["test_only"], true);
+}
+
+#[test]
+fn library_production_targets_classify_doctest_callers_as_non_production() {
+    let context = HawkTestContext::new("library_products");
+    let library_path = context.workspace().join("api/src/lib.rs");
+    let mut library = fs::read_to_string(&library_path).expect("read library source");
+    library.push_str(
+        "\npub fn used_only_by_doctest() {\n    doctest_helper();\n}\n\npub fn doctest_helper() {}\n",
+    );
+    fs::write(library_path, library).expect("add doctest-only library exports");
+    let consumer_path = context.workspace().join("consumer/src/lib.rs");
+    let mut consumer = fs::read_to_string(&consumer_path).expect("read consumer source");
+    consumer.push_str(
+        "\n/// ```\n/// internal_api::used_only_by_doctest();\n/// ```\npub fn documented() {}\n",
+    );
+    fs::write(consumer_path, consumer).expect("add doctest-only library caller");
+
+    let output = context.run(&["--output-format=json"]);
+
+    context.assert_success(&output);
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout contains one JSON report");
+    let diagnostic = report["diagnostics"]
+        .as_array()
+        .expect("diagnostics is an array")
+        .iter()
+        .find(|diagnostic| diagnostic["identity"]["item"] == "doctest_helper")
+        .expect("doctest-only helper diagnostic");
+    assert_eq!(diagnostic["code"], "hawk::unnecessary_public");
+    assert_eq!(diagnostic["test_only"], true);
+}
+
+#[test]
 fn library_production_targets_classify_transitive_dev_dependencies_as_non_production() {
     let context = HawkTestContext::new("library_products");
     let library_path = context.workspace().join("api/src/lib.rs");
