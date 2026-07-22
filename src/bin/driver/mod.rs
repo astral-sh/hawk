@@ -380,30 +380,23 @@ fn emit_fragment(
     let package_name = env::var("CARGO_PKG_NAME").context("read Cargo package name")?;
     let crate_name = tcx.crate_name(LOCAL_CRATE).to_string();
     let crate_id = id(tcx, CRATE_DEF_ID.to_def_id());
-    let is_non_production = consumer_mode == protocol::ConsumerMode::NonProduction;
-    let test_surface = is_non_production && tcx.sess.opts.test;
-    let is_product_root = if is_non_production {
-        // Non-production executables, including custom tests and benchmarks,
-        // can have entry points without `--test` but still consume APIs.
-        tcx.entry_fn(()).is_some()
-    } else {
-        crate_name == root_crate && tcx.entry_fn(()).is_some()
-    };
-    let root_kind =
-        (is_product_root && !is_non_production).then_some(protocol::ProductionTargetKind::Binary);
-    let non_production_consumer = test_surface
-        || is_non_production && is_product_root
-        || !is_product_root && tcx.entry_fn(()).is_some();
+    let classification = classify_fragment(
+        tcx.crate_types(),
+        &crate_name,
+        root_crate,
+        consumer_mode,
+        tcx.sess.opts.test,
+    );
     let suffix = crate_id.to_string();
     let fragment = collect_fragment(
         tcx,
         package_name,
         crate_name.clone(),
         crate_id,
-        is_product_root,
-        root_kind,
-        test_surface,
-        non_production_consumer,
+        classification.is_product_root,
+        classification.root_kind,
+        classification.test_surface,
+        classification.non_production_consumer,
         collection_options,
     );
     let path = output_dir.join(format!("{crate_name}-{suffix}.json"));
@@ -415,6 +408,36 @@ fn emit_fragment(
         .map_err(|error| error.error)
         .with_context(|| format!("persist fragment {}", path.display()))?;
     Ok(())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FragmentClassification {
+    is_product_root: bool,
+    root_kind: Option<protocol::ProductionTargetKind>,
+    test_surface: bool,
+    non_production_consumer: bool,
+}
+
+fn classify_fragment(
+    crate_types: &[CrateType],
+    crate_name: &str,
+    root_crate: &str,
+    consumer_mode: protocol::ConsumerMode,
+    is_test: bool,
+) -> FragmentClassification {
+    let is_non_production = consumer_mode == protocol::ConsumerMode::NonProduction;
+    // `#![no_main]` executables have no Rust entry function but still consume APIs.
+    let is_executable = crate_types.contains(&CrateType::Executable);
+    let is_product_root = is_executable && (is_non_production || crate_name == root_crate);
+
+    FragmentClassification {
+        is_product_root,
+        root_kind: (is_product_root && !is_non_production)
+            .then_some(protocol::ProductionTargetKind::Binary),
+        test_surface: is_non_production && is_test,
+        non_production_consumer: is_non_production && is_test
+            || is_executable && (is_non_production || !is_product_root),
+    }
 }
 
 fn write_fragment(writer: impl Write, fragment: &Fragment, path: &Path) -> Result<()> {
@@ -1516,11 +1539,13 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        compact_visibility_modifier, normalize_source_path, parse_collection_options,
-        parse_consumer_mode, parse_run_id, source_item_at_or_after, type_alias_interface_targets,
-        uniform_field_group, validate_frontend_protocol_version, write_fragment,
+        FragmentClassification, classify_fragment, compact_visibility_modifier,
+        normalize_source_path, parse_collection_options, parse_consumer_mode, parse_run_id,
+        source_item_at_or_after, type_alias_interface_targets, uniform_field_group,
+        validate_frontend_protocol_version, write_fragment,
     };
     use cargo_hawk_internal::graph::{CollectionOptions, Edge, EdgeKind, Fragment};
+    use rustc_session::config::CrateType;
 
     struct FailingWriter;
 
@@ -1569,6 +1594,89 @@ mod tests {
             .expect_err("buffer flush should report the underlying write failure");
 
         insta::assert_snapshot!(error.to_string(), @"flush fragment.json");
+    }
+
+    #[test]
+    fn executable_classification_does_not_require_a_rust_entry_point() {
+        assert_eq!(
+            classify_fragment(
+                &[CrateType::Executable],
+                "example",
+                "product",
+                crate::protocol::ConsumerMode::NonProduction,
+                false,
+            ),
+            FragmentClassification {
+                is_product_root: true,
+                root_kind: None,
+                test_surface: false,
+                non_production_consumer: true,
+            }
+        );
+        assert_eq!(
+            classify_fragment(
+                &[CrateType::Executable],
+                "product",
+                "product",
+                crate::protocol::ConsumerMode::Production,
+                false,
+            ),
+            FragmentClassification {
+                is_product_root: true,
+                root_kind: Some(crate::protocol::ProductionTargetKind::Binary),
+                test_surface: false,
+                non_production_consumer: false,
+            }
+        );
+    }
+
+    #[test]
+    fn executable_classification_preserves_consumer_and_test_provenance() {
+        assert_eq!(
+            classify_fragment(
+                &[CrateType::Executable],
+                "build_script_build",
+                "product",
+                crate::protocol::ConsumerMode::Production,
+                false,
+            ),
+            FragmentClassification {
+                is_product_root: false,
+                root_kind: None,
+                test_surface: false,
+                non_production_consumer: true,
+            }
+        );
+        assert_eq!(
+            classify_fragment(
+                &[CrateType::Rlib],
+                "library",
+                "product",
+                crate::protocol::ConsumerMode::NonProduction,
+                false,
+            ),
+            FragmentClassification {
+                is_product_root: false,
+                root_kind: None,
+                test_surface: false,
+                non_production_consumer: false,
+            }
+        );
+        assert_eq!(
+            classify_fragment(
+                &[CrateType::Executable],
+                "library",
+                "product",
+                crate::protocol::ConsumerMode::NonProduction,
+                true,
+            ),
+            FragmentClassification {
+                is_product_root: true,
+                root_kind: None,
+                test_surface: true,
+                non_production_consumer: true,
+            }
+        );
     }
 
     #[test]
