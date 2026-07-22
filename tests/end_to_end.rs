@@ -953,6 +953,30 @@ fn later_warnings_group_reenables_default_warnings() {
 }
 
 #[test]
+fn later_warnings_group_reenables_explicitly_enabled_opt_in_lints() {
+    let context = HawkTestContext::new("crate_visibility_fixes");
+    let output = context.run(&[
+        "-W",
+        "hawk::unnecessary_crate_visibility",
+        "-A",
+        "warnings",
+        "-D",
+        "warnings",
+    ]);
+
+    assert!(
+        !output.status.success(),
+        "denied opt-in diagnostic did not fail:\n{}",
+        context.normalized_stdout(&output)
+    );
+    assert!(
+        context
+            .normalized_stdout(&output)
+            .contains("error[hawk::unnecessary_crate_visibility]")
+    );
+}
+
+#[test]
 fn emits_versioned_json_diagnostics_and_keeps_cargo_output_on_stderr() {
     let context = HawkTestContext::new("basic");
     let output = context.run(&[

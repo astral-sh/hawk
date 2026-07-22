@@ -235,19 +235,20 @@ impl LintLevels {
 
     fn level(&self, diagnostic: impl Into<DiagnosticKind>) -> LintLevel {
         let diagnostic = diagnostic.into();
-        self.overrides.iter().fold(
-            diagnostic.default_level(),
-            |level, (selector, override_level)| {
-                if *selector == LintSelector::Diagnostic(diagnostic)
-                    || (*selector == LintSelector::Warnings
-                        && (diagnostic.default_level().is_emitted() || level.is_emitted()))
-                {
-                    *override_level
-                } else {
-                    level
-                }
-            },
-        )
+        let default_level = diagnostic.default_level();
+        let mut level = default_level;
+        let mut in_warnings_group = default_level.is_emitted();
+
+        for (selector, override_level) in &self.overrides {
+            if *selector == LintSelector::Diagnostic(diagnostic) {
+                level = *override_level;
+                in_warnings_group = default_level.is_emitted() || level.is_emitted();
+            } else if *selector == LintSelector::Warnings && in_warnings_group {
+                level = *override_level;
+            }
+        }
+
+        level
     }
 }
 
@@ -2285,6 +2286,7 @@ mod tests {
                 "check",
                 "-W",
                 "hawk::unnecessary_crate_visibility",
+                "-Awarnings",
                 "-Dwarnings",
             ])
             .expect("parse lint-level arguments");
