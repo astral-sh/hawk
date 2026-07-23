@@ -1020,6 +1020,62 @@ fn mixed_production_targets_ignore_same_named_integration_tests() {
     assert_library_audit_ignores_same_named_integration_test(true);
 }
 
+#[test]
+fn mixed_products_audit_libraries_sharing_their_source_with_binary_products() {
+    let context = HawkTestContext::new("library_products");
+    let manifest_path = context.workspace().join("api/Cargo.toml");
+    let mut manifest = fs::read_to_string(&manifest_path).expect("read library manifest");
+    manifest.push_str("\n[[bin]]\nname = \"internal_api\"\npath = \"src/lib.rs\"\n");
+    fs::write(manifest_path, manifest).expect("add same-source binary target");
+
+    let library_path = context.workspace().join("api/src/lib.rs");
+    let mut library = fs::read_to_string(&library_path).expect("read shared library source");
+    library.push_str(
+        "\nfn main() {\n    used_across_workspace();\n    crate_restricted_helper();\n}\n\npub(crate) fn crate_restricted_helper() {}\n",
+    );
+    fs::write(&library_path, library).expect("add shared binary entry point");
+
+    let configuration_path = context.workspace().join("hawk.toml");
+    let mut configuration =
+        fs::read_to_string(&configuration_path).expect("read production configuration");
+    configuration.push_str(
+        "\n[[production]]\npackage = \"internal-api\"\nbin = \"internal_api\"\nreason = \"binary and library products share one source file\"\n",
+    );
+    fs::write(configuration_path, configuration).expect("select same-source binary product");
+
+    let output = context.run(&["--output-format=json"]);
+
+    context.assert_success(&output);
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout contains one JSON report");
+    let diagnostics = report["diagnostics"]
+        .as_array()
+        .expect("diagnostics is an array");
+    assert!(
+        diagnostics.iter().any(|diagnostic| {
+            diagnostic["identity"]["item"] == "unused" && diagnostic["code"] == "hawk::dead_public"
+        }),
+        "a same-source binary product suppressed the selected library's dead public export: {report}"
+    );
+    assert!(
+        diagnostics.iter().any(|diagnostic| {
+            diagnostic["identity"]["item"] == "crate_restricted_helper"
+                && diagnostic["code"] == "hawk::unnecessary_restricted_visibility"
+        }),
+        "a same-source binary product suppressed the library's restricted export: {report}"
+    );
+
+    let output = context.run(&["--fix", "--allow-no-vcs"]);
+
+    context.assert_success(&output);
+    let library = fs::read_to_string(&library_path).expect("read fixed shared source");
+    assert!(library.contains("pub fn unused() {}"));
+    assert!(library.contains("fn used_only_within_crate() {}"));
+    assert!(!library.contains("pub fn used_only_within_crate() {}"));
+    assert!(library.contains("fn crate_restricted_helper() {}"));
+    assert!(!library.contains("pub(crate) fn crate_restricted_helper() {}"));
+}
+
 fn assert_library_audit_ignores_same_named_integration_test_overrides(
     include_binary_product: bool,
 ) {

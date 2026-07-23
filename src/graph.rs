@@ -627,15 +627,6 @@ pub fn analyze_with_options<'a>(
         .filter(|definition| definition.restricted_visible_api)
         .map(definition_identity)
         .collect();
-    let production_root_definitions: FxHashSet<_> = production_fragments
-        .iter()
-        .filter(|fragment| {
-            fragment.is_product_root
-                && fragment.product_root_kind != Some(ProductionTargetKind::Library)
-        })
-        .flat_map(|fragment| &fragment.definitions)
-        .map(definition_identity)
-        .collect();
     let non_production_root_definitions: FxHashSet<_> = test_fragments
         .iter()
         .filter(|fragment| fragment.is_product_root && !fragment.test_surface)
@@ -661,7 +652,8 @@ pub fn analyze_with_options<'a>(
                 && !production_candidates.contains(&identity))
             || !candidate_crates.contains(&definition.crate_name)
             || excluded_crates.contains(&definition.crate_name)
-            || production_root_definitions.contains(&identity)
+            || (fragment.is_product_root
+                && fragment.product_root_kind != Some(ProductionTargetKind::Library))
         {
             continue;
         }
@@ -723,7 +715,8 @@ pub fn analyze_with_options<'a>(
                 && !production_restricted_visible_candidates.contains(&identity))
             || !candidate_crates.contains(&definition.crate_name)
             || excluded_crates.contains(&definition.crate_name)
-            || production_root_definitions.contains(&identity)
+            || (fragment.is_product_root
+                && fragment.product_root_kind != Some(ProductionTargetKind::Library))
             || (!production_definitions.contains(&identity)
                 && non_production_root_definitions.contains(&identity))
             || reported.contains(&identity)
@@ -1963,6 +1956,50 @@ mod tests {
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].kind, FindingKind::DeadPublic);
         assert_eq!(findings[0].definition.id, test_id("unused"));
+    }
+
+    #[test]
+    fn product_root_sharing_library_source_does_not_suppress_its_declarations() {
+        let mut input = fragments(
+            vec![
+                source(node("unused", "lib", true), 7),
+                source(
+                    restricted_visible_node("internal::unused", &["internal"]),
+                    8,
+                ),
+            ],
+            vec![],
+        );
+        input[1].is_product_root = true;
+        input[1].product_root_kind = Some(ProductionTargetKind::Library);
+
+        let binary = &mut input[0];
+        binary.package_name = "lib".into();
+        binary.crate_name = "lib".into();
+        binary.crate_root = Some("lib/src/lib.rs".into());
+        binary.definitions[0].crate_name = "lib".into();
+
+        let mut binary_unused = source(node("binary_unused", "lib", true), 7);
+        binary_unused.name = "unused".into();
+        binary.definitions.push(binary_unused);
+
+        let mut binary_restricted = source(
+            restricted_visible_node("binary_internal::unused", &["internal"]),
+            8,
+        );
+        binary_restricted.name = "internal::unused".into();
+        binary.definitions.push(binary_restricted);
+
+        let findings = analyze(&input, &HashSet::new());
+
+        assert_eq!(findings.len(), 2);
+        assert_eq!(findings[0].kind, FindingKind::DeadPublic);
+        assert_eq!(findings[0].definition.id, test_id("unused"));
+        assert_eq!(
+            findings[1].kind,
+            FindingKind::UnnecessaryRestrictedVisibility
+        );
+        assert_eq!(findings[1].definition.id, test_id("internal::unused"));
     }
 
     #[test]
