@@ -1225,6 +1225,7 @@ impl InstrumentedCargo<'_> {
             .env(protocol::ROOT_CRATE_ENV, root_crate)
             .env(protocol::CONSUMER_MODE_ENV, consumer_mode.as_str())
             .env(protocol::RUN_ID_ENV, run_id)
+            .env(protocol::WORKSPACE_ROOT_ENV, self.workspace_root)
             .env(
                 protocol::COLLECTION_OPTIONS_ENV,
                 self.collection_options.as_env_value(),

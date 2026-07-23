@@ -5,6 +5,7 @@ use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::OnceLock;
 
 use anyhow::{Context, Result, bail};
 use rustc_ast as ast;
@@ -37,6 +38,8 @@ use cargo_hawk_internal::graph::{
     VisibilityReduction,
 };
 
+static WORKSPACE_ROOT: OnceLock<PathBuf> = OnceLock::new();
+
 pub(crate) fn is_protocol_version_query(args: &[String]) -> bool {
     args.get(1)
         .is_some_and(|argument| argument == protocol::VERSION_ARGUMENT)
@@ -55,13 +58,16 @@ pub(crate) fn is_wrapper_invocation(args: &[String]) -> bool {
 }
 
 pub(crate) fn run_wrapper(mut args: Vec<String>) -> ExitCode {
-    let (consumer_mode, run_id) = match validate_frontend_protocol() {
+    let (consumer_mode, run_id, workspace_root) = match validate_frontend_protocol() {
         Ok(protocol) => protocol,
         Err(error) => {
             eprintln!("hawk: {error:#}");
             return ExitCode::FAILURE;
         }
     };
+    WORKSPACE_ROOT
+        .set(workspace_root)
+        .expect("the compiler wrapper is initialized once");
     args.remove(1);
     let output_dir = PathBuf::from(
         env::var_os(protocol::OUTPUT_DIR_ENV).expect("HAWK_OUTPUT_DIR checked before dispatch"),
@@ -109,13 +115,24 @@ pub(crate) fn run_wrapper(mut args: Vec<String>) -> ExitCode {
     })
 }
 
-fn validate_frontend_protocol() -> Result<(protocol::ConsumerMode, String)> {
+fn validate_frontend_protocol() -> Result<(protocol::ConsumerMode, String, PathBuf)> {
     let version = env::var(protocol::VERSION_ENV)
         .context("Hawk frontend did not provide a compiler driver protocol version")?;
     validate_frontend_protocol_version(&version)?;
     let consumer_mode = parse_consumer_mode(env::var_os(protocol::CONSUMER_MODE_ENV).as_deref())?;
     let run_id = parse_run_id(env::var_os(protocol::RUN_ID_ENV).as_deref())?;
-    Ok((consumer_mode, run_id))
+    let workspace_root = env::var_os(protocol::WORKSPACE_ROOT_ENV)
+        .map(PathBuf::from)
+        .with_context(|| {
+            format!(
+                "Hawk frontend did not provide {}",
+                protocol::WORKSPACE_ROOT_ENV
+            )
+        })?;
+    if !workspace_root.is_absolute() {
+        bail!("{} must be absolute", protocol::WORKSPACE_ROOT_ENV);
+    }
+    Ok((consumer_mode, run_id, workspace_root))
 }
 
 fn validate_frontend_protocol_version(version: &str) -> Result<()> {
@@ -1285,8 +1302,16 @@ fn source_span(tcx: TyCtxt<'_>, span: rustc_span::Span) -> Span {
 }
 
 fn normalize_source_path(path: &str) -> String {
+    normalize_source_path_from(path, WORKSPACE_ROOT.get().map(PathBuf::as_path))
+}
+
+fn normalize_source_path_from(path: &str, workspace_root: Option<&Path>) -> String {
+    let path = Path::new(path);
+    let path = workspace_root
+        .and_then(|workspace_root| path.strip_prefix(workspace_root).ok())
+        .unwrap_or(path);
     let mut normalized = PathBuf::new();
-    for component in Path::new(&path).components() {
+    for component in path.components() {
         match component {
             Component::CurDir => {}
             Component::ParentDir => match normalized.components().next_back() {
@@ -1299,7 +1324,9 @@ fn normalize_source_path(path: &str) -> String {
             _ => normalized.push(component.as_os_str()),
         }
     }
-    normalized.to_string_lossy().into_owned()
+    normalized
+        .to_string_lossy()
+        .replace(std::path::MAIN_SEPARATOR, "/")
 }
 
 struct ReferenceVisitor<'tcx> {
@@ -1504,7 +1531,7 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        compact_visibility_modifier, normalize_source_path, parse_collection_options,
+        compact_visibility_modifier, normalize_source_path_from, parse_collection_options,
         parse_consumer_mode, parse_run_id, source_item_at_or_after, type_alias_interface_targets,
         uniform_field_group, validate_frontend_protocol_version, write_fragment,
     };
@@ -1529,7 +1556,7 @@ mod tests {
 
         assert_eq!(
             error.to_string(),
-            "Hawk frontend uses compiler driver protocol 1, but this driver uses protocol 7; install `cargo-hawk` and `cargo-hawk-driver` from the same release"
+            "Hawk frontend uses compiler driver protocol 1, but this driver uses protocol 8; install `cargo-hawk` and `cargo-hawk-driver` from the same release"
         );
     }
 
@@ -1712,11 +1739,21 @@ mod tests {
     }
 
     #[test]
-    fn source_paths_are_lexically_normalized() {
+    fn source_paths_are_workspace_relative_and_lexically_normalized() {
+        let expected = "library/src/shared.rs";
         assert_eq!(
-            normalize_source_path("library/tests/../src/shared.rs"),
-            "library/src/shared.rs"
+            normalize_source_path_from("library/tests/../src/shared.rs", None),
+            expected
         );
-        assert_eq!(normalize_source_path("../shared.rs"), "../shared.rs");
+        let workspace_root = std::env::current_dir().unwrap();
+        let absolute = workspace_root.join("library/tests/../src/shared.rs");
+        assert_eq!(
+            normalize_source_path_from(&absolute.to_string_lossy(), Some(workspace_root.as_path())),
+            expected
+        );
+        assert_eq!(
+            normalize_source_path_from("../shared.rs", None),
+            "../shared.rs"
+        );
     }
 }

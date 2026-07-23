@@ -3,8 +3,8 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// Version of the protocol shared by the Hawk frontend and compiler driver.
 ///
-/// Increment this whenever the serialized graph or fix-plan schema changes.
-pub const VERSION: u32 = 7;
+/// Increment this whenever the frontend-driver contract changes.
+pub const VERSION: u32 = 8;
 
 pub const VERSION_ARGUMENT: &str = "--hawk-protocol-version";
 
@@ -14,6 +14,7 @@ pub const ROOT_CRATE_ENV: &str = "HAWK_ROOT_CRATE";
 pub const CONSUMER_MODE_ENV: &str = "HAWK_CONSUMER_MODE";
 pub const COLLECTION_OPTIONS_ENV: &str = "HAWK_COLLECTION_OPTIONS";
 pub const RUN_ID_ENV: &str = "HAWK_RUN_ID";
+pub const WORKSPACE_ROOT_ENV: &str = "HAWK_WORKSPACE_ROOT";
 pub const FIX_PLAN_ENV: &str = "HAWK_FIX_PLAN";
 pub const RUSTC_PROBE_ENV: &str = "HAWK_RUSTC_PROBE";
 pub const RUSTC_PROBE_TOKEN_ENV: &str = "HAWK_RUSTC_PROBE_TOKEN";
@@ -25,6 +26,7 @@ pub const ENVIRONMENT_VARIABLES: &[&str] = &[
     CONSUMER_MODE_ENV,
     COLLECTION_OPTIONS_ENV,
     RUN_ID_ENV,
+    WORKSPACE_ROOT_ENV,
     FIX_PLAN_ENV,
     RUSTC_PROBE_ENV,
     RUSTC_PROBE_TOKEN_ENV,
@@ -101,7 +103,7 @@ mod tests {
 
         assert_eq!(
             error.to_string(),
-            "unsupported Hawk protocol version 1; expected 7"
+            "unsupported Hawk protocol version 1; expected 8"
         );
     }
 }
