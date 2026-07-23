@@ -22,11 +22,10 @@ fn load_source(path: &Path) -> std::io::Result<String> {
     fs::read_to_string(path)
 }
 
-/// Returns a source path for user-facing output, relative to the workspace
-/// root when the file is inside it.
+/// Strips the workspace root from a span path for display.
 ///
-/// Analysis spans carry canonical paths so definitions compare equal across
-/// compilations; this is the one place that translates them for display.
+/// Spans store absolute paths; output should show paths relative to the
+/// workspace root where possible.
 pub(crate) fn display_path<'a>(file: &'a str, workspace_root: &Path) -> &'a str {
     Path::new(file)
         .strip_prefix(workspace_root)

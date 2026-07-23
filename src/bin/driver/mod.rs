@@ -1266,11 +1266,11 @@ fn source_span(tcx: TyCtxt<'_>, span: rustc_span::Span) -> Span {
     }
 }
 
-/// Returns the canonical path of a source file.
+/// Returns an absolute, normalized path for a source file.
 ///
-/// Real file names are resolved against the compilation's working directory
-/// and lexically normalized, so the same source file receives an identical
-/// path in every compilation regardless of the invoking workspace.
+/// Rustc reports paths relative to the directory cargo was invoked from, so
+/// two compilations can spell the same file differently. Definition identity
+/// compares these strings, so they need to match.
 fn source_file_path(tcx: TyCtxt<'_>, name: &FileName) -> String {
     match name {
         FileName::Real(name) => {
