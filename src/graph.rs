@@ -652,8 +652,7 @@ pub fn analyze_with_options<'a>(
                 && !production_candidates.contains(&identity))
             || !candidate_crates.contains(&definition.crate_name)
             || excluded_crates.contains(&definition.crate_name)
-            || (fragment.is_product_root
-                && fragment.product_root_kind != Some(ProductionTargetKind::Library))
+            || fragment.product_root_kind == Some(ProductionTargetKind::Binary)
         {
             continue;
         }
@@ -715,8 +714,7 @@ pub fn analyze_with_options<'a>(
                 && !production_restricted_visible_candidates.contains(&identity))
             || !candidate_crates.contains(&definition.crate_name)
             || excluded_crates.contains(&definition.crate_name)
-            || (fragment.is_product_root
-                && fragment.product_root_kind != Some(ProductionTargetKind::Library))
+            || fragment.product_root_kind == Some(ProductionTargetKind::Binary)
             || (!production_definitions.contains(&identity)
                 && non_production_root_definitions.contains(&identity))
             || reported.contains(&identity)
@@ -1959,7 +1957,7 @@ mod tests {
     }
 
     #[test]
-    fn product_root_sharing_library_source_does_not_suppress_its_declarations() {
+    fn product_root_sharing_library_source_preserves_library_and_test_declarations() {
         let mut input = fragments(
             vec![
                 source(node("unused", "lib", true), 7),
@@ -1990,9 +1988,23 @@ mod tests {
         binary_restricted.name = "internal::unused".into();
         binary.definitions.push(binary_restricted);
 
-        let findings = analyze(&input, &HashSet::new());
+        let mut harnesses = test_fragments(
+            vec![
+                source(node("test_only_unused", "lib", true), 9),
+                source(
+                    restricted_visible_node("internal::test_only_unused", &["internal"]),
+                    10,
+                ),
+            ],
+            vec![],
+        );
+        harnesses[1].is_product_root = true;
+        harnesses[1].test_surface = true;
+        harnesses[1].non_production_consumer = true;
 
-        assert_eq!(findings.len(), 2);
+        let findings = analyze_with_tests(&input, &harnesses, &candidate_crates(), &HashSet::new());
+
+        assert_eq!(findings.len(), 4);
         assert_eq!(findings[0].kind, FindingKind::DeadPublic);
         assert_eq!(findings[0].definition.id, test_id("unused"));
         assert_eq!(
@@ -2000,6 +2012,18 @@ mod tests {
             FindingKind::UnnecessaryRestrictedVisibility
         );
         assert_eq!(findings[1].definition.id, test_id("internal::unused"));
+        assert_eq!(findings[2].kind, FindingKind::DeadPublic);
+        assert_eq!(findings[2].definition.id, test_id("test_only_unused"));
+        assert!(findings[2].test_compiled_only);
+        assert_eq!(
+            findings[3].kind,
+            FindingKind::UnnecessaryRestrictedVisibility
+        );
+        assert_eq!(
+            findings[3].definition.id,
+            test_id("internal::test_only_unused")
+        );
+        assert!(findings[3].test_compiled_only);
     }
 
     #[test]
