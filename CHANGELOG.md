@@ -2,6 +2,21 @@
 
 <!-- prettier-ignore-start -->
 
+
+## 0.1.10
+
+Released on 2026-07-25.
+
+### Other changes
+
+- Add JSON diagnostic output ([#135](https://github.com/astral-sh/hawk/pull/135))
+- Add concise dead-public reporting ([#133](https://github.com/astral-sh/hawk/pull/133))
+- Audit internal library targets against workspace consumers ([#144](https://github.com/astral-sh/hawk/pull/144))
+- Fix later `warnings` overrides after allowing the group ([#138](https://github.com/astral-sh/hawk/pull/138))
+- Infer workspace binaries when Hawk configuration is absent ([#148](https://github.com/astral-sh/hawk/pull/148))
+- Treat #[used] statics as analysis roots ([#140](https://github.com/astral-sh/hawk/pull/140))
+- Validate `--exclude-crate` values before compilation ([#139](https://github.com/astral-sh/hawk/pull/139))
+
 ## 0.1.9
 
 Released on 2026-07-20.
