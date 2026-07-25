@@ -891,6 +891,72 @@ fn production_binary_named_like_a_library_does_not_suppress_its_findings() {
 }
 
 #[test]
+fn discovers_workspace_binaries_without_configuration() {
+    let context = HawkTestContext::new("production_consumers");
+    fs::remove_file(context.workspace().join("hawk.toml"))
+        .expect("remove production configuration");
+
+    let output = context.run(&["--output-format=json"]);
+
+    context.assert_success(&output);
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout contains one JSON report");
+    assert_eq!(
+        report["summary"]["production"],
+        serde_json::json!([
+            {"package": "app", "binary": "app"},
+            {"package": "secondary", "binary": "library"},
+        ])
+    );
+    let diagnostics = report["diagnostics"]
+        .as_array()
+        .expect("diagnostics is an array");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic["identity"]["item"] == "unused")
+    );
+    assert!(diagnostics.iter().all(|diagnostic| !matches!(
+        diagnostic["identity"]["item"].as_str(),
+        Some("primary_api" | "secondary_api")
+    )));
+}
+
+#[test]
+fn configuration_keeps_binary_selection_explicit() {
+    let context = HawkTestContext::new("production_consumers");
+    fs::write(
+        context.workspace().join("hawk.toml"),
+        "[[production]]\npackage = \"app\"\nbin = \"app\"\nreason = \"only the primary binary is shipped\"\n",
+    )
+    .expect("replace production configuration");
+
+    let output = context.run(&["--output-format=json"]);
+
+    context.assert_success(&output);
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout contains one JSON report");
+    assert_eq!(
+        report["summary"]["production"],
+        serde_json::json!([{"package": "app", "binary": "app"}])
+    );
+}
+
+#[test]
+fn library_only_workspaces_without_configuration_require_explicit_targets() {
+    let context = HawkTestContext::new("library_products");
+    fs::remove_file(context.workspace().join("hawk.toml"))
+        .expect("remove production configuration");
+
+    let output = context.run(&[]);
+
+    assert!(!output.status.success());
+    assert!(context.normalized_stderr(&output).contains(
+        "no binary targets found in this workspace; add a `hawk.toml` with a `[[production]]` library target"
+    ));
+}
+
+#[test]
 fn library_production_targets_audit_actual_workspace_uses() {
     let context = HawkTestContext::new("library_products");
     let output = context.run(&[]);

@@ -75,9 +75,9 @@ compatible with arbitrary compiler versions.
 ## Product model
 
 Hawk treats workspace library crates as internal implementation crates unless
-the caller excludes them with `--exclude-crate`. It does not infer production
-targets from every target that happens to compile. Each production binary or
-audited internal library is stated in `hawk.toml`:
+the caller excludes them with `--exclude-crate`. Without `hawk.toml`, every
+workspace binary is a production target. When a configuration file exists, each
+production binary or audited internal library is stated explicitly:
 
 ```toml
 [[production]]

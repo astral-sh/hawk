@@ -99,8 +99,9 @@ installed package.
 
 ## Getting started
 
-Declare each shipped binary or audited internal library in a workspace-root
-`hawk.toml`:
+When no `hawk.toml` exists, Hawk automatically treats every binary target in the
+workspace as a production entry point. To select specific shipped binaries or
+audit internal libraries, declare them in a workspace-root `hawk.toml`:
 
 ```toml
 [[production]]

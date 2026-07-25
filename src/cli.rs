@@ -355,6 +355,33 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
         toolchain.rustc(),
         &workspace_root,
     )?;
+    let mut inferred_production_products = if config.path().is_none() {
+        metadata
+            .workspace_packages()
+            .into_iter()
+            .flat_map(|package| {
+                package
+                    .targets
+                    .iter()
+                    .filter(|target| target.kind.contains(&TargetKind::Bin))
+                    .map(|target| {
+                        (
+                            package.name.as_str(),
+                            ProductionProduct::Binary(target.name.clone()),
+                        )
+                    })
+            })
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    inferred_production_products.sort_unstable_by(
+        |(left_package, left_product), (right_package, right_product)| {
+            left_package
+                .cmp(right_package)
+                .then_with(|| left_product.name().cmp(right_product.name()))
+        },
+    );
     let mut production_products: Vec<ProductionSelection<'_>> = Vec::new();
     for consumer in config.production_consumers(&analysis_target) {
         let config_path = config
@@ -378,7 +405,17 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
             });
         }
     }
+    production_products.extend(
+        inferred_production_products
+            .iter()
+            .map(|(package, product)| ProductionSelection { package, product }),
+    );
     if production_products.is_empty() {
+        if config.path().is_none() {
+            bail!(
+                "no binary targets found in this workspace; add a `hawk.toml` with a `[[production]]` library target"
+            );
+        }
         let config_path = config
             .path()
             .map(Path::to_path_buf)

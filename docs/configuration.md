@@ -1,7 +1,9 @@
 # Configuration
 
-Hawk reads `hawk.toml` from the workspace root by default. Use
-`--config PATH` to select a different configuration file.
+Hawk reads `hawk.toml` from the workspace root by default. When that file is
+absent, every binary target in the workspace becomes a production target. A
+workspace without binaries must configure its audited library targets explicitly.
+Use `--config PATH` to select a different configuration file.
 
 ## Production targets
 
@@ -46,9 +48,9 @@ Ordinary library targets can use explicit Rust library crate types, including
 Every package and target must belong to the selected Cargo workspace. At least
 one production target must apply to the analyzed target.
 
-All configured targets are analyzed with the same feature profiles and
-compilation target. Hawk intentionally does not infer production targets from
-the workspace: configure each intended target explicitly.
+All production targets are analyzed with the same feature profiles and
+compilation target. When `hawk.toml` exists, its configured targets remain
+authoritative; Hawk does not add other workspace binaries implicitly.
 
 ## Doctest packages
 

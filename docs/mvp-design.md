@@ -13,15 +13,17 @@ doctests in that graph preserve any public visibility they require.
 
 The analysis includes:
 
-- one or more configured same-workspace binary or internal library targets;
+- one or more configured same-workspace binary or internal library targets, or
+  every workspace binary when `hawk.toml` is absent;
 - one or more feature profiles, defaulting to `--all-features`;
 - one selected compilation target, defaulting to the host target;
 - production reachability from binary entry points and workspace library uses;
 - test reachability and visibility requirements from workspace
   non-production targets, including doctests.
 
-Production targets are never inferred: every shipped binary or audited library
-must be listed explicitly in `hawk.toml`.
+When `hawk.toml` exists, every shipped binary or audited library must be listed
+explicitly. Without a configuration file, all workspace binaries are inferred
+as production targets.
 
 ## Diagnostics
 
