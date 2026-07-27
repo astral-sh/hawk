@@ -2,6 +2,13 @@
 
 <!-- prettier-ignore-start -->
 
+## Unreleased
+
+### Other changes
+
+- Analyze multiple compilation targets from a `targets` configuration list
+- Apply `--fix` across multiple feature profiles and targets
+
 ## 0.1.10
 
 Released on 2026-07-25.

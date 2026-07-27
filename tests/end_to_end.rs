@@ -2132,16 +2132,71 @@ fn feature_profiles_union_reachability_across_configurations() {
 }
 
 #[test]
-fn rejects_fixes_with_multiple_feature_profiles() {
-    let context = HawkTestContext::new("feature_profiles");
+fn targets_union_reachability_across_platforms() {
+    let context = HawkTestContext::new("multi_targets");
+    let output = context.run(&[]);
+
+    context.assert_success(&output);
+    let stdout = context.normalized_stdout(&output);
+    for cfg_gated in ["linux_api", "windows_api"] {
+        assert!(
+            !stdout.contains(&format!("`{cfg_gated}` is public")),
+            "API required on one configured target was diagnosed:\n{stdout}"
+        );
+    }
+    assert!(!stdout.contains("hawk::dead_public]: `linux_helper`"));
+    assert!(!stdout.contains("hawk::dead_public]: `windows_helper`"));
+    assert!(stdout.contains("warning[hawk::dead_public]: `unused_api` is public"));
+    assert!(stdout.contains("on targets `x86_64-unknown-linux-gnu`, `x86_64-pc-windows-msvc`"));
+}
+
+#[test]
+fn targets_apply_fixes_across_platforms() {
+    let context = HawkTestContext::new("multi_targets");
     let output = context.run(&["--fix", "--allow-no-vcs"]);
+
+    context.assert_success(&output);
+    let stdout = context.normalized_stdout(&output);
+    assert!(stdout.contains("`unused_api` is public"));
+
+    let library = fs::read_to_string(context.workspace().join("library/src/lib.rs"))
+        .expect("read fixed source");
+    assert!(library.contains("pub fn linux_api() {"));
+    assert!(library.contains("pub fn windows_api() {"));
+    assert!(library.contains("\nfn linux_helper() {}"));
+    assert!(library.contains("\nfn windows_helper() {}"));
+    assert!(library.contains("pub fn shared_api() {}"));
+    assert!(library.contains("pub fn unused_api() {}"));
+}
+
+#[test]
+fn rejects_a_command_line_target_with_configured_targets() {
+    let context = HawkTestContext::new("multi_targets");
+    let output = context.run(&["--target", "x86_64-unknown-linux-gnu"]);
 
     assert!(!output.status.success());
     assert!(
         context
             .normalized_stderr(&output)
-            .contains("--fix does not support multiple feature profiles")
+            .contains("--target cannot be combined with `targets` configured in")
     );
+}
+
+#[test]
+fn feature_profiles_apply_fixes_across_configurations() {
+    let context = HawkTestContext::new("feature_profile_fixes");
+    let output = context.run(&["--fix", "--allow-no-vcs"]);
+
+    context.assert_success(&output);
+    let stdout = context.normalized_stdout(&output);
+    assert!(stdout.contains("`unused_api` is public"));
+
+    let library = fs::read_to_string(context.workspace().join("library/src/lib.rs"))
+        .expect("read fixed source");
+    assert!(library.contains("pub fn extra_api() {"));
+    assert!(library.contains("\nfn extra_helper() {}"));
+    assert!(library.contains("pub fn fallback_api() {}"));
+    assert!(library.contains("pub fn unused_api() {}"));
 }
 
 #[test]

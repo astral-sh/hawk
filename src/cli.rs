@@ -343,18 +343,30 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
         .canonicalize()
         .with_context(|| format!("resolve manifest path for {}", args.manifest_path.display()))?;
     let config = Config::load(&workspace_root, args.config.as_deref())?;
-    if args.fix && config.feature_profiles().len() > 1 {
+    if args.target.is_some() && !config.targets().is_empty() {
         bail!(
-            "--fix does not support multiple feature profiles; run analysis without --fix or configure a single `[[feature-profile]]`"
+            "--target cannot be combined with `targets` configured in {}",
+            config
+                .path()
+                .expect("configured targets have a configuration path")
+                .display()
         );
     }
     let toolchain = RustToolchain::discover(&workspace_root, &manifest_path)?;
-    let analysis_target = AnalysisTarget::from_rustc(
-        args.target.as_deref(),
-        toolchain.host(),
-        toolchain.rustc(),
-        &workspace_root,
-    )?;
+    let target_triples: Vec<Option<String>> = if config.targets().is_empty() {
+        vec![args.target.clone()]
+    } else {
+        config.targets().iter().cloned().map(Some).collect()
+    };
+    let mut analysis_targets = Vec::with_capacity(target_triples.len());
+    for target_triple in &target_triples {
+        analysis_targets.push(AnalysisTarget::from_rustc(
+            target_triple.as_deref(),
+            toolchain.host(),
+            toolchain.rustc(),
+            &workspace_root,
+        )?);
+    }
     let mut inferred_production_products = if config.path().is_none() {
         metadata
             .workspace_packages()
@@ -382,48 +394,67 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
                 .then_with(|| left_product.name().cmp(right_product.name()))
         },
     );
+    let mut target_products: Vec<Vec<ProductionSelection<'_>>> =
+        Vec::with_capacity(analysis_targets.len());
     let mut production_products: Vec<ProductionSelection<'_>> = Vec::new();
-    for consumer in config.production_consumers(&analysis_target) {
-        let config_path = config
-            .path()
-            .expect("configured production consumer has a configuration path");
-        validate_product(&metadata, &consumer.package, &consumer.product).with_context(|| {
-            format!(
-                "validate production consumer in {}:{}:{}: {}",
-                config_path.display(),
-                consumer.span.line,
-                consumer.span.column,
-                consumer.reason
-            )
-        })?;
-        if !production_products.iter().any(|product| {
-            product.package == consumer.package && product.product == &consumer.product
-        }) {
-            production_products.push(ProductionSelection {
+    for analysis_target in &analysis_targets {
+        let mut products: Vec<ProductionSelection<'_>> = Vec::new();
+        for consumer in config.production_consumers(analysis_target) {
+            let config_path = config
+                .path()
+                .expect("configured production consumer has a configuration path");
+            validate_product(&metadata, &consumer.package, &consumer.product).with_context(
+                || {
+                    format!(
+                        "validate production consumer in {}:{}:{}: {}",
+                        config_path.display(),
+                        consumer.span.line,
+                        consumer.span.column,
+                        consumer.reason
+                    )
+                },
+            )?;
+            let selection = ProductionSelection {
                 package: &consumer.package,
                 product: &consumer.product,
-            });
+            };
+            if !products.contains(&selection) {
+                products.push(selection);
+            }
+            if !production_products.contains(&selection) {
+                production_products.push(selection);
+            }
         }
-    }
-    production_products.extend(
-        inferred_production_products
-            .iter()
-            .map(|(package, product)| ProductionSelection { package, product }),
-    );
-    if production_products.is_empty() {
-        if config.path().is_none() {
+        for (package, product) in &inferred_production_products {
+            let selection = ProductionSelection { package, product };
+            if !products.contains(&selection) {
+                products.push(selection);
+            }
+            if !production_products.contains(&selection) {
+                production_products.push(selection);
+            }
+        }
+        if products.is_empty() {
+            if config.path().is_none() {
+                bail!(
+                    "no binary targets found in this workspace; add a `hawk.toml` with a `[[production]]` library target"
+                );
+            }
+            let config_path = config
+                .path()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| workspace_root.join("hawk.toml"));
+            let target_scope = if config.targets().is_empty() {
+                String::new()
+            } else {
+                format!(" for target `{}`", analysis_target.name())
+            };
             bail!(
-                "no binary targets found in this workspace; add a `hawk.toml` with a `[[production]]` library target"
+                "no applicable production targets configured in {}{target_scope}; add a `[[production]]` entry",
+                config_path.display()
             );
         }
-        let config_path = config
-            .path()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| workspace_root.join("hawk.toml"));
-        bail!(
-            "no applicable production targets configured in {}; add a `[[production]]` entry",
-            config_path.display()
-        );
+        target_products.push(products);
     }
     let audited_library_crates = production_products
         .iter()
@@ -491,55 +522,70 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
         .unwrap_or(graph_dir.as_os_str())
         .to_string_lossy()
         .into_owned();
-    let mut profile_graphs = Vec::new();
+    let mut runs = Vec::new();
     for (index, feature_profile) in config.feature_profiles().iter().enumerate() {
-        let mut metadata_command = MetadataCommand::new();
-        metadata_command
-            .current_dir(&workspace_root)
-            .manifest_path(&manifest_path)
-            .other_options(vec![
-                "--locked".to_owned(),
-                "--filter-platform".to_owned(),
-                args.target
+        for ((target_index, target_triple), analysis_target) in
+            target_triples.iter().enumerate().zip(&analysis_targets)
+        {
+            let mut metadata_command = MetadataCommand::new();
+            metadata_command
+                .current_dir(&workspace_root)
+                .manifest_path(&manifest_path)
+                .other_options(vec![
+                    "--locked".to_owned(),
+                    "--filter-platform".to_owned(),
+                    target_triple
+                        .as_deref()
+                        .unwrap_or(toolchain.host())
+                        .to_owned(),
+                ]);
+            feature_profile.configure_metadata(&mut metadata_command);
+            let resolved_metadata = metadata_command.exec().with_context(|| {
+                format!(
+                    "resolve Cargo dependencies for feature profile `{}`",
+                    feature_profile.name()
+                )
+            })?;
+            let mut run_graph_dir = graph_dir
+                .join("feature-profiles")
+                .join(format!("{index}-{}", feature_profile.name()));
+            let mut analysis_run_id = format!("{run_id}-feature-profile-{index}");
+            if !config.targets().is_empty() {
+                let triple = target_triple
                     .as_deref()
-                    .unwrap_or(toolchain.host())
-                    .to_owned(),
-            ]);
-        feature_profile.configure_metadata(&mut metadata_command);
-        let resolved_metadata = metadata_command.exec().with_context(|| {
-            format!(
-                "resolve Cargo dependencies for feature profile `{}`",
-                feature_profile.name()
-            )
-        })?;
-        let profile_graph_dir = graph_dir
-            .join("feature-profiles")
-            .join(format!("{index}-{}", feature_profile.name()));
-        let production_dir = profile_graph_dir.join("production");
-        let non_production_dir = profile_graph_dir.join("non-production");
-        fs::create_dir_all(&production_dir).with_context(|| {
-            format!(
-                "create production graph directory {}",
-                production_dir.display()
-            )
-        })?;
-        fs::create_dir_all(&non_production_dir).with_context(|| {
-            format!(
-                "create non-production graph directory {}",
-                non_production_dir.display()
-            )
-        })?;
-        profile_graphs.push(FeatureProfileGraph {
-            feature_profile,
-            run_id: format!("{run_id}-feature-profile-{index}"),
-            production_dir,
-            non_production_dir,
-            production_consumer_packages: production_workspace_packages(
-                &resolved_metadata,
-                &production_products,
-                &analysis_target,
-            )?,
-        });
+                    .expect("configured targets are explicit triples");
+                run_graph_dir = run_graph_dir.join("targets").join(triple);
+                write!(analysis_run_id, "-target-{target_index}")
+                    .expect("formatting into a string cannot fail");
+            }
+            let production_dir = run_graph_dir.join("production");
+            let non_production_dir = run_graph_dir.join("non-production");
+            fs::create_dir_all(&production_dir).with_context(|| {
+                format!(
+                    "create production graph directory {}",
+                    production_dir.display()
+                )
+            })?;
+            fs::create_dir_all(&non_production_dir).with_context(|| {
+                format!(
+                    "create non-production graph directory {}",
+                    non_production_dir.display()
+                )
+            })?;
+            runs.push(AnalysisRun {
+                feature_profile,
+                target: target_triple.as_deref(),
+                products: &target_products[target_index],
+                run_id: analysis_run_id,
+                production_dir,
+                non_production_dir,
+                production_consumer_packages: production_workspace_packages(
+                    &resolved_metadata,
+                    &target_products[target_index],
+                    analysis_target,
+                )?,
+            });
+        }
     }
 
     let driver = driver_executable()?;
@@ -568,22 +614,18 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
     };
     let mut production_fragments = Vec::new();
     let mut test_fragments = Vec::new();
-    for profile_graph in &profile_graphs {
-        let (profile_production, profile_tests) =
-            collect_profile_fragments(&cargo, profile_graph, &production_products, "initial")?;
-        production_fragments.extend(profile_production);
-        test_fragments.extend(profile_tests);
+    for run in &runs {
+        let (run_production, run_tests) = collect_run_fragments(&cargo, run, "initial")?;
+        production_fragments.extend(run_production);
+        test_fragments.extend(run_tests);
     }
     let excluded: HashSet<String> = args.excluded_crates.iter().cloned().collect();
     if args.fix {
-        let profile_graph = profile_graphs
-            .first()
-            .expect("every feature profile has a graph directory");
         let mut fix_iteration = 0;
         let mut applied_fix_plans = HashSet::new();
         loop {
             let initial_findings = config.apply(
-                &analysis_target,
+                &analysis_targets,
                 &production_fragments,
                 &test_fragments,
                 &candidate_crates,
@@ -650,51 +692,57 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
                 let fix_packages = fix_packages(&metadata, &test_fix_plan)?;
                 let fix_plan_path = graph_dir.join(format!("test-fix-plan-{fix_iteration}"));
                 write_fix_plan(&fix_plan_path, &test_emission_plan)?;
-                cargo.run(
-                    &format!("{run_id}-test-fix-{fix_iteration}"),
-                    &profile_graph.non_production_dir,
-                    CargoInvocation::FixNonProduction {
-                        plan: &fix_plan_path,
-                        packages: &fix_packages,
-                        allow_dirty: fix_iteration > 0,
-                    },
-                    profile_graph.feature_profile,
-                )?;
-                applied_fixes = true;
+                for run in &runs {
+                    cargo.run(
+                        &format!("{}-test-fix-{fix_iteration}", run.run_id),
+                        &run.non_production_dir,
+                        CargoInvocation::FixNonProduction {
+                            plan: &fix_plan_path,
+                            packages: &fix_packages,
+                            allow_dirty: fix_iteration > 0 || applied_fixes,
+                        },
+                        run,
+                    )?;
+                    applied_fixes = true;
+                }
             }
             if !production_fix_plan.targets.is_empty() {
                 let fix_packages = fix_packages(&metadata, &production_fix_plan)?;
                 let fix_plan_path = graph_dir.join(format!("production-fix-plan-{fix_iteration}"));
                 write_fix_plan(&fix_plan_path, &production_emission_plan)?;
-                cargo.run(
-                    &format!("{run_id}-production-fix-{fix_iteration}"),
-                    &profile_graph.production_dir,
-                    CargoInvocation::FixProduction {
-                        plan: &fix_plan_path,
-                        packages: &fix_packages,
-                        allow_dirty: fix_iteration > 0 || applied_fixes,
-                    },
-                    profile_graph.feature_profile,
-                )?;
-                applied_fixes = true;
+                for run in &runs {
+                    cargo.run(
+                        &format!("{}-production-fix-{fix_iteration}", run.run_id),
+                        &run.production_dir,
+                        CargoInvocation::FixProduction {
+                            plan: &fix_plan_path,
+                            packages: &fix_packages,
+                            allow_dirty: fix_iteration > 0 || applied_fixes,
+                        },
+                        run,
+                    )?;
+                    applied_fixes = true;
+                }
             }
             debug_assert!(
                 applied_fixes,
                 "a non-empty fix plan applies at least one mode"
             );
             fix_iteration += 1;
-            clear_fragments(&profile_graph.production_dir)?;
-            clear_fragments(&profile_graph.non_production_dir)?;
-            (production_fragments, test_fragments) = collect_profile_fragments(
-                &cargo,
-                profile_graph,
-                &production_products,
-                &format!("post-fix-{fix_iteration}"),
-            )?;
+            production_fragments.clear();
+            test_fragments.clear();
+            for run in &runs {
+                clear_fragments(&run.production_dir)?;
+                clear_fragments(&run.non_production_dir)?;
+                let (run_production, run_tests) =
+                    collect_run_fragments(&cargo, run, &format!("post-fix-{fix_iteration}"))?;
+                production_fragments.extend(run_production);
+                test_fragments.extend(run_tests);
+            }
         }
     }
     let findings = config.apply(
-        &analysis_target,
+        &analysis_targets,
         &production_fragments,
         &test_fragments,
         &candidate_crates,
@@ -780,10 +828,21 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
             }
         }
     }
-    let compilation_target = args.target.as_deref().map_or_else(
-        || "the host target".to_owned(),
-        |target| format!("target `{target}`"),
-    );
+    let compilation_target = match config.targets() {
+        [] => args.target.as_deref().map_or_else(
+            || "the host target".to_owned(),
+            |target| format!("target `{target}`"),
+        ),
+        [target] => format!("target `{target}`"),
+        targets => format!(
+            "targets {}",
+            targets
+                .iter()
+                .map(|target| format!("`{target}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    };
     let production_summary = production_summary(&production_products, config.feature_profiles());
     match args.output_format {
         OutputFormat::Text => {
@@ -805,7 +864,11 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
                 "schema_version": 4,
                 "summary": {
                     "diagnostic_count": diagnostic_count,
-                    "target": args.target.as_deref().unwrap_or(toolchain.host()),
+                    "target": analysis_targets[0].name(),
+                    "targets": analysis_targets
+                        .iter()
+                        .map(AnalysisTarget::name)
+                        .collect::<Vec<_>>(),
                     "production": production_products
                         .iter()
                         .map(|product| match product.product {
@@ -1038,8 +1101,10 @@ struct ProductionSelection<'a> {
     product: &'a ProductionProduct,
 }
 
-struct FeatureProfileGraph<'a> {
+struct AnalysisRun<'a> {
     feature_profile: &'a FeatureProfile,
+    target: Option<&'a str>,
+    products: &'a [ProductionSelection<'a>],
     run_id: String,
     production_dir: PathBuf,
     non_production_dir: PathBuf,
@@ -1285,7 +1350,7 @@ impl InstrumentedCargo<'_> {
         run_id: &str,
         graph_dir: &Path,
         invocation: CargoInvocation<'_>,
-        feature_profile: &FeatureProfile,
+        run: &AnalysisRun<'_>,
     ) -> Result<ConfiguredCargoCommand> {
         let CargoInvocationSpec {
             subcommand,
@@ -1308,11 +1373,11 @@ impl InstrumentedCargo<'_> {
             .args(selection_arguments)
             .arg("--color")
             .arg(self.args.color.cargo_value());
-        feature_profile.configure_cargo(&mut command);
+        run.feature_profile.configure_cargo(&mut command);
         self.toolchain.configure_command(&mut command)?;
         command
             .arg("--target")
-            .arg(self.args.target.as_deref().unwrap_or(self.toolchain.host()));
+            .arg(run.target.unwrap_or(self.toolchain.host()));
         if let Some(fix) = fix {
             if self.args.allow_dirty || fix.allow_dirty {
                 command.arg("--allow-dirty");
@@ -1367,14 +1432,14 @@ impl InstrumentedCargo<'_> {
         run_id: &str,
         graph_dir: &Path,
         invocation: CargoInvocation<'_>,
-        feature_profile: &FeatureProfile,
+        run: &AnalysisRun<'_>,
     ) -> Result<()> {
         let ConfiguredCargoCommand {
             mut command,
             subcommand,
             capture_output,
             cargo_output,
-        } = self.command(run_id, graph_dir, invocation, feature_profile)?;
+        } = self.command(run_id, graph_dir, invocation, run)?;
         let status = if let Some(cargo_output) = cargo_output {
             let (status, cargo_output) = cargo_output.run(command, subcommand)?;
             let mut reader = cargo_output
@@ -1412,44 +1477,36 @@ impl InstrumentedCargo<'_> {
         Ok(())
     }
 
-    fn collect_fragments(
-        &self,
-        run_id: &str,
-        production_products: &[ProductionSelection<'_>],
-        production_graph_dir: &Path,
-        non_production_graph_dir: &Path,
-        feature_profile: &FeatureProfile,
-        production_consumer_packages: &HashSet<String>,
-    ) -> Result<CollectedFragments> {
+    fn collect_fragments(&self, run_id: &str, run: &AnalysisRun<'_>) -> Result<CollectedFragments> {
         // Every production product uses the same compiler mode and feature set. Reuse one
         // dependency fingerprint across the product builds so Cargo can retain fragments from
         // shared dependencies instead of compiling them once per configured target.
         let production_run_id = format!("{run_id}-production");
-        for product in production_products.iter().copied() {
+        for product in run.products.iter().copied() {
             self.run(
                 &production_run_id,
-                production_graph_dir,
+                &run.production_dir,
                 CargoInvocation::CheckProduction(product),
-                feature_profile,
+                run,
             )?;
         }
         self.run(
             &format!("{run_id}-non-production"),
-            non_production_graph_dir,
+            &run.non_production_dir,
             CargoInvocation::CheckNonProduction,
-            feature_profile,
+            run,
         )?;
         self.run(
             &format!("{run_id}-doctests"),
-            non_production_graph_dir,
+            &run.non_production_dir,
             CargoInvocation::CheckDoctests {
                 packages: self.doctest_packages,
             },
-            feature_profile,
+            run,
         )?;
 
-        let mut production = read_fragments(production_graph_dir)?;
-        let mut non_production = read_fragments(non_production_graph_dir)?;
+        let mut production = read_fragments(&run.production_dir)?;
+        let mut non_production = read_fragments(&run.non_production_dir)?;
         for fragment in &mut non_production {
             classify_non_production_target(
                 fragment,
@@ -1459,11 +1516,14 @@ impl InstrumentedCargo<'_> {
             );
         }
         for fragment in production.iter_mut().chain(&mut non_production) {
-            if !production_consumer_packages.contains(&fragment.package_name) {
+            if !run
+                .production_consumer_packages
+                .contains(&fragment.package_name)
+            {
                 fragment.non_production_consumer = true;
             }
         }
-        for product in production_products {
+        for product in run.products {
             let ProductionProduct::Library(library) = product.product else {
                 continue;
             };
@@ -1472,8 +1532,7 @@ impl InstrumentedCargo<'_> {
             for fragment in production.iter_mut().filter(|fragment| {
                 fragment.package_name == product.package
                     && fragment.crate_name == crate_name
-                    && fragment.compilation_target
-                        == self.args.target.as_deref().unwrap_or(self.toolchain.host())
+                    && fragment.compilation_target == run.target.unwrap_or(self.toolchain.host())
                     && fragment.product_root_kind != Some(protocol::ProductionTargetKind::Binary)
             }) {
                 // Other products can compile this library with different feature sets before
@@ -1558,30 +1617,26 @@ fn normalize_workspace_source_path(path: &Path) -> PathBuf {
     normalized
 }
 
-fn collect_profile_fragments(
+fn collect_run_fragments(
     cargo: &InstrumentedCargo<'_>,
-    profile_graph: &FeatureProfileGraph<'_>,
-    production_products: &[ProductionSelection<'_>],
+    run: &AnalysisRun<'_>,
     phase: &str,
 ) -> Result<(Vec<Fragment>, Vec<Fragment>)> {
     let CollectedFragments {
         production: production_fragments,
         non_production: test_fragments,
-    } = cargo.collect_fragments(
-        &format!("{}-{phase}", profile_graph.run_id),
-        production_products,
-        &profile_graph.production_dir,
-        &profile_graph.non_production_dir,
-        profile_graph.feature_profile,
-        &profile_graph.production_consumer_packages,
-    )?;
+    } = cargo.collect_fragments(&format!("{}-{phase}", run.run_id), run)?;
     if !production_fragments
         .iter()
         .any(|fragment| fragment.is_product_root)
     {
+        let target = run
+            .target
+            .map(|target| format!(" on target `{target}`"))
+            .unwrap_or_default();
         bail!(
-            "no instrumented fragment was emitted for a configured production target under feature profile `{}`; rerun with a fresh --target-dir",
-            profile_graph.feature_profile.name()
+            "no instrumented fragment was emitted for a configured production target under feature profile `{}`{target}; rerun with a fresh --target-dir",
+            run.feature_profile.name()
         );
     }
     Ok((production_fragments, test_fragments))
