@@ -23,6 +23,7 @@ pub(crate) struct Config {
     production: Vec<ProductionConsumer>,
     doctests: Option<Vec<DoctestPackage>>,
     feature_profiles: Vec<FeatureProfile>,
+    targets: Vec<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -172,6 +173,8 @@ struct RawConfig {
     doctests: Vec<toml::Spanned<RawDoctestPackage>>,
     #[serde(default, rename = "feature-profile")]
     feature_profiles: Vec<toml::Spanned<RawFeatureProfile>>,
+    #[serde(default)]
+    targets: Vec<toml::Spanned<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -240,6 +243,7 @@ impl Default for Config {
             production: Vec::new(),
             doctests: None,
             feature_profiles: vec![FeatureProfile::all_features()],
+            targets: Vec::new(),
         }
     }
 }
@@ -375,6 +379,30 @@ impl Config {
         }
         if feature_profiles.is_empty() {
             feature_profiles.push(FeatureProfile::all_features());
+        }
+        let mut targets = Vec::new();
+        let mut target_names = HashSet::new();
+        for entry in raw.targets {
+            let span = config_span(&source, entry.span().start);
+            let entry = entry.into_inner();
+            let target = entry.trim();
+            if target.is_empty() {
+                bail!(
+                    "target in {}:{}:{} must be a non-empty target triple",
+                    path.display(),
+                    span.line,
+                    span.column
+                );
+            }
+            if !target_names.insert(target.to_owned()) {
+                bail!(
+                    "duplicate target `{target}` in {}:{}:{}",
+                    path.display(),
+                    span.line,
+                    span.column
+                );
+            }
+            targets.push(target.to_owned());
         }
         let mut overrides = Vec::new();
         for entry in raw.overrides {
@@ -572,11 +600,16 @@ impl Config {
             production,
             doctests,
             feature_profiles,
+            targets,
         })
     }
 
     pub(crate) fn feature_profiles(&self) -> &[FeatureProfile] {
         &self.feature_profiles
+    }
+
+    pub(crate) fn targets(&self) -> &[String] {
+        &self.targets
     }
 
     pub(crate) fn production_consumers(
@@ -598,7 +631,7 @@ impl Config {
 
     pub(crate) fn apply<'findings, 'config>(
         &'config self,
-        target: &AnalysisTarget,
+        targets: &[AnalysisTarget],
         production_fragments: &[Fragment],
         test_fragments: &[Fragment],
         candidate_crates: &HashSet<String>,
@@ -608,7 +641,11 @@ impl Config {
         let known_items: HashSet<KnownItemIdentity<'_>> = production_fragments
             .iter()
             .chain(test_fragments)
-            .filter(|fragment| fragment.compilation_target == target.name)
+            .filter(|fragment| {
+                targets
+                    .iter()
+                    .any(|target| fragment.compilation_target == target.name)
+            })
             .filter(|fragment| {
                 !candidate_crates.contains(&fragment.crate_name)
                     || audited_fragments.contains(fragment)
@@ -619,7 +656,11 @@ impl Config {
         let logical_items: HashSet<LogicalItemIdentity<'_>> = production_fragments
             .iter()
             .chain(test_fragments)
-            .filter(|fragment| fragment.compilation_target == target.name)
+            .filter(|fragment| {
+                targets
+                    .iter()
+                    .any(|target| fragment.compilation_target == target.name)
+            })
             .filter(|fragment| {
                 !candidate_crates.contains(&fragment.crate_name)
                     || audited_fragments.contains(fragment)
@@ -635,7 +676,7 @@ impl Config {
         for entry in self
             .overrides
             .iter()
-            .filter(|entry| entry.applies_to(target))
+            .filter(|entry| targets.iter().any(|target| entry.applies_to(target)))
             .filter(|entry| {
                 candidate_crates.contains(&entry.crate_name)
                     || !logical_items
@@ -674,7 +715,7 @@ impl Config {
         let active_exclusions = self
             .exclusions
             .iter()
-            .filter(|entry| entry.applies_to(target))
+            .filter(|entry| targets.iter().any(|target| entry.applies_to(target)))
             .filter(|entry| known_items.iter().any(|item| entry.identifies(item)))
             .collect::<Vec<_>>();
         let findings = findings
@@ -741,6 +782,10 @@ fn known_item_identity(definition: &Definition) -> KnownItemIdentity<'_> {
 }
 
 impl AnalysisTarget {
+    pub(crate) fn name(&self) -> &str {
+        &self.name
+    }
+
     pub(crate) fn from_rustc(
         target: Option<&str>,
         host: &str,
@@ -1076,7 +1121,7 @@ reason = "known retained public surface"
         let findings = analyze(&fragments, &[], &candidate_crates(), &HashSet::new());
 
         let applied = config.apply(
-            &target("aarch64-apple-darwin", &["unix"]),
+            &[target("aarch64-apple-darwin", &["unix"])],
             &fragments,
             &[],
             &candidate_crates(),
@@ -1108,7 +1153,7 @@ reason = "separate library audit"
         let candidates = HashSet::from(["selected_library".to_owned()]);
 
         let applied = config.apply(
-            &target("aarch64-apple-darwin", &["unix"]),
+            &[target("aarch64-apple-darwin", &["unix"])],
             &fragments,
             &[],
             &candidates,
@@ -1140,7 +1185,7 @@ reason = "detect misspelled crate selectors"
         let candidates = HashSet::from(["selected_library".to_owned()]);
 
         let applied = config.apply(
-            &target("aarch64-apple-darwin", &["unix"]),
+            &[target("aarch64-apple-darwin", &["unix"])],
             &fragments,
             &[],
             &candidates,
@@ -1201,7 +1246,7 @@ reason = "retain every compiled cfg alternative"
         assert_eq!(findings.len(), 2);
 
         let applied = config.apply(
-            &target("aarch64-apple-darwin", &["unix"]),
+            &[target("aarch64-apple-darwin", &["unix"])],
             &production_fragments,
             &test_fragments,
             &candidate_crates(),
@@ -1233,7 +1278,7 @@ reason = "detect stale selectors"
         let findings = analyze(&fragments, &[], &candidate_crates(), &HashSet::new());
 
         let applied = config.apply(
-            &target("aarch64-apple-darwin", &["unix"]),
+            &[target("aarch64-apple-darwin", &["unix"])],
             &fragments,
             &[],
             &candidate_crates(),
@@ -1271,7 +1316,7 @@ reason = "detect selectors outside the analyzed target"
         host_fragment.definitions[0].name = "host_only".into();
 
         let applied = config.apply(
-            &target("aarch64-apple-darwin", &["unix"]),
+            &[target("aarch64-apple-darwin", &["unix"])],
             &[host_fragment],
             &[],
             &candidate_crates(),
@@ -1306,7 +1351,7 @@ reason = "ambiguous Rust namespace"
         let findings = analyze(&fragments, &[], &candidate_crates(), &HashSet::new());
 
         let applied = config.apply(
-            &target("aarch64-apple-darwin", &["unix"]),
+            &[target("aarch64-apple-darwin", &["unix"])],
             &fragments,
             &[],
             &candidate_crates(),
@@ -1343,7 +1388,7 @@ reason = "retain the type alias"
         let findings = analyze(&fragments, &[], &candidate_crates(), &HashSet::new());
 
         let applied = config.apply(
-            &target("aarch64-apple-darwin", &["unix"]),
+            &[target("aarch64-apple-darwin", &["unix"])],
             &fragments,
             &[],
             &candidate_crates(),
@@ -1382,7 +1427,7 @@ reason = "only retained on Windows"
         let windows_fragments = vec![windows_fragment];
 
         let windows = config.apply(
-            &target("x86_64-pc-windows-msvc", &["windows"]),
+            &[target("x86_64-pc-windows-msvc", &["windows"])],
             &windows_fragments,
             &[],
             &candidate_crates(),
@@ -1397,7 +1442,7 @@ reason = "only retained on Windows"
         assert!(windows.config_diagnostics.is_empty());
 
         let unix = config.apply(
-            &target("aarch64-apple-darwin", &["unix"]),
+            &[target("aarch64-apple-darwin", &["unix"])],
             &fragments,
             &[],
             &candidate_crates(),
@@ -1429,7 +1474,7 @@ reason = "only compiled on Windows"
         let findings = analyze(&fragments, &[], &candidate_crates(), &HashSet::new());
 
         let applied = config.apply(
-            &target("aarch64-apple-darwin", &["unix"]),
+            &[target("aarch64-apple-darwin", &["unix"])],
             &fragments,
             &[],
             &candidate_crates(),
@@ -1458,7 +1503,7 @@ reason = "generated public declarations"
         let fragments = vec![scoped_fragment()];
 
         let applied = config.apply(
-            &target("aarch64-apple-darwin", &["unix"]),
+            &[target("aarch64-apple-darwin", &["unix"])],
             &fragments,
             &[],
             &candidate_crates(),
@@ -1494,7 +1539,7 @@ reason = "not actually a module"
         let fragments = vec![scoped_fragment()];
 
         let applied = config.apply(
-            &target("aarch64-apple-darwin", &["unix"]),
+            &[target("aarch64-apple-darwin", &["unix"])],
             &fragments,
             &[],
             &candidate_crates(),
@@ -1522,7 +1567,7 @@ reason = "generated source file"
         let fragments = vec![scoped_fragment()];
 
         let applied = config.apply(
-            &target("aarch64-apple-darwin", &["unix"]),
+            &[target("aarch64-apple-darwin", &["unix"])],
             &fragments,
             &[],
             &candidate_crates(),
@@ -1562,7 +1607,7 @@ reason = "generated only on Windows"
         let windows_fragments = vec![windows_fragment];
 
         let windows = config.apply(
-            &target("x86_64-pc-windows-msvc", &["windows"]),
+            &[target("x86_64-pc-windows-msvc", &["windows"])],
             &windows_fragments,
             &[],
             &candidate_crates(),
@@ -1576,7 +1621,7 @@ reason = "generated only on Windows"
         assert_eq!(windows.findings.len(), 2);
 
         let unix = config.apply(
-            &target("aarch64-apple-darwin", &["unix"]),
+            &[target("aarch64-apple-darwin", &["unix"])],
             &fragments,
             &[],
             &candidate_crates(),
@@ -1788,6 +1833,56 @@ features = ["serde", "cli"]
                     "--no-default-features --features serde --features cli".to_owned()
                 ),
             ]
+        );
+    }
+
+    #[test]
+    fn targets_default_to_the_selected_target_and_can_be_configured() {
+        let directory = tempfile::tempdir().expect("temporary configuration directory");
+        let path = directory.path().join("hawk.toml");
+
+        let default = Config::load(directory.path(), None).expect("load default configuration");
+        assert!(default.targets().is_empty());
+
+        std::fs::write(
+            &path,
+            r#"targets = ["x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
+"#,
+        )
+        .expect("write configuration");
+        let configured = Config::load(directory.path(), Some(&path)).expect("load configuration");
+
+        assert_eq!(
+            configured.targets(),
+            ["x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
+        );
+    }
+
+    #[test]
+    fn targets_must_be_unique_and_non_empty() {
+        let directory = tempfile::tempdir().expect("temporary configuration directory");
+        let path = directory.path().join("hawk.toml");
+
+        std::fs::write(
+            &path,
+            r#"targets = ["x86_64-unknown-linux-gnu", "x86_64-unknown-linux-gnu"]
+"#,
+        )
+        .expect("write configuration");
+        let error =
+            Config::load(directory.path(), Some(&path)).expect_err("reject duplicate target");
+        assert!(
+            error
+                .to_string()
+                .contains("duplicate target `x86_64-unknown-linux-gnu`")
+        );
+
+        std::fs::write(&path, "targets = [\"\"]\n").expect("write configuration");
+        let error = Config::load(directory.path(), Some(&path)).expect_err("reject empty target");
+        assert!(
+            error
+                .to_string()
+                .contains("must be a non-empty target triple")
         );
     }
 

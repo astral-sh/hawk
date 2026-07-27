@@ -77,8 +77,9 @@ Run `cargo hawk` without a subcommand to see the available commands. Use
 Configured production targets and workspace non-production targets are
 analyzed under `--all-features --locked` on the host target by default. A
 `[[feature-profile]]` matrix in `hawk.toml` can replace that single feature
-selection; Hawk unions evidence from every profile before producing
-diagnostics. The non-production surface includes tests, benches, examples, and
+selection and a `targets` list can replace the single compilation target; Hawk
+unions evidence from every profile and target before producing diagnostics.
+The non-production surface includes tests, benches, examples, and
 compile-only doctests, which can be restricted to explicit packages with
 `[[doctest]]` entries. Diagnostics apply to workspace library crates compiled
 for those targets, including declarations enabled only under `cfg(test)`.
@@ -140,9 +141,8 @@ are omitted.
 Configuration diagnostics include the referenced
 lint and item, configuration location, and reason.
 
-`--fix` supports the default profile or one explicitly configured feature
-profile. Hawk rejects fixing runs with a multi-profile matrix; run analysis
-without `--fix` to review the combined findings.
+`--fix` computes one fix plan from the combined evidence and applies it under
+every configured feature profile and target.
 
 ## Enforce diagnostics
 

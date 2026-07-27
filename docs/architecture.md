@@ -111,10 +111,11 @@ workspace selection with explicit packages:
 - test-only compilation can expose `#[cfg(test)]` declarations and
   dev-dependency support crates as diagnostic candidates.
 
-Instrumented builds use the configured feature profiles and one selected
-target triple. With no explicit profiles, Hawk uses one `--all-features`
-profile. A `target = "cfg(...)"` selector on a production entry, override, or
-exclusion limits it to applicable target configurations.
+Instrumented builds use the configured feature profiles and target triples.
+With no explicit profiles, Hawk uses one `--all-features` profile; with no
+configured targets, it uses the host target or the `--target` selection. A
+`target = "cfg(...)"` selector on a production entry, override, or exclusion
+limits it to applicable target configurations.
 
 Workspace library target names must be unique after Rust crate-name
 normalization. Hawk uses the crate name to associate compiler fragments,
@@ -139,10 +140,10 @@ An analysis run proceeds as follows:
      |
      | read Cargo metadata, hawk.toml, lint levels, and target cfg
      v
- cargo check --package <package> --bin <target>    (once per binary and feature profile)
- cargo check --package <package> --lib             (once per library and feature profile)
- cargo check --workspace --all-targets              (once per feature profile)
- cargo test --workspace|--package <package> --doc   (once per feature profile)
+ cargo check --package <package> --bin <target>    (once per binary, feature profile, and target)
+ cargo check --package <package> --lib             (once per library, feature profile, and target)
+ cargo check --workspace --all-targets              (once per feature profile and target)
+ cargo test --workspace|--package <package> --doc   (once per feature profile and target)
      |
      | RUSTC_WORKSPACE_WRAPPER=cargo-hawk-driver
      v

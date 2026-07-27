@@ -49,8 +49,26 @@ Every package and target must belong to the selected Cargo workspace. At least
 one production target must apply to the analyzed target.
 
 All production targets are analyzed with the same feature profiles and
-compilation target. When `hawk.toml` exists, its configured targets remain
+compilation targets. When `hawk.toml` exists, its configured targets remain
 authoritative; Hawk does not add other workspace binaries implicitly.
+
+## Compilation targets
+
+By default, Hawk analyzes the host target, or the single target selected with
+`--target`. Configure a `targets` list when declarations are compiled or used
+only on some platforms:
+
+```toml
+targets = ["x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
+```
+
+Hawk compiles every production target and workspace non-production target for
+each configured target and unions the reachability evidence before producing
+diagnostics, exactly as it does for feature profiles. A declaration required
+on any configured target is therefore preserved, and `--fix` never restricts
+surface that another platform still needs. Each target must be installed for
+the selected toolchain, for example with `rustup target add`. The `targets`
+list cannot be combined with the `--target` command-line option.
 
 ## Doctest packages
 
@@ -99,11 +117,11 @@ explicit `features` list. A profile with none of those settings uses Cargo's
 default features. Each string in `features` is passed as a separate Cargo
 `--features` value.
 
-Automatic fixes are currently rejected when multiple feature profiles are
-configured. Applying a visibility change safely across several configurations
-requires a coordinated fix plan; run the matrix without `--fix`, or select a
-single profile for a fixing run. Feature profiles do not select compilation
-targets; `--target` still selects one target for the entire analysis.
+With `--fix`, Hawk computes one fix plan from the combined evidence and
+applies it under every configured profile before re-analyzing, so a declaration
+compiled in only one configuration is edited by that configuration's pass.
+Feature profiles do not select compilation targets; those come from `targets`
+or the `--target` option.
 
 ## Uniform field visibility
 
