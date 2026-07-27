@@ -360,6 +360,9 @@ fn emit_fix(
         visibility_span,
         "public visibility can be restricted for the selected Hawk product",
     );
+    #[cfg(hawk_rustc_1_99)]
+    diagnostic.is_lint(kind.code().to_owned(), false, None);
+    #[cfg(not(hawk_rustc_1_99))]
     diagnostic.is_lint(kind.code().to_owned(), false);
     diagnostic.span_suggestion(
         visibility_span,
@@ -1052,6 +1055,19 @@ fn is_named_reexport(tcx: TyCtxt<'_>, def_id: LocalDefId) -> bool {
     )
 }
 
+// The scope identifier carried by `ty::Visibility::Restricted` changed from a
+// `LocalDefId` to a `LocalModId` in newer compilers.
+#[cfg(hawk_rustc_1_99)]
+fn restricts_to_crate_root(visibility: ty::Visibility) -> bool {
+    visibility
+        == ty::Visibility::Restricted(rustc_span::def_id::LocalModId::new_unchecked(CRATE_DEF_ID))
+}
+
+#[cfg(not(hawk_rustc_1_99))]
+fn restricts_to_crate_root(visibility: ty::Visibility) -> bool {
+    visibility == ty::Visibility::Restricted(CRATE_DEF_ID)
+}
+
 fn definition(
     tcx: TyCtxt<'_>,
     def_id: LocalDefId,
@@ -1084,7 +1100,7 @@ fn definition(
         restricted_visible_api,
         crate_visible_api: restricted_visible_api
             && visibility == Some("pub(crate)")
-            && restricted_visibility == Some(ty::Visibility::Restricted(CRATE_DEF_ID)),
+            && restricted_visibility.is_some_and(restricts_to_crate_root),
         visible_reexport_api: kind == DefinitionKind::Reexport && has_explicit_visibility,
         module_scope: module_scope(tcx, def_id),
         uniform_field_group: None,
