@@ -298,7 +298,8 @@ fn rejects_incomplete_driver_protocol_environment() {
             .env("HAWK_OUTPUT_DIR", output_dir.path())
             .env("HAWK_ROOT_CRATE", "app")
             .env_remove("HAWK_CONSUMER_MODE")
-            .env_remove("HAWK_RUN_ID");
+            .env_remove("HAWK_RUN_ID")
+            .env_remove("HAWK_WORKSPACE_ROOT");
         if let Some(consumer_mode) = consumer_mode {
             command.env("HAWK_CONSUMER_MODE", consumer_mode);
         }

@@ -3,9 +3,9 @@ use std::env;
 use std::ffi::OsStr;
 use std::fs::File;
 use std::io::{BufWriter, Write};
-use std::path::{Component, MAIN_SEPARATOR, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use anyhow::{Context, Result, bail};
 use rustc_ast as ast;
@@ -37,6 +37,7 @@ use cargo_hawk_internal::graph::{
     DefinitionKind, Edge, EdgeKind, ExpansionSpan, FindingKind, FixPlan, FixTarget, Fragment, Span,
     VisibilityReduction,
 };
+use cargo_hawk_internal::source_path;
 
 pub(crate) fn is_protocol_version_query(args: &[String]) -> bool {
     args.get(1)
@@ -63,9 +64,16 @@ pub(crate) fn run_wrapper(mut args: Vec<String>) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    WORKSPACE_ROOT
-        .set(workspace_root)
-        .expect("workspace root is set once per driver invocation");
+    let source_paths = match SourcePathNormalizer::new(&workspace_root) {
+        Ok(source_paths) => source_paths,
+        Err(error) => {
+            eprintln!("hawk: {error:#}");
+            return ExitCode::FAILURE;
+        }
+    };
+    SOURCE_PATHS
+        .set(source_paths)
+        .expect("source paths are initialized once per driver invocation");
     args.remove(1);
     let output_dir = PathBuf::from(
         env::var_os(protocol::OUTPUT_DIR_ENV).expect("HAWK_OUTPUT_DIR checked before dispatch"),
@@ -137,7 +145,7 @@ fn parse_workspace_root(value: Option<&OsStr>) -> Result<PathBuf> {
     if value.is_empty() {
         bail!("{} must not be empty", protocol::WORKSPACE_ROOT_ENV);
     }
-    let workspace_root = lexically_normalize(Path::new(value));
+    let workspace_root = source_path::lexically_normalize(Path::new(value));
     if !workspace_root.is_absolute() {
         bail!(
             "{} must be an absolute path, but was `{}`",
@@ -1358,88 +1366,76 @@ fn source_file_path(tcx: TyCtxt<'_>, name: &FileName) -> String {
     if let FileName::Real(name) = name
         && let Some(path) = name.local_path()
     {
-        return normalize_source_path(workspace_root(), working_directory, path);
+        return source_paths()
+            .normalize(working_directory, path)
+            .unwrap_or_else(|error| {
+                tcx.dcx()
+                    .fatal(format!("hawk could not resolve source identity: {error:#}"))
+            });
     }
     // Remapped-only names, doctests, and synthetic files have no local path.
     // What rustc reports for them already ignores the working directory.
-    normalize_source_path(
+    source_path::lexical_identity(
         workspace_root(),
-        Path::new(""),
         Path::new(&name.prefer_local_unconditionally().to_string()),
     )
 }
 
-static WORKSPACE_ROOT: OnceLock<PathBuf> = OnceLock::new();
+/// Canonicalizes each local source once per compiler invocation.
+///
+/// Caching avoids filesystem work per span while ensuring every span-producing
+/// surface uses the same workspace-relative identity.
+#[derive(Debug)]
+struct SourcePathNormalizer {
+    workspace_root: PathBuf,
+    identities: Mutex<HashMap<PathBuf, String>>,
+}
+
+impl SourcePathNormalizer {
+    fn new(workspace_root: &Path) -> Result<Self> {
+        let workspace_root = workspace_root
+            .canonicalize()
+            .with_context(|| format!("resolve workspace root {}", workspace_root.display()))?;
+        Ok(Self {
+            workspace_root,
+            identities: Mutex::new(HashMap::new()),
+        })
+    }
+
+    fn normalize(&self, working_directory: &Path, path: &Path) -> Result<String> {
+        let lexical_path = source_path::lexically_normalize(&working_directory.join(path));
+        if let Some(identity) = self
+            .identities
+            .lock()
+            .expect("source identity cache is not poisoned")
+            .get(&lexical_path)
+            .cloned()
+        {
+            return Ok(identity);
+        }
+
+        let identity = source_path::canonical_identity(&self.workspace_root, &lexical_path)
+            .with_context(|| format!("resolve source path {}", lexical_path.display()))?;
+        Ok(self
+            .identities
+            .lock()
+            .expect("source identity cache is not poisoned")
+            .entry(lexical_path)
+            .or_insert(identity)
+            .clone())
+    }
+}
+
+static SOURCE_PATHS: OnceLock<SourcePathNormalizer> = OnceLock::new();
+
+fn source_paths() -> &'static SourcePathNormalizer {
+    SOURCE_PATHS
+        .get()
+        .expect("source paths are initialized before the compiler starts")
+}
 
 fn workspace_root() -> &'static Path {
-    WORKSPACE_ROOT
-        .get()
-        .expect("workspace root is validated before the compiler starts")
-}
-
-fn normalize_source_path(workspace_root: &Path, working_directory: &Path, path: &Path) -> String {
-    normalize_source_path_with_case_sensitivity(
-        workspace_root,
-        working_directory,
-        path,
-        cfg!(windows),
-    )
-}
-
-fn normalize_source_path_with_case_sensitivity(
-    workspace_root: &Path,
-    working_directory: &Path,
-    path: &Path,
-    case_insensitive: bool,
-) -> String {
-    // Resolving against the session working directory makes the result
-    // independent of which directory Cargo happened to compile from.
-    let path = lexically_normalize(&working_directory.join(path));
-    let relative = if case_insensitive {
-        strip_prefix_ignore_ascii_case(&path, workspace_root)
-    } else {
-        path.strip_prefix(workspace_root).ok()
-    };
-    let mut identity = relative
-        .unwrap_or(&path)
-        .to_string_lossy()
-        .replace(MAIN_SEPARATOR, "/");
-    if case_insensitive {
-        identity.make_ascii_lowercase();
-    }
-    identity
-}
-
-fn strip_prefix_ignore_ascii_case<'a>(path: &'a Path, prefix: &Path) -> Option<&'a Path> {
-    let mut components = path.components();
-    for prefix_component in prefix.components() {
-        let component = components.next()?;
-        if !component
-            .as_os_str()
-            .eq_ignore_ascii_case(prefix_component.as_os_str())
-        {
-            return None;
-        }
-    }
-    Some(components.as_path())
-}
-
-fn lexically_normalize(path: &Path) -> PathBuf {
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => match normalized.components().next_back() {
-                Some(Component::Normal(_)) => {
-                    normalized.pop();
-                }
-                Some(Component::RootDir | Component::Prefix(_)) => {}
-                _ => normalized.push(component.as_os_str()),
-            },
-            _ => normalized.push(component.as_os_str()),
-        }
-    }
-    normalized
+    &source_paths().workspace_root
 }
 
 struct ReferenceVisitor<'tcx> {
@@ -1644,10 +1640,9 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        FragmentClassification, classify_fragment, compact_visibility_modifier,
-        normalize_source_path, normalize_source_path_with_case_sensitivity,
-        parse_collection_options, parse_consumer_mode, parse_run_id, parse_workspace_root,
-        source_item_at_or_after, strip_prefix_ignore_ascii_case, type_alias_interface_targets,
+        FragmentClassification, SourcePathNormalizer, classify_fragment,
+        compact_visibility_modifier, parse_collection_options, parse_consumer_mode, parse_run_id,
+        parse_workspace_root, source_item_at_or_after, type_alias_interface_targets,
         uniform_field_group, validate_frontend_protocol_version, write_fragment,
     };
     use cargo_hawk_internal::graph::{CollectionOptions, Edge, EdgeKind, Fragment};
@@ -1968,168 +1963,54 @@ mod tests {
 
     #[test]
     fn source_paths_are_stable_across_compiler_working_directories() {
-        let workspace_root = if cfg!(windows) {
-            PathBuf::from("C:\\workspace")
-        } else {
-            PathBuf::from("/workspace")
-        };
-        let package_root = workspace_root.join("library");
-        let outside = if cfg!(windows) {
-            "c:/elsewhere/vendored.rs"
-        } else {
-            "/elsewhere/vendored.rs"
-        };
-
-        // Cargo compiles one file under different working directories and
-        // reports the path relative to whichever it used, so every spelling of
-        // one file has to collapse to a single identity.
-        for (working_directory, path, expected) in [
-            (
-                workspace_root.as_path(),
-                "library/src/shared.rs",
-                "library/src/shared.rs",
-            ),
-            (
-                workspace_root.as_path(),
-                "library/tests/../src/shared.rs",
-                "library/src/shared.rs",
-            ),
-            (
-                package_root.as_path(),
-                "src/shared.rs",
-                "library/src/shared.rs",
-            ),
-            (
-                package_root.as_path(),
-                "./src/shared.rs",
-                "library/src/shared.rs",
-            ),
-            (
-                Path::new(""),
-                &*package_root.join("src/shared.rs").to_string_lossy(),
-                "library/src/shared.rs",
-            ),
-            // An absolute path ignores the working directory entirely.
-            (
-                Path::new("/somewhere/else"),
-                &*package_root.join("src/shared.rs").to_string_lossy(),
-                "library/src/shared.rs",
-            ),
-            // The workspace root itself relativizes to nothing.
-            (workspace_root.as_path(), "", ""),
-            // Files outside the workspace keep an absolute path rather than
-            // being forced into an unsafe suffix identity.
-            (Path::new(""), outside, outside),
-        ] {
-            assert_eq!(
-                normalize_source_path(&workspace_root, working_directory, Path::new(path)),
-                expected,
-                "working directory {} with path {path}",
-                working_directory.display()
-            );
-        }
-
-        // Native separators normalize so one file cannot become two identities.
-        if cfg!(windows) {
-            assert_eq!(
-                normalize_source_path(
-                    &workspace_root,
-                    Path::new("C:\\workspace\\library"),
-                    Path::new("src\\shared.rs")
-                ),
-                "library/src/shared.rs"
-            );
-            assert_eq!(
-                normalize_source_path(
-                    Path::new("C:\\Workspace"),
-                    Path::new("c:\\WORKSPACE\\Library"),
-                    Path::new("src\\Shared.rs")
-                ),
-                "library/src/shared.rs"
-            );
-        } else {
-            assert_eq!(
-                normalize_source_path(
-                    Path::new("/workspace"),
-                    Path::new("/WORKSPACE/Library"),
-                    Path::new("src/Shared.rs")
-                ),
-                "/WORKSPACE/Library/src/Shared.rs"
-            );
-        }
-    }
-
-    #[test]
-    fn case_insensitive_source_paths_share_one_identity() {
-        let workspace_root = Path::new("/workspace");
+        let workspace = tempfile::tempdir().expect("temporary workspace");
+        let package_root = workspace.path().join("library");
+        std::fs::create_dir_all(package_root.join("src")).expect("create source directory");
+        std::fs::write(package_root.join("src/shared.rs"), "pub fn shared() {}\n")
+            .expect("write source file");
+        let source_paths = SourcePathNormalizer::new(workspace.path()).expect("resolve workspace");
+        let absolute_source = package_root.join("src/shared.rs");
 
         for (working_directory, path) in [
-            ("/WORKSPACE/Library", "src/Shared.rs"),
-            ("/workspace/library", "SRC/shared.rs"),
-            ("/Workspace/LIBRARY", "SRC/SHARED.RS"),
+            (workspace.path(), Path::new("library/src/shared.rs")),
+            (
+                workspace.path(),
+                Path::new("library/tests/../src/shared.rs"),
+            ),
+            (package_root.as_path(), Path::new("src/shared.rs")),
+            (package_root.as_path(), Path::new("./src/shared.rs")),
+            (Path::new(""), absolute_source.as_path()),
         ] {
             assert_eq!(
-                normalize_source_path_with_case_sensitivity(
-                    workspace_root,
-                    Path::new(working_directory),
-                    Path::new(path),
-                    true,
-                ),
-                "library/src/shared.rs"
+                source_paths
+                    .normalize(working_directory, path)
+                    .expect("normalize source path"),
+                "library/src/shared.rs",
+                "working directory {} with path {}",
+                working_directory.display(),
+                path.display()
             );
         }
-
-        for path in ["/ELSEWHERE/Vendored.rs", "/elsewhere/vendored.rs"] {
-            assert_eq!(
-                normalize_source_path_with_case_sensitivity(
-                    workspace_root,
-                    Path::new(""),
-                    Path::new(path),
-                    true,
-                ),
-                "/elsewhere/vendored.rs"
-            );
-        }
-
-        assert_ne!(
-            normalize_source_path_with_case_sensitivity(
-                workspace_root,
-                Path::new("/workspace/Library"),
-                Path::new("src/Shared.rs"),
-                false,
-            ),
-            normalize_source_path_with_case_sensitivity(
-                workspace_root,
-                Path::new("/workspace/library"),
-                Path::new("src/shared.rs"),
-                false,
-            ),
-        );
     }
 
+    #[cfg(windows)]
     #[test]
-    fn workspace_prefix_matching_ignores_ascii_case() {
-        let path = Path::new("/WORKSPACE/Library/src/Shared.rs");
-        let prefix = Path::new("/workspace");
+    fn source_paths_use_the_filesystem_spelling_on_windows() {
+        let workspace = tempfile::tempdir().expect("temporary workspace");
+        std::fs::create_dir_all(workspace.path().join("Library/SRC"))
+            .expect("create source directory");
+        std::fs::write(
+            workspace.path().join("Library/SRC/Shared.rs"),
+            "pub fn shared() {}\n",
+        )
+        .expect("write source file");
+        let source_paths = SourcePathNormalizer::new(workspace.path()).expect("resolve workspace");
 
         assert_eq!(
-            strip_prefix_ignore_ascii_case(path, prefix),
-            Some(Path::new("Library/src/Shared.rs"))
-        );
-        assert_eq!(
-            strip_prefix_ignore_ascii_case(path, Path::new("/workspace/library/src/shared.rs")),
-            Some(Path::new(""))
-        );
-        assert_eq!(
-            strip_prefix_ignore_ascii_case(path, Path::new("/workspace-other")),
-            None
-        );
-        assert_eq!(
-            strip_prefix_ignore_ascii_case(
-                Path::new("/workspace"),
-                Path::new("/workspace/library")
-            ),
-            None
+            source_paths
+                .normalize(workspace.path(), Path::new("library/src/shared.rs"))
+                .expect("normalize source path"),
+            "Library/SRC/Shared.rs"
         );
     }
 }

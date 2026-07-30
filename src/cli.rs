@@ -1549,6 +1549,10 @@ fn classify_non_production_target(
     }
 }
 
+/// Normalizes Cargo metadata paths before comparing source-backed targets.
+///
+/// Canonicalization aligns workspace aliases when the source exists; lexical
+/// normalization remains available for target-generated paths.
 fn normalize_workspace_source_path(path: &Path) -> PathBuf {
     let mut normalized = PathBuf::new();
     for component in path.components() {

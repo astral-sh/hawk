@@ -3,6 +3,7 @@ use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 
 use anyhow::{Context, Result, bail};
 use cargo_metadata::{CargoOpt, MetadataCommand};
@@ -12,9 +13,11 @@ use serde::Deserialize;
 use cargo_hawk_internal::graph::{
     AuditedFragments, Definition, DefinitionKind, Finding, FindingKind, Fragment,
 };
+use cargo_hawk_internal::source_path;
 
 #[derive(Debug)]
 pub(crate) struct Config {
+    workspace_root: PathBuf,
     path: Option<PathBuf>,
     source: String,
     preserve_uniform_field_visibility: bool,
@@ -55,7 +58,10 @@ struct DiagnosticExclusion {
 #[derive(Clone, Debug)]
 enum ExclusionSelector {
     Module(String),
-    File(String),
+    File {
+        configured: String,
+        identity: OnceLock<String>,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -229,21 +235,6 @@ struct RawDoctestPackage {
     package: String,
 }
 
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            path: None,
-            source: String::new(),
-            preserve_uniform_field_visibility: false,
-            overrides: Vec::new(),
-            exclusions: Vec::new(),
-            production: Vec::new(),
-            doctests: None,
-            feature_profiles: vec![FeatureProfile::all_features()],
-        }
-    }
-}
-
 impl FeatureProfile {
     fn all_features() -> Self {
         Self {
@@ -292,7 +283,24 @@ impl FeatureProfile {
 }
 
 impl Config {
+    fn empty(workspace_root: PathBuf) -> Self {
+        Self {
+            workspace_root,
+            path: None,
+            source: String::new(),
+            preserve_uniform_field_visibility: false,
+            overrides: Vec::new(),
+            exclusions: Vec::new(),
+            production: Vec::new(),
+            doctests: None,
+            feature_profiles: vec![FeatureProfile::all_features()],
+        }
+    }
+
     pub(crate) fn load(workspace_root: &Path, configured_path: Option<&Path>) -> Result<Self> {
+        let canonical_workspace_root = workspace_root
+            .canonicalize()
+            .with_context(|| format!("resolve workspace root {}", workspace_root.display()))?;
         let path = configured_path
             .map(Path::to_path_buf)
             .unwrap_or_else(|| workspace_root.join("hawk.toml"));
@@ -301,7 +309,7 @@ impl Config {
             Err(error)
                 if error.kind() == std::io::ErrorKind::NotFound && configured_path.is_none() =>
             {
-                return Ok(Self::default());
+                return Ok(Self::empty(canonical_workspace_root));
             }
             Err(error) => {
                 return Err(error).with_context(|| format!("read {}", path.display()));
@@ -437,7 +445,10 @@ impl Config {
                 (Some(module), None) if !module.trim().is_empty() => {
                     ExclusionSelector::Module(module)
                 }
-                (None, Some(file)) if !file.trim().is_empty() => ExclusionSelector::File(file),
+                (None, Some(file)) if !file.trim().is_empty() => ExclusionSelector::File {
+                    configured: file,
+                    identity: OnceLock::new(),
+                },
                 (Some(_), None) => {
                     bail!(
                         "exclusion in {}:{}:{} must provide a non-empty `module` selector",
@@ -564,6 +575,7 @@ impl Config {
             Some(packages)
         };
         Ok(Self {
+            workspace_root: canonical_workspace_root,
             path: Some(path),
             source,
             preserve_uniform_field_visibility: raw.preserve_uniform_field_visibility,
@@ -675,13 +687,19 @@ impl Config {
             .exclusions
             .iter()
             .filter(|entry| entry.applies_to(target))
-            .filter(|entry| known_items.iter().any(|item| entry.identifies(item)))
+            .filter(|entry| {
+                known_items
+                    .iter()
+                    .any(|item| entry.identifies(item, &self.workspace_root))
+            })
             .collect::<Vec<_>>();
         let findings = findings
             .into_iter()
             .filter(|finding| {
                 !active_overrides.iter().any(|entry| entry.matches(finding))
-                    && !active_exclusions.iter().any(|entry| entry.matches(finding))
+                    && !active_exclusions
+                        .iter()
+                        .any(|entry| entry.matches(finding, &self.workspace_root))
             })
             .collect();
         AppliedFindings {
@@ -811,19 +829,19 @@ impl DiagnosticExclusion {
             .is_none_or(|platform| platform.matches(&target.name, &target.cfgs))
     }
 
-    fn identifies(&self, item: &KnownItemIdentity<'_>) -> bool {
+    fn identifies(&self, item: &KnownItemIdentity<'_>, workspace_root: &Path) -> bool {
         self.crate_name == item.crate_name
             && match &self.selector {
                 ExclusionSelector::Module(module) => {
                     item.kind == DefinitionKind::Module && item.item == module
                 }
-                ExclusionSelector::File(file) => item
+                ExclusionSelector::File { .. } => item
                     .file
-                    .is_some_and(|item_file| source_file_matches(item_file, file, cfg!(windows))),
+                    .is_some_and(|item_file| self.selector.matches_file(workspace_root, item_file)),
             }
     }
 
-    fn matches(&self, finding: &Finding<'_>) -> bool {
+    fn matches(&self, finding: &Finding<'_>, workspace_root: &Path) -> bool {
         self.crate_name == finding.definition.crate_name
             && match &self.selector {
                 ExclusionSelector::Module(module) => {
@@ -834,20 +852,33 @@ impl DiagnosticExclusion {
                             .strip_prefix(module)
                             .is_some_and(|suffix| suffix.starts_with("::"))
                 }
-                ExclusionSelector::File(file) => finding
+                ExclusionSelector::File { .. } => finding
                     .definition
                     .span
                     .as_ref()
-                    .is_some_and(|span| source_file_matches(&span.file, file, cfg!(windows))),
+                    .is_some_and(|span| self.selector.matches_file(workspace_root, &span.file)),
             }
     }
 }
 
-fn source_file_matches(source: &str, configured: &str, case_insensitive: bool) -> bool {
-    if case_insensitive {
-        source.eq_ignore_ascii_case(configured)
-    } else {
-        source == configured
+impl ExclusionSelector {
+    /// Matches the same identity emitted by the driver when the configured file
+    /// exists, with a lexical fallback for target-generated or optional files.
+    fn matches_file(&self, workspace_root: &Path, source: &str) -> bool {
+        let Self::File {
+            configured,
+            identity,
+        } = self
+        else {
+            return false;
+        };
+        let identity = identity.get_or_init(|| {
+            let configured_path =
+                source_path::lexically_normalize(&workspace_root.join(configured));
+            source_path::canonical_identity(workspace_root, &configured_path)
+                .unwrap_or_else(|_| source_path::lexical_identity(workspace_root, &configured_path))
+        });
+        source == identity
     }
 }
 
@@ -873,11 +904,12 @@ fn config_span(source: &str, offset: usize) -> ConfigSpan {
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
+    use std::sync::OnceLock;
 
     use cargo_platform::Cfg;
 
     use super::{
-        AnalysisTarget, Config, ConfigDiagnosticKind, ProductionProduct, source_file_matches,
+        AnalysisTarget, Config, ConfigDiagnosticKind, ExclusionSelector, ProductionProduct,
     };
     use cargo_hawk_internal::graph::{
         Definition, DefinitionId, DefinitionKind, FindingKind, Fragment, Span, analyze,
@@ -1552,21 +1584,27 @@ reason = "generated source file"
 
     #[test]
     fn file_exclusions_follow_filesystem_case_sensitivity() {
-        assert!(source_file_matches(
-            "library/src/shared.rs",
-            "Library/src/Shared.rs",
-            true,
-        ));
-        assert!(!source_file_matches(
-            "library/src/shared.rs",
-            "Library/src/Shared.rs",
-            false,
-        ));
-        assert!(!source_file_matches(
-            "library/src/shared.rs",
-            "library/src/other.rs",
-            true,
-        ));
+        let directory = tempfile::tempdir().expect("temporary workspace");
+        std::fs::create_dir_all(directory.path().join("Library/src"))
+            .expect("create source directory");
+        std::fs::write(
+            directory.path().join("Library/src/Shared.rs"),
+            "pub fn shared() {}\n",
+        )
+        .expect("write source file");
+        let workspace_root = directory.path().canonicalize().expect("resolve workspace");
+        let configured = "library/src/shared.rs";
+        let case_alias_exists = workspace_root.join(configured).canonicalize().is_ok();
+        let selector = ExclusionSelector::File {
+            configured: configured.to_owned(),
+            identity: OnceLock::new(),
+        };
+
+        assert_eq!(
+            selector.matches_file(&workspace_root, "Library/src/Shared.rs"),
+            case_alias_exists
+        );
+        assert!(!selector.matches_file(&workspace_root, "Library/src/Other.rs"));
     }
 
     #[test]
