@@ -1560,7 +1560,7 @@ fn normalize_workspace_source_path(path: &Path) -> PathBuf {
             component => normalized.push(component.as_os_str()),
         }
     }
-    normalized
+    normalized.canonicalize().unwrap_or(normalized)
 }
 
 fn collect_profile_fragments(
@@ -2168,6 +2168,11 @@ mod tests {
     use std::ffi::OsString;
     use std::path::{Path, PathBuf};
 
+    #[cfg(unix)]
+    use std::fs;
+    #[cfg(unix)]
+    use std::os::unix::fs::symlink;
+
     use clap::CommandFactory;
 
     use crate::config::ConfigDiagnosticKind;
@@ -2184,6 +2189,8 @@ mod tests {
         DefinitionId::new(0, hash)
     }
 
+    #[cfg(unix)]
+    use super::normalize_workspace_source_path;
     use super::{
         Args, CargoInvocation, DEFAULT_TARGET_DIR_COMPONENT_MAX_BYTES, DiagnosticRenderer,
         LintLevel, LintLevels, ProductionProduct, ProductionSelection, WorkspaceLibrarySource,
@@ -2525,6 +2532,43 @@ mod tests {
             assert!(non_production.is_product_root);
             assert!(non_production.non_production_consumer);
             assert_eq!(non_production.roots, vec![test_id("non-production-entry")]);
+        }
+
+        #[cfg(unix)]
+        {
+            // Cargo metadata can preserve a symlink spelling while rustc
+            // reports the canonical path. Both must still identify the
+            // package's actual library target.
+            let directory = tempfile::tempdir().expect("temporary workspace directory");
+            let workspace = directory.path().join("workspace");
+            let source = workspace.join("consumer/src/lib.rs");
+            fs::create_dir_all(source.parent().expect("source has a parent"))
+                .expect("create workspace source directory");
+            fs::write(&source, "").expect("write workspace source");
+            let workspace_alias = directory.path().join("workspace-alias");
+            symlink(&workspace, &workspace_alias).expect("create workspace alias");
+
+            let sources = HashMap::from([(
+                "consumer".to_owned(),
+                WorkspaceLibrarySource {
+                    crate_name: "consumer".to_owned(),
+                    path: normalize_workspace_source_path(
+                        &workspace_alias.join("consumer/src/lib.rs"),
+                    ),
+                },
+            )]);
+            let library_paths = sources.values().map(|source| source.path.clone()).collect();
+            let mut aliased_library = fragment("consumer/src/lib.rs");
+            classify_non_production_target(
+                &mut aliased_library,
+                &sources,
+                &library_paths,
+                &workspace.canonicalize().expect("canonical workspace"),
+            );
+
+            assert!(!aliased_library.is_product_root);
+            assert!(!aliased_library.non_production_consumer);
+            assert!(aliased_library.roots.is_empty());
         }
     }
 
