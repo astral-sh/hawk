@@ -8,7 +8,8 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 /// serialized value changes. Workspace source paths became canonical
 /// workspace-relative identities in 9, which also made the workspace root a
 /// required environment value; sources outside the workspace stay absolute.
-pub const VERSION: u32 = 9;
+/// Uniform field group completeness became explicit in 10.
+pub const VERSION: u32 = 10;
 
 pub const VERSION_ARGUMENT: &str = "--hawk-protocol-version";
 
@@ -129,7 +130,7 @@ mod tests {
 
         assert_eq!(
             error.to_string(),
-            "unsupported Hawk protocol version 1; expected 9"
+            "unsupported Hawk protocol version 1; expected 10"
         );
     }
 }

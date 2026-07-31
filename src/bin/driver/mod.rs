@@ -37,7 +37,7 @@ use crate::protocol;
 use cargo_hawk_internal::graph::{
     CollectionOptions, DeclarationSpan, Definition, DefinitionId, DefinitionIdentity,
     DefinitionKind, Edge, EdgeKind, ExpansionSpan, FindingKind, FixPlan, FixTarget, Fragment, Span,
-    VisibilityReduction,
+    UniformFieldGroup, VisibilityReduction,
 };
 use cargo_hawk_internal::source_path;
 
@@ -589,8 +589,14 @@ fn collect_fragment(
             hir::ItemKind::Struct(_, _, data) | hir::ItemKind::Union(_, _, data) => {
                 let uniform_field_group = uniform_field_group(
                     collection_options,
-                    || source_fields_have_uniform_visibility(tcx, item.span),
-                    || span(tcx, item.owner_id.def_id),
+                    || source_uniform_field_count(tcx, item.span),
+                    data.fields().len(),
+                    |all_fields_observed| {
+                        span(tcx, item.owner_id.def_id).map(|span| UniformFieldGroup {
+                            span,
+                            all_fields_observed,
+                        })
+                    },
                 );
                 for field in data.fields() {
                     let field_span = tcx.def_span(field.def_id);
@@ -964,23 +970,24 @@ fn visibility_modifier(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Option<String> {
 
 fn uniform_field_group<T>(
     collection_options: CollectionOptions,
-    fields_have_uniform_visibility: impl FnOnce() -> bool,
-    group: impl FnOnce() -> Option<T>,
+    source_field_count: impl FnOnce() -> Option<usize>,
+    observed_field_count: usize,
+    group: impl FnOnce(bool) -> Option<T>,
 ) -> Option<T> {
-    if collection_options.preserve_uniform_field_visibility() && fields_have_uniform_visibility() {
-        group()
-    } else {
-        None
+    if !collection_options.preserve_uniform_field_visibility() {
+        return None;
     }
+    let source_field_count = source_field_count()?;
+    group(source_field_count == observed_field_count)
 }
 
 // HIR omits cfg-stripped fields, so uniformity must come from the complete source declaration.
-fn source_fields_have_uniform_visibility(tcx: TyCtxt<'_>, item_span: rustc_span::Span) -> bool {
+fn source_uniform_field_count(tcx: TyCtxt<'_>, item_span: rustc_span::Span) -> Option<usize> {
     if item_span.from_expansion() {
-        return false;
+        return None;
     }
     let Ok(source) = tcx.sess.source_map().span_to_snippet(item_span) else {
-        return false;
+        return None;
     };
     let mut parser = match rustc_parse::new_parser_from_source_str(
         &tcx.sess.psess,
@@ -998,20 +1005,20 @@ fn source_fields_have_uniform_visibility(tcx: TyCtxt<'_>, item_span: rustc_span:
             for error in errors {
                 error.cancel();
             }
-            return false;
+            return None;
         }
     };
     let item = match parser.parse_item(ForceCollect::No, AllowConstBlockItems::Yes) {
         Ok(Some(item)) => item,
-        Ok(None) => return false,
+        Ok(None) => return None,
         Err(error) => {
             error.cancel();
-            return false;
+            return None;
         }
     };
     let fields = match &item.kind {
         ast::ItemKind::Struct(_, _, data) | ast::ItemKind::Union(_, _, data) => data.fields(),
-        _ => return false,
+        _ => return None,
     };
     let mut visibilities = fields.iter().map(|field| match field.vis.kind {
         ast::VisibilityKind::Inherited => Some(String::new()),
@@ -1023,9 +1030,11 @@ fn source_fields_have_uniform_visibility(tcx: TyCtxt<'_>, item_span: rustc_span:
             .and_then(|visibility| compact_visibility_modifier(&visibility)),
     });
     let Some(Some(first)) = visibilities.next() else {
-        return false;
+        return None;
     };
-    visibilities.all(|visibility| visibility.as_ref() == Some(&first))
+    visibilities
+        .all(|visibility| visibility.as_ref() == Some(&first))
+        .then_some(fields.len())
 }
 
 fn compact_visibility_modifier(visibility: &str) -> Option<String> {
@@ -1700,7 +1709,7 @@ mod tests {
 
         assert_eq!(
             error.to_string(),
-            "Hawk frontend uses compiler driver protocol 1, but this driver uses protocol 9; install `cargo-hawk` and `cargo-hawk-driver` from the same release"
+            "Hawk frontend uses compiler driver protocol 1, but this driver uses protocol 10; install `cargo-hawk` and `cargo-hawk-driver` from the same release"
         );
     }
 
@@ -1888,27 +1897,38 @@ mod tests {
     fn uniform_field_collection_is_lazy() {
         let parse_count = Cell::new(0);
         let group_count = Cell::new(0);
-        let collect = |options| {
+        let collect = |options, observed_field_count| {
             uniform_field_group(
                 options,
                 || {
                     parse_count.set(parse_count.get() + 1);
-                    true
+                    Some(2)
                 },
-                || {
+                observed_field_count,
+                |all_fields_observed| {
                     group_count.set(group_count.get() + 1);
-                    Some("group")
+                    Some(("group", all_fields_observed))
                 },
             )
         };
 
-        assert_eq!(collect(CollectionOptions::default()), None);
+        assert_eq!(collect(CollectionOptions::default(), 2), None);
         assert_eq!(parse_count.get(), 0);
         assert_eq!(group_count.get(), 0);
 
-        assert_eq!(collect(CollectionOptions::new(true)), Some("group"));
+        assert_eq!(
+            collect(CollectionOptions::new(true), 2),
+            Some(("group", true))
+        );
         assert_eq!(parse_count.get(), 1);
         assert_eq!(group_count.get(), 1);
+
+        assert_eq!(
+            collect(CollectionOptions::new(true), 1),
+            Some(("group", false))
+        );
+        assert_eq!(parse_count.get(), 2);
+        assert_eq!(group_count.get(), 2);
     }
 
     #[test]

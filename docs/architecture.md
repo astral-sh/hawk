@@ -308,6 +308,11 @@ If every field can be private, Hawk reports that reduction for the full group.
 Dead-public findings remain independent, and overrides, exclusions, and lint
 levels do not establish a visibility requirement.
 
+If a source-written field is absent from a compiled fragment, such as a
+`#[cfg]`-disabled field, or opts out with `#[allow(dead_code)]`, Hawk preserves
+the group's current visibility. A group-wide fix is unsafe when one of its
+members cannot participate.
+
 Enum variants are a special case. Hawk can report an unreachable public
 variant as dead surface requiring removal together with any remaining
 unreachable uses, but it does not report a reachable variant as unnecessarily

@@ -129,13 +129,15 @@ diagnostic policy, overrides, and broad diagnostic exclusions. The opt-in
 visible field group together to the broadest visibility required by any
 member, subject to the selected lint levels. In particular, a group-wide
 `pub(super)` reduction is reported only when the allow-by-default
-`hawk::unnecessary_crate_visibility` lint is enabled. A `[[production]]` entry
-names a package and either a binary or library target in the selected workspace,
-optionally scoped to a Cargo-style target name or `cfg(...)` platform
-expression, and its compiled references participate in production reachability
-and required-public analysis. An `[[override]]`
-entry identifies an exact lint, crate, and item path under the same optional
-target scoping, with an optional item kind to
+`hawk::unnecessary_crate_visibility` lint is enabled. Groups with a
+source-written field absent from the compiled graph or excluded by
+`#[allow(dead_code)]` retain their current visibility because not every member
+can participate in a fix. A `[[production]]` entry names a package and either a
+binary or library target in the selected workspace, optionally scoped to a
+Cargo-style target name or `cfg(...)` platform expression, and its compiled
+references participate in production reachability and required-public analysis.
+An `[[override]]` entry identifies an exact lint, crate, and item path under the
+same optional target scoping, with an optional item kind to
 disambiguate declarations in separate Rust namespaces. `allow` suppresses a
 matching finding; `expect` also produces an unfulfilled-expectation diagnostic
 when its finding disappears on an applicable target. Overrides that refer to

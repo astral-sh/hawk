@@ -123,6 +123,11 @@ enabled. That lint is allow-by-default; without it, Hawk preserves the group's
 `pub(crate)` visibility. If every field can be private, Hawk reports that
 reduction for the full group. The policy does not suppress `hawk::dead_public`.
 
+Hawk conservatively preserves the current group when a source-written field is
+absent from the compiled graph, such as a `#[cfg]`-disabled field, or when a
+field opts out of analysis with `#[allow(dead_code)]`. Those fields cannot
+participate in a safe group-wide fix.
+
 This setting is disabled by default. It does not apply to mixed-visibility
 declarations or declarations whose complete source field list is unavailable,
 such as macro-generated structs.
