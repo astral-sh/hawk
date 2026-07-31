@@ -435,7 +435,6 @@ fn emit_fragment(
         tcx.sess.opts.test,
     );
     let suffix = crate_id.to_string();
-    let path_prefix = format!("{package_name}-{crate_name}-{suffix}");
     let fragment = collect_fragment(
         tcx,
         package_name,
@@ -451,7 +450,7 @@ fn emit_fragment(
         .with_context(|| format!("create temporary fragment in {}", output_dir.display()))?;
     let temporary_path = file.path().to_path_buf();
     let fingerprint = write_fragment(file.as_file_mut(), &fragment, &temporary_path)?;
-    let path = output_dir.join(format!("{path_prefix}-{fingerprint:016x}.json"));
+    let path = output_dir.join(format!("{suffix}-{fingerprint:016x}.json"));
     file.persist(&path)
         .map_err(|error| error.error)
         .with_context(|| format!("persist fragment {}", path.display()))?;

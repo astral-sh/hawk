@@ -932,6 +932,14 @@ fn discovers_workspace_binaries_without_configuration() {
 }
 
 #[test]
+fn fragment_file_names_support_long_package_names() {
+    let context = HawkTestContext::new("long_package_name");
+    let output = context.run(&[]);
+
+    context.assert_success(&output);
+}
+
+#[test]
 fn configuration_keeps_binary_selection_explicit() {
     let context = HawkTestContext::new("production_consumers");
     fs::write(
