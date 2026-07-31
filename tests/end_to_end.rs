@@ -3451,6 +3451,63 @@ fn removes_unnecessary_restricted_visibility_by_default() {
 }
 
 #[test]
+fn reduces_uniform_restricted_field_visibility_together() {
+    let context = HawkTestContext::new("basic");
+    let library_path = context.workspace().join("library/src/lib.rs");
+    let mut library = fs::read_to_string(&library_path).expect("read library source");
+    library.push_str(
+        r"
+
+mod uniform_restricted_fields {
+    #[derive(Debug)]
+    pub(crate) struct Fields {
+        /// Used by the parent module.
+        pub(crate) used_across_modules: u8,
+        /// Used only within the defining module.
+        pub(crate) used_inside_module: u8,
+    }
+
+    pub(crate) fn fields() -> Fields {
+        let fields = Fields {
+            used_across_modules: 1,
+            used_inside_module: 2,
+        };
+        let _ = fields.used_inside_module;
+        fields
+    }
+}
+
+pub fn exercise_uniform_restricted_fields() {
+    let _ = uniform_restricted_fields::fields().used_across_modules;
+}
+",
+    );
+    fs::write(&library_path, library).expect("add uniformly visible restricted fields");
+
+    let app_path = context.workspace().join("app/src/main.rs");
+    let app = fs::read_to_string(&app_path)
+        .expect("read application source")
+        .replacen(
+            "fn main() {\n",
+            "fn main() {\n    library::exercise_uniform_restricted_fields();\n",
+            1,
+        );
+    fs::write(app_path, app).expect("exercise uniformly visible restricted fields");
+
+    let output = context.run(&[
+        "--fix",
+        "--allow-no-vcs",
+        "-W",
+        "hawk::unnecessary_crate_visibility",
+    ]);
+
+    context.assert_success(&output);
+    let library = fs::read_to_string(library_path).expect("read fixed library source");
+    assert!(library.contains("        pub(super) used_across_modules: u8,"));
+    assert!(library.contains("        pub(super) used_inside_module: u8,"));
+}
+
+#[test]
 fn path_modules_preserve_visibility_required_by_other_targets() {
     let context = HawkTestContext::new("path_module_fixes");
     let output = context.run(&["--fix", "--allow-no-vcs"]);

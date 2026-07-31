@@ -748,7 +748,7 @@ pub fn analyze_with_options<'a>(
     }
 
     if preserve_uniform_field_visibility {
-        suppress_uniform_field_visibility_findings(
+        preserve_uniform_field_visibility_findings(
             &mut findings,
             &observed_definitions,
             &required_public_visibility,
@@ -777,7 +777,7 @@ fn field_group_identity(definition: &Definition) -> Option<&Span> {
     definition.uniform_field_group.as_ref()
 }
 
-fn suppress_uniform_field_visibility_findings<'a>(
+fn preserve_uniform_field_visibility_findings<'a>(
     findings: &mut Vec<Finding<'a>>,
     observed_definitions: &[&'a Definition],
     required_public_visibility: &FxHashSet<DefinitionId>,
@@ -805,12 +805,36 @@ fn suppress_uniform_field_visibility_findings<'a>(
         })
         .collect();
 
-    findings.retain(|finding| {
+    let super_reduction_groups: FxHashSet<_> = observed_definitions
+        .iter()
+        .filter_map(|definition| {
+            let identity = field_group_identity(definition)?;
+            (restricted_visibility_finding_kind(
+                definition,
+                required_scopes,
+                equivalents,
+                visibility_finding_kinds,
+            ) == Some(FindingKind::UnnecessaryCrateVisibility))
+            .then_some(identity)
+        })
+        .collect();
+
+    findings.retain_mut(|finding| {
         if finding.kind == FindingKind::DeadPublic {
             return true;
         }
-        field_group_identity(finding.definition)
-            .is_none_or(|identity| !protected_groups.contains(&identity))
+        let Some(identity) = field_group_identity(finding.definition) else {
+            return true;
+        };
+        if protected_groups.contains(&identity) {
+            return false;
+        }
+        if super_reduction_groups.contains(&identity)
+            && finding.kind == FindingKind::UnnecessaryRestrictedVisibility
+        {
+            finding.kind = FindingKind::UnnecessaryCrateVisibility;
+        }
+        true
     });
 }
 
@@ -2330,7 +2354,7 @@ mod tests {
     }
 
     #[test]
-    fn reducible_sibling_does_not_preserve_uniform_field_visibility() {
+    fn uniform_fields_use_broadest_required_reduction() {
         let parent_visible = uniform_field(crate_visible_node(
             "scoped::nested::parent_visible",
             &["scoped", "nested"],
@@ -2366,12 +2390,47 @@ mod tests {
         assert!(
             findings
                 .iter()
-                .any(|finding| finding.kind == FindingKind::UnnecessaryCrateVisibility)
+                .all(|finding| finding.kind == FindingKind::UnnecessaryCrateVisibility)
         );
+    }
+
+    #[test]
+    fn uniformly_visible_fields_can_be_made_private_together() {
+        let first = uniform_field(crate_visible_node(
+            "scoped::nested::first",
+            &["scoped", "nested"],
+        ));
+        let second = uniform_field(crate_visible_node(
+            "scoped::nested::second",
+            &["scoped", "nested"],
+        ));
+        let input = fragments(
+            vec![
+                first,
+                second,
+                scoped_node("scoped::nested::entry", &["scoped", "nested"]),
+            ],
+            vec![
+                Edge {
+                    from: test_id("scoped::nested::entry"),
+                    to: test_id("scoped::nested::first"),
+                    kind: EdgeKind::Body,
+                },
+                Edge {
+                    from: test_id("scoped::nested::entry"),
+                    to: test_id("scoped::nested::second"),
+                    kind: EdgeKind::Body,
+                },
+            ],
+        );
+
+        let findings = analyze_preserving_uniform_fields(&input);
+
+        assert_eq!(findings.len(), 2);
         assert!(
             findings
                 .iter()
-                .any(|finding| finding.kind == FindingKind::UnnecessaryRestrictedVisibility)
+                .all(|finding| { finding.kind == FindingKind::UnnecessaryRestrictedVisibility })
         );
     }
 

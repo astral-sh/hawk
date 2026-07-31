@@ -114,10 +114,13 @@ intentional uniform field visibility:
 preserve-uniform-field-visibility = true
 ```
 
-When every source-written field has the same visibility and at least one field
-semantically requires that visibility, Hawk does not suggest reducing the
-visibility of its siblings. The policy applies to public and restricted
-visibility reductions, but does not suppress `hawk::dead_public`.
+When every source-written field has the same visibility, Hawk preserves that
+visibility if at least one field requires it. Otherwise, Hawk applies the least
+aggressive available reduction to every field. For example, if one
+`pub(crate)` field requires `pub(super)` and another can be private, Hawk
+suggests `pub(super)` for both. If every field can be private, Hawk reports that
+reduction for the full group. The policy does not suppress
+`hawk::dead_public`.
 
 This setting is disabled by default. It does not apply to mixed-visibility
 declarations or declarations whose complete source field list is unavailable,
