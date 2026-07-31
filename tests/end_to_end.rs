@@ -3236,6 +3236,8 @@ fn codegen_roots_preserve_reachable_items() {
     context.assert_success(&output);
     let stdout = context.normalized_stdout(&output);
     for live in [
+        "global_asm_callback",
+        "global_asm_helper",
         "exported_callback",
         "renamed_callback",
         "RETAINED_REGISTRATION",

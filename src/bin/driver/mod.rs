@@ -907,6 +907,13 @@ fn collect_fragment(
                 .filter(|definition| definition.dead_code_allowed)
                 .map(|definition| definition.id),
         )
+        .chain(
+            crate_items
+                .owners()
+                .map(|owner| owner.def_id)
+                .filter(|def_id| tcx.def_kind(*def_id) == DefKind::GlobalAsm)
+                .map(|def_id| id(tcx, def_id.to_def_id())),
+        )
         .collect();
     conservative_roots.extend(
         crate_items
