@@ -118,9 +118,10 @@ When every source-written field has the same visibility, Hawk preserves that
 visibility if at least one field requires it. Otherwise, Hawk applies the least
 aggressive available reduction to every field. For example, if one
 `pub(crate)` field requires `pub(super)` and another can be private, Hawk
-suggests `pub(super)` for both. If every field can be private, Hawk reports that
-reduction for the full group. The policy does not suppress
-`hawk::dead_public`.
+suggests `pub(super)` for both when `hawk::unnecessary_crate_visibility` is
+enabled. That lint is allow-by-default; without it, Hawk preserves the group's
+`pub(crate)` visibility. If every field can be private, Hawk reports that
+reduction for the full group. The policy does not suppress `hawk::dead_public`.
 
 This setting is disabled by default. It does not apply to mixed-visibility
 declarations or declarations whose complete source field list is unavailable,

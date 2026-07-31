@@ -302,9 +302,11 @@ field has the same written visibility. Hawk preserves the written visibility
 when one member requires it. Otherwise, every member receives the least
 aggressive reduction required by the group: for example, `pub(crate)` fields
 that individually admit `pub(super)` and private visibility are all reduced to
-`pub(super)`. If every field can be private, Hawk reports that reduction for the
-full group. Dead-public findings remain independent, and overrides, exclusions,
-and lint levels do not establish a visibility requirement.
+`pub(super)` when `hawk::unnecessary_crate_visibility` is enabled. Because that
+lint is allow-by-default, the group remains `pub(crate)` when it is not enabled.
+If every field can be private, Hawk reports that reduction for the full group.
+Dead-public findings remain independent, and overrides, exclusions, and lint
+levels do not establish a visibility requirement.
 
 Enum variants are a special case. Hawk can report an unreachable public
 variant as dead surface requiring removal together with any remaining

@@ -127,10 +127,13 @@ An optional workspace-root `hawk.toml` configures production targets,
 diagnostic policy, overrides, and broad diagnostic exclusions. The opt-in
 `preserve-uniform-field-visibility` policy reduces a complete, uniformly
 visible field group together to the broadest visibility required by any
-member. A `[[production]]` entry names a package and either a binary or library
-target in the selected workspace, optionally scoped to a Cargo-style target
-name or `cfg(...)` platform expression, and its compiled references participate
-in production reachability and required-public analysis. An `[[override]]`
+member, subject to the selected lint levels. In particular, a group-wide
+`pub(super)` reduction is reported only when the allow-by-default
+`hawk::unnecessary_crate_visibility` lint is enabled. A `[[production]]` entry
+names a package and either a binary or library target in the selected workspace,
+optionally scoped to a Cargo-style target name or `cfg(...)` platform
+expression, and its compiled references participate in production reachability
+and required-public analysis. An `[[override]]`
 entry identifies an exact lint, crate, and item path under the same optional
 target scoping, with an optional item kind to
 disambiguate declarations in separate Rust namespaces. `allow` suppresses a
