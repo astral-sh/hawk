@@ -3267,6 +3267,31 @@ fn codegen_roots_preserve_reachable_items() {
 }
 
 #[test]
+fn doctest_consumers_preserve_apis_from_multiple_packages() {
+    let context = HawkTestContext::new("doctest_consumers");
+    fs::write(
+        context.workspace().join("skipped/src/lib.rs"),
+        "pub fn other_doc_api() {}\n\n/// ```\n/// skipped::other_doc_api();\n/// ```\npub fn documented() {}\n",
+    )
+    .expect("replace unselected doctest with a valid consumer");
+    let config_path = context.workspace().join("hawk.toml");
+    let mut config = fs::read_to_string(&config_path).expect("read fixture configuration");
+    config.push_str("\n[[doctest]]\npackage = \"skipped\"\n");
+    fs::write(config_path, config).expect("select both doctest packages");
+
+    let output = context.run(&[]);
+
+    context.assert_success(&output);
+    let stdout = context.normalized_stdout(&output);
+    for api in ["doc_api", "other_doc_api"] {
+        assert!(
+            !stdout.contains(&format!("`{api}` is public")),
+            "API required by a selected doctest was diagnosed:\n{stdout}"
+        );
+    }
+}
+
+#[test]
 fn doctest_consumers_preserve_required_public_visibility_during_fixes() {
     let context = HawkTestContext::new("doctest_consumers");
     let output = context.run(&["--fix", "--allow-no-vcs"]);

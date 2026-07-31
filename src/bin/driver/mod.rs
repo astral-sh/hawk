@@ -433,6 +433,7 @@ fn emit_fragment(
         tcx.sess.opts.test,
     );
     let suffix = crate_id.to_string();
+    let path = output_dir.join(format!("{package_name}-{crate_name}-{suffix}.json"));
     let fragment = collect_fragment(
         tcx,
         package_name,
@@ -444,7 +445,6 @@ fn emit_fragment(
         classification.non_production_consumer,
         collection_options,
     );
-    let path = output_dir.join(format!("{crate_name}-{suffix}.json"));
     let mut file = tempfile::NamedTempFile::new_in(output_dir)
         .with_context(|| format!("create temporary fragment in {}", output_dir.display()))?;
     let temporary_path = file.path().to_path_buf();
