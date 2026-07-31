@@ -3283,7 +3283,12 @@ fn doctest_consumers_preserve_apis_from_multiple_packages() {
 
     context.assert_success(&output);
     let stdout = context.normalized_stdout(&output);
-    for api in ["doc_api", "other_doc_api"] {
+    for api in [
+        "doc_api",
+        "standalone_first_api",
+        "standalone_second_api",
+        "other_doc_api",
+    ] {
         assert!(
             !stdout.contains(&format!("`{api}` is public")),
             "API required by a selected doctest was diagnosed:\n{stdout}"
@@ -3325,6 +3330,8 @@ fn doctest_consumers_preserve_required_public_visibility_during_fixes() {
     let library = fs::read_to_string(context.workspace().join("library/src/lib.rs"))
         .expect("read fixed source");
     assert!(library.contains("pub fn doc_api() {}"));
+    assert!(library.contains("pub fn standalone_first_api() {}"));
+    assert!(library.contains("pub fn standalone_second_api() {}"));
     assert!(library.contains("pub fn unused() {}"));
 }
 

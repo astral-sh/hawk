@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::env;
 use std::ffi::OsStr;
 use std::fs::File;
+use std::hash::Hasher;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -11,6 +12,7 @@ use anyhow::{Context, Result, bail};
 use rustc_ast as ast;
 use rustc_driver::{Callbacks, Compilation};
 use rustc_errors::Applicability;
+use rustc_hash::FxHasher;
 use rustc_hir as hir;
 use rustc_hir::Node;
 use rustc_hir::attrs::AttributeKind;
@@ -433,7 +435,7 @@ fn emit_fragment(
         tcx.sess.opts.test,
     );
     let suffix = crate_id.to_string();
-    let path = output_dir.join(format!("{package_name}-{crate_name}-{suffix}.json"));
+    let path_prefix = format!("{package_name}-{crate_name}-{suffix}");
     let fragment = collect_fragment(
         tcx,
         package_name,
@@ -448,7 +450,8 @@ fn emit_fragment(
     let mut file = tempfile::NamedTempFile::new_in(output_dir)
         .with_context(|| format!("create temporary fragment in {}", output_dir.display()))?;
     let temporary_path = file.path().to_path_buf();
-    write_fragment(file.as_file_mut(), &fragment, &temporary_path)?;
+    let fingerprint = write_fragment(file.as_file_mut(), &fragment, &temporary_path)?;
+    let path = output_dir.join(format!("{path_prefix}-{fingerprint:016x}.json"));
     file.persist(&path)
         .map_err(|error| error.error)
         .with_context(|| format!("persist fragment {}", path.display()))?;
@@ -485,13 +488,44 @@ fn classify_fragment(
     }
 }
 
-fn write_fragment(writer: impl Write, fragment: &Fragment, path: &Path) -> Result<()> {
-    let mut writer = BufWriter::new(writer);
+struct FingerprintingWriter<W> {
+    inner: W,
+    hasher: FxHasher,
+}
+
+impl<W> FingerprintingWriter<W> {
+    fn new(inner: W) -> Self {
+        Self {
+            inner,
+            hasher: FxHasher::default(),
+        }
+    }
+
+    fn fingerprint(&self) -> u64 {
+        self.hasher.finish()
+    }
+}
+
+impl<W: Write> Write for FingerprintingWriter<W> {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        let written = self.inner.write(buffer)?;
+        self.hasher.write(&buffer[..written]);
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+fn write_fragment(writer: impl Write, fragment: &Fragment, path: &Path) -> Result<u64> {
+    let mut writer = BufWriter::new(FingerprintingWriter::new(writer));
     serde_json::to_writer(&mut writer, fragment)
         .with_context(|| format!("serialize {}", path.display()))?;
     writer
         .flush()
-        .with_context(|| format!("flush {}", path.display()))
+        .with_context(|| format!("flush {}", path.display()))?;
+    Ok(writer.get_ref().fingerprint())
 }
 
 fn collect_fragment(
