@@ -2,6 +2,16 @@
 
 <!-- prettier-ignore-start -->
 
+## 0.1.11
+
+Released on 2026-07-31.
+
+### Other changes
+
+- Preserve doctest reachability across compiler invocations ([#152](https://github.com/astral-sh/hawk/pull/152))
+- Reduce uniform field visibility together ([#153](https://github.com/astral-sh/hawk/pull/153))
+- Stabilize source identities across compiler working directories ([#141](https://github.com/astral-sh/hawk/pull/141))
+
 ## 0.1.10
 
 Released on 2026-07-25.
