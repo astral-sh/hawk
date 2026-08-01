@@ -3368,6 +3368,7 @@ fn rustdoc_links_preserve_public_visibility() {
         "PRIVATE_BINARY_DOC_LINKED_CONSTANT",
         "PROC_MACRO_CFG_DOC_LINKED_CONSTANT",
         "FOREIGN_INLINE_LINKED_CONSTANT",
+        "BINARY_DOCUMENTED_CONSTANT",
         "DocumentedEnum",
     ] {
         assert!(
@@ -3379,6 +3380,7 @@ fn rustdoc_links_preserve_public_visibility() {
         "UNLINKED_CONSTANT",
         "PRIVATE_LINKED_CONSTANT",
         "SHADOWED_EXTERNAL_LINK",
+        "UNRENDERED_DOC_LINKED_CONSTANT",
         "DocumentedType::unlinked_method",
         "DocumentedType::unlinked_field",
         "AliasTarget::alias_unlinked_method",
@@ -3427,12 +3429,17 @@ fn rustdoc_links_preserve_public_visibility() {
         "DirectDocumentedReexport",
         "ConservativeDocumentedReexport",
         "AssociatedDocumentedReexport",
+        "ConservativeForeignDocumentedReexport",
+        "CrossCrateDocumentedReexport",
     ] {
         assert!(
             !stdout.contains(&format!("public re-export `{reexport}`")),
             "re-export named by documentation was diagnosed:\n{stdout}"
         );
     }
+
+    let fixed = context.run(&["--fix", "--allow-no-vcs"]);
+    context.assert_success(&fixed);
 
     let rustdoc = context
         .cargo()

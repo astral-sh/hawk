@@ -8,5 +8,11 @@ use proc_macro::TokenStream;
 )]
 #[proc_macro]
 pub fn passthrough(input: TokenStream) -> TokenStream {
-    input
+    if cfg!(doc) {
+        "compile_error!(\"a cfg(doc) proc macro must not execute downstream\");"
+            .parse()
+            .expect("static expansion")
+    } else {
+        input
+    }
 }

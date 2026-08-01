@@ -954,6 +954,7 @@ mod tests {
             roots: vec![],
             conservative_roots: vec![],
             required_public_roots: vec![],
+            documentation_roots: vec![],
             conservative_documentation_roots: vec![],
             conservative_documentation_crates: vec![],
         }

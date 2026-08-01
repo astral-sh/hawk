@@ -7,3 +7,4 @@ edition = "2024"
 facade = { path = "../facade" }
 library = { path = "../library" }
 macro-package = { path = "../macro-package" }
+undocumented-library = { path = "../undocumented-library" }

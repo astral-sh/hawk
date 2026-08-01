@@ -9,6 +9,7 @@ dependencies = [
  "facade",
  "library",
  "macro-package",
+ "undocumented-library",
 ]
 
 [[package]]
@@ -28,3 +29,7 @@ version = "0.1.0"
 dependencies = [
  "library",
 ]
+
+[[package]]
+name = "undocumented-library"
+version = "0.1.0"

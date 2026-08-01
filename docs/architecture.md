@@ -143,6 +143,7 @@ An analysis run proceeds as follows:
  cargo check --package <package> --lib             (once per library and feature profile)
  cargo check --workspace --all-targets              (once per feature profile)
  cargo check --workspace --lib --bins                (once per feature profile; rustc --cfg doc)
+ cargo check --package <package> --lib                (once per documented proc macro; rustc --cfg doc)
  cargo test --workspace|--package <package> --doc   (once per feature profile)
      |
      | RUSTC_WORKSPACE_WRAPPER=cargo-hawk-driver
@@ -166,6 +167,11 @@ documentation fragments onto matching ordinary declarations, then combines
 only the production and non-production fragments for graph analysis.
 Environment variables identify the fragment output directory, selected
 production-target root, analysis mode, and run ID.
+Only Cargo's default documentation targets contribute roots: its
+documentation-enabled library and binaries, except for a binary with the same
+name as the library. Proc-macro documentation is collected separately so
+downstream crates execute the ordinary host artifact rather than one compiled
+with `cfg(doc)`.
 For doctests, Hawk additionally uses rustdoc's test-builder wrapper to route
 the generated test crates through the compiler wrapper without executing
 them. The run ID is tracked as compiler dependency input so Cargo does not

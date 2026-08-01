@@ -91,7 +91,7 @@ pub(crate) fn run_wrapper(mut args: Vec<String>) -> ExitCode {
                 return ExitCode::FAILURE;
             }
         };
-    let documentation =
+    let documentation_request =
         match parse_documentation(env::var_os(protocol::DOCUMENTATION_ENV).as_deref()) {
             Ok(documentation) => documentation,
             Err(error) => {
@@ -110,7 +110,12 @@ pub(crate) fn run_wrapper(mut args: Vec<String>) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let documentation = DocumentationOptions::from_args(documentation, &args);
+    let package_name = env::var("CARGO_PKG_NAME").ok();
+    let documentation = DocumentationOptions::from_args(
+        documentation_request.as_ref(),
+        package_name.as_deref(),
+        &args,
+    );
     if documentation.enabled {
         args.push("--cfg".to_owned());
         args.push("doc".to_owned());
@@ -289,15 +294,46 @@ fn parse_collection_options(value: Option<&OsStr>) -> Result<CollectionOptions> 
     })
 }
 
-fn parse_documentation(value: Option<&OsStr>) -> Result<bool> {
+#[derive(Debug, Eq, PartialEq)]
+enum DocumentationRequest {
+    Targets,
+    ProcMacro {
+        package_name: String,
+        crate_name: String,
+    },
+}
+
+fn parse_documentation(value: Option<&OsStr>) -> Result<Option<DocumentationRequest>> {
     match value {
-        None => Ok(false),
-        Some(value) if value == "1" => Ok(true),
-        Some(value) => bail!(
-            "unsupported {} value `{}`",
-            protocol::DOCUMENTATION_ENV,
-            value.to_string_lossy()
-        ),
+        None => Ok(None),
+        Some(value) if value == "targets" => Ok(Some(DocumentationRequest::Targets)),
+        Some(value) => {
+            let Some(value) = value.to_str() else {
+                bail!("{} must be valid UTF-8", protocol::DOCUMENTATION_ENV);
+            };
+            let Some(value) = value.strip_prefix("proc-macro:") else {
+                bail!(
+                    "unsupported {} value `{value}`",
+                    protocol::DOCUMENTATION_ENV
+                );
+            };
+            let Some((package_name, crate_name)) = value.split_once(':') else {
+                bail!(
+                    "unsupported {} value `proc-macro:{value}`",
+                    protocol::DOCUMENTATION_ENV
+                );
+            };
+            if package_name.is_empty() || crate_name.is_empty() || crate_name.contains(':') {
+                bail!(
+                    "unsupported {} value `proc-macro:{value}`",
+                    protocol::DOCUMENTATION_ENV
+                );
+            }
+            Ok(Some(DocumentationRequest::ProcMacro {
+                package_name: package_name.to_owned(),
+                crate_name: crate_name.to_owned(),
+            }))
+        }
     }
 }
 
@@ -313,17 +349,47 @@ struct DocumentationOptions {
 }
 
 impl DocumentationOptions {
-    fn from_args(requested: bool, args: &[String]) -> Self {
+    fn from_args(
+        requested: Option<&DocumentationRequest>,
+        package_name: Option<&str>,
+        args: &[String],
+    ) -> Self {
         // Cargo runs build scripts and build dependencies for the host without
-        // `--target`, while workspace proc macros are also host-compiled but
-        // are rendered by Rustdoc and therefore receive `cfg(doc)`.
-        let enabled =
-            requested && (is_target_compilation(args) || has_crate_type(args, "proc-macro"));
+        // `--target`. Proc macros need a separate documentation invocation so
+        // downstream crates never execute an artifact compiled with `cfg(doc)`.
+        let enabled = match requested {
+            Some(DocumentationRequest::Targets) => {
+                is_target_compilation(args) && !has_crate_type(args, "proc-macro")
+            }
+            Some(DocumentationRequest::ProcMacro {
+                package_name: requested_package,
+                crate_name: requested_crate,
+            }) => {
+                has_crate_type(args, "proc-macro")
+                    && package_name == Some(requested_package.as_str())
+                    && argument_value(args, "--crate-name") == Some(requested_crate.as_str())
+            }
+            None => false,
+        };
         Self {
             enabled,
             document_private_items: enabled && has_crate_type(args, "bin"),
         }
     }
+}
+
+fn argument_value<'args>(args: &'args [String], expected: &str) -> Option<&'args str> {
+    args.iter().enumerate().find_map(|(index, argument)| {
+        argument
+            .strip_prefix(expected)
+            .and_then(|value| value.strip_prefix('='))
+            .or_else(|| {
+                (argument == expected)
+                    .then(|| args.get(index + 1))
+                    .flatten()
+                    .map(String::as_str)
+            })
+    })
 }
 
 fn has_crate_type(args: &[String], expected: &str) -> bool {
@@ -958,20 +1024,6 @@ fn collect_fragment(
         doc_link_visibility_roots(tcx, &public_reexports, document_private_items);
     let conservative_documentation_crates =
         explicitly_inlined_foreign_crates(tcx, &public_reexports);
-    let documentation_root_ids: HashSet<_> = documentation_roots.required.iter().copied().collect();
-    // A resolved link names a public re-export path even though rustc records
-    // the target declaration. Keep the alias when that target is linked.
-    required_public_roots.extend(
-        edges
-            .iter()
-            .filter(|edge| {
-                edge.kind == EdgeKind::Reexport
-                    && public_reexport_sources.contains(&edge.from)
-                    && documentation_root_ids.contains(&edge.to)
-            })
-            .map(|edge| edge.from),
-    );
-    required_public_roots.extend(documentation_roots.required);
     if is_proc_macro_crate {
         // Public exports from a proc-macro crate can only be macro entry points.
         required_public_roots.extend(
@@ -1046,6 +1098,7 @@ fn collect_fragment(
         roots,
         conservative_roots,
         required_public_roots,
+        documentation_roots: documentation_roots.required,
         conservative_documentation_roots: documentation_roots.conservative,
         conservative_documentation_crates,
     }
@@ -2380,11 +2433,11 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        DocumentationOptions, FragmentClassification, SourcePathNormalizer, classify_fragment,
-        compact_visibility_modifier, parse_collection_options, parse_consumer_mode,
-        parse_documentation, parse_run_id, parse_workspace_root, source_item_at_or_after,
-        type_alias_interface_targets, uniform_field_group, validate_frontend_protocol_version,
-        write_fragment,
+        DocumentationOptions, DocumentationRequest, FragmentClassification, SourcePathNormalizer,
+        classify_fragment, compact_visibility_modifier, parse_collection_options,
+        parse_consumer_mode, parse_documentation, parse_run_id, parse_workspace_root,
+        source_item_at_or_after, type_alias_interface_targets, uniform_field_group,
+        validate_frontend_protocol_version, write_fragment,
     };
     use cargo_hawk_internal::graph::{CollectionOptions, Edge, EdgeKind, Fragment};
     use rustc_session::config::CrateType;
@@ -2430,6 +2483,7 @@ mod tests {
             roots: vec![],
             conservative_roots: vec![],
             required_public_roots: vec![],
+            documentation_roots: vec![],
             conservative_documentation_roots: vec![],
             conservative_documentation_crates: vec![],
         };
@@ -2555,8 +2609,22 @@ mod tests {
 
     #[test]
     fn frontend_protocol_fields_are_validated() {
-        assert!(!parse_documentation(None).expect("default documentation mode"));
-        assert!(parse_documentation(Some(OsStr::new("1"))).expect("documentation mode"));
+        assert_eq!(
+            parse_documentation(None).expect("default documentation mode"),
+            None
+        );
+        assert_eq!(
+            parse_documentation(Some(OsStr::new("targets"))).expect("target documentation mode"),
+            Some(DocumentationRequest::Targets)
+        );
+        assert_eq!(
+            parse_documentation(Some(OsStr::new("proc-macro:macro-package:macro_package")))
+                .expect("proc-macro documentation mode"),
+            Some(DocumentationRequest::ProcMacro {
+                package_name: "macro-package".into(),
+                crate_name: "macro_package".into(),
+            })
+        );
         assert_eq!(
             parse_documentation(Some(OsStr::new("true")))
                 .expect_err("invalid documentation mode should fail")
@@ -2605,9 +2673,15 @@ mod tests {
 
     #[test]
     fn documentation_options_match_rustdoc_compilations() {
+        let targets = DocumentationRequest::Targets;
+        let proc_macro = DocumentationRequest::ProcMacro {
+            package_name: "macro-package".into(),
+            crate_name: "macro_package".into(),
+        };
         assert_eq!(
             DocumentationOptions::from_args(
-                true,
+                Some(&targets),
+                Some("library"),
                 &[
                     "cargo-hawk-driver".into(),
                     "--target".into(),
@@ -2623,7 +2697,8 @@ mod tests {
         );
         assert_eq!(
             DocumentationOptions::from_args(
-                true,
+                Some(&targets),
+                Some("app"),
                 &[
                     "cargo-hawk-driver".into(),
                     "--target=aarch64-apple-darwin".into(),
@@ -2637,8 +2712,26 @@ mod tests {
         );
         assert_eq!(
             DocumentationOptions::from_args(
-                true,
-                &["cargo-hawk-driver".into(), "--crate-type=proc-macro".into(),],
+                Some(&targets),
+                Some("macro-package"),
+                &[
+                    "cargo-hawk-driver".into(),
+                    "--crate-name=macro_package".into(),
+                    "--crate-type=proc-macro".into(),
+                ],
+            ),
+            DocumentationOptions::default()
+        );
+        assert_eq!(
+            DocumentationOptions::from_args(
+                Some(&proc_macro),
+                Some("macro-package"),
+                &[
+                    "cargo-hawk-driver".into(),
+                    "--crate-name".into(),
+                    "macro_package".into(),
+                    "--crate-type=proc-macro".into(),
+                ],
             ),
             DocumentationOptions {
                 enabled: true,
@@ -2647,7 +2740,8 @@ mod tests {
         );
         assert_eq!(
             DocumentationOptions::from_args(
-                true,
+                Some(&targets),
+                Some("build-script"),
                 &[
                     "cargo-hawk-driver".into(),
                     "--crate-name".into(),
@@ -2660,7 +2754,8 @@ mod tests {
         );
         assert_eq!(
             DocumentationOptions::from_args(
-                false,
+                None,
+                Some("app"),
                 &[
                     "cargo-hawk-driver".into(),
                     "--target".into(),

@@ -62,9 +62,11 @@ pub const PROC_MACRO_CFG_DOC_LINKED_CONSTANT: usize = 25;
 
 pub const FOREIGN_INLINE_LINKED_CONSTANT: usize = 26;
 
-pub const SHADOWED_EXTERNAL_LINK: usize = 27;
+pub const BINARY_DOCUMENTED_CONSTANT: usize = 27;
 
-pub const PRIVATE_MODULE_NO_INLINE_LINKED_CONSTANT: usize = 28;
+pub const SHADOWED_EXTERNAL_LINK: usize = 28;
+
+pub const PRIVATE_MODULE_NO_INLINE_LINKED_CONSTANT: usize = 29;
 
 pub fn foreign_inline_linked_constant() -> usize {
     FOREIGN_INLINE_LINKED_CONSTANT
@@ -91,13 +93,18 @@ pub fn proc_macro_cfg_doc_linked_constant() -> usize {
 }
 
 #[doc(hidden)]
-/// Links to [`crate::FOREIGN_INLINE_LINKED_CONSTANT`].
+/// Links to [`crate::FOREIGN_INLINE_LINKED_CONSTANT`] and
+/// [`crate::ConservativeForeignDocumentedReexport`].
 pub struct ForeignInlinedDocumented;
 
 mod documented_reexport_source {
     pub struct DirectTarget;
 
     pub struct AssociatedTarget;
+
+    pub struct CrossCrateTarget;
+
+    pub struct ConservativeForeignTarget;
 
     impl AssociatedTarget {
         pub fn linked_method() {}
@@ -107,10 +114,14 @@ mod documented_reexport_source {
 pub use documented_reexport_source::DirectTarget as DirectDocumentedReexport;
 pub use documented_reexport_source::DirectTarget as ConservativeDocumentedReexport;
 pub use documented_reexport_source::AssociatedTarget as AssociatedDocumentedReexport;
+pub use documented_reexport_source::ConservativeForeignTarget as ConservativeForeignDocumentedReexport;
+pub use documented_reexport_source::CrossCrateTarget as CrossCrateDocumentedReexport;
 
 pub fn use_documented_reexports() {
     let _ = DirectDocumentedReexport;
     AssociatedDocumentedReexport::linked_method();
+    let _ = ConservativeForeignDocumentedReexport;
+    let _ = CrossCrateDocumentedReexport;
 }
 
 /// Links to [`DirectDocumentedReexport`] and

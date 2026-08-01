@@ -24,6 +24,8 @@ fn main() {
         library::proc_macro_cfg_doc_linked_constant(),
     );
     let _ = facade::ForeignInlinedDocumented;
+    facade::cross_crate_reexport_documented();
     facade::docs::shadowed_documentation();
     library::use_documented_reexports();
+    let _ = undocumented_library::unrendered_doc_linked_constant();
 }
