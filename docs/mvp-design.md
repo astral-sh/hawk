@@ -147,7 +147,9 @@ ambiguous-item diagnostic and suppress nothing. Overrides do not change
 reachability or required-public analysis, and suppressed findings are not
 eligible for fixes. A `[[exclude]]` entry names a crate and either a module
 subtree or source file, suppressing all findings in that scope without changing
-the analysis; it is intended for source areas such as generated code.
+the analysis; it is intended for source areas such as generated code. An
+exclusion can use `expect` to diagnose the scope when it no longer suppresses a
+finding.
 
 ## Implementation direction
 

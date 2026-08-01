@@ -16,7 +16,8 @@ use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser, Subcommand, Value
 use tempfile::NamedTempFile;
 
 use crate::config::{
-    AnalysisTarget, Config, ConfigDiagnosticKind, FeatureProfile, ProductionProduct,
+    AnalysisTarget, Config, ConfigDiagnostic, ConfigDiagnosticKind, FeatureProfile,
+    ProductionProduct,
 };
 use crate::diagnostics::{DiagnosticRenderer, EMPHASIS, ERROR, WARNING, styled};
 use crate::protocol;
@@ -760,12 +761,12 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
         }
     }
     for diagnostic in &findings.config_diagnostics {
-        let level = lint_levels.level(diagnostic.kind);
+        let level = lint_levels.level(diagnostic.kind());
         if level.is_emitted() {
             diagnostic_count += 1;
             if args.output_format == OutputFormat::Text {
                 *diagnostic_counts
-                    .entry(diagnostic.kind.code())
+                    .entry(diagnostic.kind().code())
                     .or_default()
                     .entry("configuration")
                     .or_default() += 1;
@@ -939,25 +940,43 @@ fn json_config_diagnostic(
     workspace_root: &Path,
     level: LintLevel,
 ) -> serde_json::Value {
-    let entry = diagnostic.entry;
     let path = config.path().expect("diagnostic requires a loaded config");
     let path = path.strip_prefix(workspace_root).unwrap_or(path);
+    let (lint, identity) = match *diagnostic {
+        ConfigDiagnostic::UnknownItem(entry)
+        | ConfigDiagnostic::AmbiguousItem(entry)
+        | ConfigDiagnostic::UnfulfilledOverride(entry) => (
+            Some(entry.lint.code()),
+            serde_json::json!({
+                "crate": entry.crate_name,
+                "item": entry.item,
+                "kind": entry.definition_kind.map(json_definition_kind),
+            }),
+        ),
+        ConfigDiagnostic::UnfulfilledExclusion(entry) => {
+            let (selector, value) = entry.selector();
+            (
+                None,
+                serde_json::json!({
+                    "crate": entry.crate_name(),
+                    "selector": selector,
+                    "value": value,
+                }),
+            )
+        }
+    };
     serde_json::json!({
         "category": "configuration",
-        "code": diagnostic.kind.code(),
+        "code": diagnostic.kind().code(),
         "severity": level.severity(),
-        "lint": entry.lint.code(),
-        "identity": {
-            "crate": entry.crate_name,
-            "item": entry.item,
-            "kind": entry.definition_kind.map(json_definition_kind),
-        },
+        "lint": lint,
+        "identity": identity,
         "location": {
             "file": path,
-            "line": entry.span.line,
-            "column": entry.span.column,
+            "line": diagnostic.span().line,
+            "column": diagnostic.span().column,
         },
-        "reason": entry.reason,
+        "reason": diagnostic.reason(),
     })
 }
 

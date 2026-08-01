@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use anstyle::{AnsiColor, Style};
 
 use crate::cli::LintLevel;
-use crate::config::{Config, ConfigDiagnostic, ConfigDiagnosticKind};
+use crate::config::{Config, ConfigDiagnostic};
 use cargo_hawk_internal::graph::{DefinitionKind, Finding, FindingKind, Span};
 
 pub(crate) const WARNING: Style = AnsiColor::Yellow.on_default().bold();
@@ -340,47 +340,63 @@ fn write_config_diagnostic(
     workspace_root: &Path,
     level: LintLevel,
 ) -> std::fmt::Result {
-    let entry = diagnostic.entry;
-    let item = format!("{}::{}", entry.crate_name, entry.item);
-    let (message, marker, help) = match diagnostic.kind {
-        ConfigDiagnosticKind::UnknownItem => (
+    let (message, marker, help) = match *diagnostic {
+        ConfigDiagnostic::UnknownItem(entry) => {
+            let item = format!("{}::{}", entry.crate_name, entry.item);
+            (
+                format!(
+                    "override for `{}` references unknown item `{item}`",
+                    entry.lint.code()
+                ),
+                "no matching item was found",
+                "remove this override or update its `crate` and `item` selectors",
+            )
+        }
+        ConfigDiagnostic::AmbiguousItem(entry) => {
+            let item = format!("{}::{}", entry.crate_name, entry.item);
+            (
+                format!(
+                    "override for `{}` matches multiple items named `{item}`",
+                    entry.lint.code()
+                ),
+                "selector matches multiple items",
+                "add a `kind` selector or otherwise disambiguate this override",
+            )
+        }
+        ConfigDiagnostic::UnfulfilledOverride(entry) => {
+            let item = format!("{}::{}", entry.crate_name, entry.item);
+            (
+                format!(
+                    "expected `{}` for `{item}`, but no finding was produced",
+                    entry.lint.code()
+                ),
+                "unfulfilled expectation",
+                "remove this expectation or update its `lint` selector",
+            )
+        }
+        ConfigDiagnostic::UnfulfilledExclusion(entry) => (
             format!(
-                "override for `{}` references unknown item `{item}`",
-                entry.lint.code()
-            ),
-            "no matching item was found",
-            "remove this override or update its `crate` and `item` selectors",
-        ),
-        ConfigDiagnosticKind::AmbiguousItem => (
-            format!(
-                "override for `{}` matches multiple items named `{item}`",
-                entry.lint.code()
-            ),
-            "selector matches multiple items",
-            "add a `kind` selector or otherwise disambiguate this override",
-        ),
-        ConfigDiagnosticKind::UnfulfilledExpectation => (
-            format!(
-                "expected `{}` for `{item}`, but no finding was produced",
-                entry.lint.code()
+                "expected exclusion for {}, but no finding was produced",
+                entry.diagnostic_subject()
             ),
             "unfulfilled expectation",
-            "remove this expectation or update its `lint` selector",
+            entry.expectation_help(),
         ),
     };
-    write_diagnostic_header(output, diagnostic.kind.code(), message, level)?;
+    write_diagnostic_header(output, diagnostic.kind().code(), message, level)?;
 
     let config_path = config.path().expect("diagnostic requires a loaded config");
     let display_path = config_path
         .strip_prefix(workspace_root)
         .unwrap_or(config_path)
         .display();
+    let span = diagnostic.span();
     write_annotated_location(
         output,
         display_path,
-        entry.span.line,
-        entry.span.column,
-        config.source_line(entry.span.line),
+        span.line,
+        span.column,
+        config.source_line(span.line),
         marker,
         level.style(),
     )?;
@@ -389,7 +405,7 @@ fn write_config_diagnostic(
         "  {} {}: reason: {}",
         styled("=", SEPARATOR),
         styled("note", HELP),
-        entry.reason
+        diagnostic.reason()
     )?;
     writeln!(
         output,

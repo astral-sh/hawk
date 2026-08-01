@@ -2300,6 +2300,57 @@ fn ordered_lint_levels_control_severity_and_exit_status() {
 }
 
 #[test]
+fn expected_exclusions_report_when_the_scope_suppresses_nothing() {
+    let context = HawkTestContext::new("basic");
+    fs::write(
+        context.workspace().join("hawk.toml"),
+        r#"
+[[production]]
+package = "app"
+bin = "app"
+reason = "binary product under analysis"
+
+[[exclude]]
+crate = "library"
+module = "consumed_outer"
+level = "expect"
+reason = "detect a stale broad exclusion"
+"#,
+    )
+    .expect("write expected exclusion configuration");
+
+    let output = context.run(&["-A", "warnings", "-D", "hawk::unfulfilled_expectation"]);
+
+    assert!(!output.status.success());
+    let stdout = context.normalized_stdout(&output);
+    assert!(stdout.contains(
+        "error[hawk::unfulfilled_expectation]: expected exclusion for module `library::consumed_outer`, but no finding was produced"
+    ));
+    assert!(stdout.contains("reason: detect a stale broad exclusion"));
+
+    let output = context.run(&[
+        "--output-format=json",
+        "-A",
+        "warnings",
+        "-D",
+        "hawk::unfulfilled_expectation",
+    ]);
+    assert!(!output.status.success());
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout contains one JSON report");
+    let diagnostic = report["diagnostics"]
+        .as_array()
+        .expect("diagnostics is an array")
+        .iter()
+        .find(|diagnostic| diagnostic["code"] == "hawk::unfulfilled_expectation")
+        .expect("unfulfilled exclusion diagnostic");
+    assert!(diagnostic["lint"].is_null());
+    assert_eq!(diagnostic["identity"]["crate"], "library");
+    assert_eq!(diagnostic["identity"]["selector"], "module");
+    assert_eq!(diagnostic["identity"]["value"], "consumed_outer");
+}
+
+#[test]
 fn later_warnings_group_reenables_default_warnings() {
     let context = HawkTestContext::new("basic");
     let output = context.run(&["-A", "warnings", "-D", "warnings"]);

@@ -207,6 +207,7 @@ diagnostic surface, for example generated code:
 [[exclude]]
 crate = "library"
 module = "generated_bindings"
+level = "expect"
 reason = "generated from the protocol schema"
 
 [[exclude]]
@@ -221,11 +222,15 @@ descendants, such as `generated_bindings::Message`. A file selector matches
 the source path printed in diagnostics. Both forms suppress all Hawk findings
 in their selected scope.
 
+Exclusions default to `level = "allow"`. Set `level = "expect"` when the
+selected scope should currently contain at least one finding. Hawk then reports
+`hawk::unfulfilled_expectation` if the exclusion becomes stale because it no
+longer suppresses anything.
+
 Exclusions filter diagnostics and fixes only; they do not change reachability
 or preserve visibility. Prefer an exact `[[override]]` when an individual
 diagnostic is an intentional exception that should remain audited with
-`expect`. Exclusions are not expectations and do not diagnose a selected
-scope that currently produces no findings.
+`expect`.
 
 ## Target selectors
 

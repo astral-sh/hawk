@@ -381,10 +381,12 @@ producing a diagnostic if the finding disappears. Overrides can specify
 `kind` to distinguish declarations in separate Rust namespaces; ambiguous
 unqualified overrides suppress nothing. A reasoned `[[exclude]]` entry can
 instead suppress every finding under a module diagnostic path or in one
-source file, for example generated source. Overrides and exclusions filter
-output; they never add graph roots or preserve public visibility. This is
-intentionally different from defining a production target: a production target
-changes the analysis, while suppression records an accepted diagnostic scope.
+source file, for example generated source. Exclusions default to `allow` and
+can use `expect` to report when they no longer suppress a finding. Overrides
+and exclusions filter output; they never add graph roots or preserve public
+visibility. This is intentionally different from defining a production target:
+a production target changes the analysis, while suppression records an accepted
+diagnostic scope.
 
 ## Fixes
 

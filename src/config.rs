@@ -49,10 +49,13 @@ pub(crate) struct LintOverride {
 }
 
 #[derive(Clone, Debug)]
-struct DiagnosticExclusion {
+pub(crate) struct DiagnosticExclusion {
     crate_name: String,
     selector: ExclusionSelector,
+    level: OverrideLevel,
+    reason: String,
     target: Option<Platform>,
+    span: ConfigSpan,
 }
 
 #[derive(Clone, Debug)]
@@ -113,9 +116,10 @@ pub(crate) struct AnalysisTarget {
     cfgs: Vec<Cfg>,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum OverrideLevel {
+    #[default]
     Allow,
     Expect,
 }
@@ -153,9 +157,41 @@ impl ConfigDiagnosticKind {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct ConfigDiagnostic<'a> {
-    pub(crate) kind: ConfigDiagnosticKind,
-    pub(crate) entry: &'a LintOverride,
+pub(crate) enum ConfigDiagnostic<'a> {
+    UnknownItem(&'a LintOverride),
+    AmbiguousItem(&'a LintOverride),
+    UnfulfilledOverride(&'a LintOverride),
+    UnfulfilledExclusion(&'a DiagnosticExclusion),
+}
+
+impl<'a> ConfigDiagnostic<'a> {
+    pub(crate) const fn kind(self) -> ConfigDiagnosticKind {
+        match self {
+            Self::UnknownItem(_) => ConfigDiagnosticKind::UnknownItem,
+            Self::AmbiguousItem(_) => ConfigDiagnosticKind::AmbiguousItem,
+            Self::UnfulfilledOverride(_) | Self::UnfulfilledExclusion(_) => {
+                ConfigDiagnosticKind::UnfulfilledExpectation
+            }
+        }
+    }
+
+    pub(crate) const fn span(self) -> ConfigSpan {
+        match self {
+            Self::UnknownItem(entry)
+            | Self::AmbiguousItem(entry)
+            | Self::UnfulfilledOverride(entry) => entry.span,
+            Self::UnfulfilledExclusion(entry) => entry.span,
+        }
+    }
+
+    pub(crate) fn reason(self) -> &'a str {
+        match self {
+            Self::UnknownItem(entry)
+            | Self::AmbiguousItem(entry)
+            | Self::UnfulfilledOverride(entry) => &entry.reason,
+            Self::UnfulfilledExclusion(entry) => &entry.reason,
+        }
+    }
 }
 
 pub(crate) struct AppliedFindings<'findings, 'config> {
@@ -213,6 +249,8 @@ struct RawDiagnosticExclusion {
     crate_name: String,
     module: Option<String>,
     file: Option<String>,
+    #[serde(default)]
+    level: OverrideLevel,
     reason: String,
     target: Option<String>,
 }
@@ -490,7 +528,10 @@ impl Config {
             exclusions.push(DiagnosticExclusion {
                 crate_name: entry.crate_name,
                 selector,
+                level: entry.level,
+                reason: entry.reason,
                 target,
+                span,
             });
         }
         let mut production = Vec::new();
@@ -660,39 +701,40 @@ impl Config {
                 .filter(|item| entry.identifies(item))
                 .count();
             if matching_items == 0 {
-                config_diagnostics.push(ConfigDiagnostic {
-                    kind: ConfigDiagnosticKind::UnknownItem,
-                    entry,
-                });
+                config_diagnostics.push(ConfigDiagnostic::UnknownItem(entry));
                 continue;
             }
             if matching_items > 1 {
-                config_diagnostics.push(ConfigDiagnostic {
-                    kind: ConfigDiagnosticKind::AmbiguousItem,
-                    entry,
-                });
+                config_diagnostics.push(ConfigDiagnostic::AmbiguousItem(entry));
                 continue;
             }
             active_overrides.push(entry);
             if entry.level == OverrideLevel::Expect
                 && !findings.iter().any(|finding| entry.matches(finding))
             {
-                config_diagnostics.push(ConfigDiagnostic {
-                    kind: ConfigDiagnosticKind::UnfulfilledExpectation,
-                    entry,
-                });
+                config_diagnostics.push(ConfigDiagnostic::UnfulfilledOverride(entry));
             }
         }
-        let active_exclusions = self
+        let mut active_exclusions = Vec::new();
+        for entry in self
             .exclusions
             .iter()
             .filter(|entry| entry.applies_to(target))
-            .filter(|entry| {
-                known_items
+        {
+            if known_items
+                .iter()
+                .any(|item| entry.identifies(item, &self.workspace_root))
+            {
+                active_exclusions.push(entry);
+            }
+            if entry.level == OverrideLevel::Expect
+                && !findings
                     .iter()
-                    .any(|item| entry.identifies(item, &self.workspace_root))
-            })
-            .collect::<Vec<_>>();
+                    .any(|finding| entry.matches(finding, &self.workspace_root))
+            {
+                config_diagnostics.push(ConfigDiagnostic::UnfulfilledExclusion(entry));
+            }
+        }
         let findings = findings
             .into_iter()
             .filter(|finding| {
@@ -823,6 +865,35 @@ impl LintOverride {
 }
 
 impl DiagnosticExclusion {
+    pub(crate) fn crate_name(&self) -> &str {
+        &self.crate_name
+    }
+
+    pub(crate) fn selector(&self) -> (&'static str, &str) {
+        match &self.selector {
+            ExclusionSelector::Module(module) => ("module", module),
+            ExclusionSelector::File { configured, .. } => ("file", configured),
+        }
+    }
+
+    pub(crate) fn diagnostic_subject(&self) -> String {
+        match &self.selector {
+            ExclusionSelector::Module(module) => format!("module `{}::{module}`", self.crate_name),
+            ExclusionSelector::File { configured, .. } => format!("file `{configured}`"),
+        }
+    }
+
+    pub(crate) const fn expectation_help(&self) -> &'static str {
+        match self.selector {
+            ExclusionSelector::Module(_) => {
+                "remove this expectation or update its `module` selector"
+            }
+            ExclusionSelector::File { .. } => {
+                "remove this expectation or update its `file` selector"
+            }
+        }
+    }
+
     fn applies_to(&self, target: &AnalysisTarget) -> bool {
         self.target
             .as_ref()
@@ -1191,7 +1262,7 @@ reason = "detect misspelled crate selectors"
 
         assert_eq!(applied.config_diagnostics.len(), 1);
         assert_eq!(
-            applied.config_diagnostics[0].kind,
+            applied.config_diagnostics[0].kind(),
             ConfigDiagnosticKind::UnknownItem
         );
     }
@@ -1286,7 +1357,7 @@ reason = "detect stale selectors"
         assert_eq!(applied.findings[0].kind, FindingKind::DeadPublic);
         assert_eq!(applied.config_diagnostics.len(), 1);
         assert_eq!(
-            applied.config_diagnostics[0].kind,
+            applied.config_diagnostics[0].kind(),
             ConfigDiagnosticKind::UnknownItem
         );
     }
@@ -1322,7 +1393,7 @@ reason = "detect selectors outside the analyzed target"
 
         assert_eq!(applied.config_diagnostics.len(), 1);
         assert_eq!(
-            applied.config_diagnostics[0].kind,
+            applied.config_diagnostics[0].kind(),
             ConfigDiagnosticKind::UnknownItem
         );
     }
@@ -1358,7 +1429,7 @@ reason = "ambiguous Rust namespace"
         assert_eq!(applied.findings.len(), 2);
         assert_eq!(applied.config_diagnostics.len(), 1);
         assert_eq!(
-            applied.config_diagnostics[0].kind,
+            applied.config_diagnostics[0].kind(),
             ConfigDiagnosticKind::AmbiguousItem
         );
     }
@@ -1492,6 +1563,7 @@ reason = "only compiled on Windows"
 [[exclude]]
 crate = "library"
 module = "generated"
+level = "expect"
 reason = "generated public declarations"
 "#,
         )
@@ -1516,6 +1588,40 @@ reason = "generated public declarations"
             vec!["outside", "generatedish"]
         );
         assert!(applied.config_diagnostics.is_empty());
+    }
+
+    #[test]
+    fn expected_exclusion_reports_when_it_suppresses_no_findings() {
+        let directory = tempfile::tempdir().expect("temporary configuration directory");
+        let path = directory.path().join("hawk.toml");
+        std::fs::write(
+            &path,
+            r#"
+[[exclude]]
+crate = "library"
+module = "generated"
+level = "expect"
+reason = "generated public declarations"
+"#,
+        )
+        .expect("write configuration");
+        let config = Config::load(directory.path(), Some(&path)).expect("load configuration");
+        let fragments = vec![scoped_fragment()];
+
+        let applied = config.apply(
+            &target("aarch64-apple-darwin", &["unix"]),
+            &fragments,
+            &[],
+            &candidate_crates(),
+            Vec::new(),
+        );
+
+        assert!(applied.findings.is_empty());
+        assert_eq!(applied.config_diagnostics.len(), 1);
+        assert_eq!(
+            applied.config_diagnostics[0].kind(),
+            ConfigDiagnosticKind::UnfulfilledExpectation
+        );
     }
 
     #[test]
@@ -1617,6 +1723,7 @@ reason = "generated source file"
 [[exclude]]
 crate = "library"
 module = "generated"
+level = "expect"
 target = "cfg(windows)"
 reason = "generated only on Windows"
 "#,
@@ -1641,6 +1748,7 @@ reason = "generated only on Windows"
             ),
         );
         assert_eq!(windows.findings.len(), 2);
+        assert!(windows.config_diagnostics.is_empty());
 
         let unix = config.apply(
             &target("aarch64-apple-darwin", &["unix"]),
@@ -1650,6 +1758,7 @@ reason = "generated only on Windows"
             analyze(&fragments, &[], &candidate_crates(), &HashSet::new()),
         );
         assert_eq!(unix.findings.len(), 4);
+        assert!(unix.config_diagnostics.is_empty());
     }
 
     #[test]
