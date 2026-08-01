@@ -1662,6 +1662,7 @@ reason = "not actually a module"
 [[exclude]]
 crate = "library"
 file = "library/src/generated.rs"
+level = "expect"
 reason = "generated source file"
 "#,
         )
@@ -1686,6 +1687,40 @@ reason = "generated source file"
             vec!["outside", "generatedish"]
         );
         assert!(applied.config_diagnostics.is_empty());
+    }
+
+    #[test]
+    fn expected_file_exclusion_reports_when_it_suppresses_no_findings() {
+        let directory = tempfile::tempdir().expect("temporary configuration directory");
+        let path = directory.path().join("hawk.toml");
+        std::fs::write(
+            &path,
+            r#"
+[[exclude]]
+crate = "library"
+file = "library/src/generated.rs"
+level = "expect"
+reason = "generated source file"
+"#,
+        )
+        .expect("write configuration");
+        let config = Config::load(directory.path(), Some(&path)).expect("load configuration");
+        let fragments = vec![scoped_fragment()];
+
+        let applied = config.apply(
+            &target("aarch64-apple-darwin", &["unix"]),
+            &fragments,
+            &[],
+            &candidate_crates(),
+            Vec::new(),
+        );
+
+        assert!(applied.findings.is_empty());
+        assert_eq!(applied.config_diagnostics.len(), 1);
+        assert_eq!(
+            applied.config_diagnostics[0].kind(),
+            ConfigDiagnosticKind::UnfulfilledExpectation
+        );
     }
 
     #[test]
