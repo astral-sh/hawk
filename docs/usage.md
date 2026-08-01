@@ -113,7 +113,7 @@ stderr and do not produce a JSON report:
   --output-format=json > hawk-report.json
 ```
 
-The JSON report is versioned with `schema_version` (currently `4`); breaking
+The JSON report is versioned with `schema_version` (currently `5`); breaking
 schema changes increment this version. Its `summary` describes the compilation
 target, configured production binaries or libraries, feature profiles,
 non-production coverage, and emitted diagnostic count.

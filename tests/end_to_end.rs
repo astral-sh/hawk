@@ -1007,7 +1007,7 @@ fn library_production_targets_are_described_in_json_reports() {
     context.assert_success(&output);
     let report: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("stdout contains one JSON report");
-    assert_eq!(report["schema_version"], 4);
+    assert_eq!(report["schema_version"], 5);
     assert_eq!(
         report["summary"]["production"],
         serde_json::json!([{"package": "internal-api", "library": "internal_api"}])
@@ -2408,7 +2408,7 @@ fn emits_versioned_json_diagnostics_and_keeps_cargo_output_on_stderr() {
     );
     let report: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("stdout contains one JSON report");
-    assert_eq!(report["schema_version"], 4);
+    assert_eq!(report["schema_version"], 5);
     assert_eq!(report["summary"]["diagnostic_count"], 41);
     assert_eq!(
         report["summary"]["production"],
@@ -2544,7 +2544,7 @@ fn emits_an_empty_json_report_when_all_warnings_are_allowed() {
     context.assert_success(&output);
     let report: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("stdout contains one JSON report");
-    assert_eq!(report["schema_version"], 4);
+    assert_eq!(report["schema_version"], 5);
     assert_eq!(report["summary"]["diagnostic_count"], 0);
     assert_eq!(report["diagnostics"], serde_json::json!([]));
 }
@@ -2828,7 +2828,7 @@ fn json_byte_offsets_delete_unicode_declarations() {
     context.assert_success(&output);
     let report: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("stdout contains one JSON report");
-    assert_eq!(report["schema_version"], 4);
+    assert_eq!(report["schema_version"], 5);
     let diagnostic = report["diagnostics"]
         .as_array()
         .expect("diagnostics is an array")
@@ -2890,7 +2890,7 @@ fn json_still_emits_a_report_when_stderr_is_closed() {
     assert!(output.stderr.is_empty());
     let report: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("stdout contains one JSON report");
-    assert_eq!(report["schema_version"], 4);
+    assert_eq!(report["schema_version"], 5);
 }
 
 #[cfg(unix)]
@@ -3773,7 +3773,7 @@ fn reports_only_dead_public_findings_as_json() {
     context.assert_success(&output);
     let report: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("stdout contains one JSON report");
-    assert_eq!(report["schema_version"], 4);
+    assert_eq!(report["schema_version"], 5);
     assert_eq!(report["summary"]["diagnostic_count"], 17);
     let diagnostics = report["diagnostics"]
         .as_array()

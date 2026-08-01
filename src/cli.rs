@@ -807,7 +807,7 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
         }
         OutputFormat::Json => {
             let output = serde_json::json!({
-                "schema_version": 4,
+                "schema_version": 5,
                 "summary": {
                     "diagnostic_count": diagnostic_count,
                     "target": args.target.as_deref().unwrap_or(toolchain.host()),
