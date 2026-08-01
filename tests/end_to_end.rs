@@ -3353,7 +3353,10 @@ fn exported_rustdoc_links_preserve_public_visibility() {
     for linked in [
         "LINKED_CONSTANT",
         "DocumentedType::linked_method",
+        "DocumentedType::linked_field",
         "AliasTarget::alias_linked_method",
+        "INLINE_REEXPORT_LINKED_CONSTANT",
+        "GLOB_INLINE_REEXPORT_LINKED_CONSTANT",
     ] {
         assert!(
             !stdout.contains(&format!("`{linked}` is public")),
@@ -3365,7 +3368,9 @@ fn exported_rustdoc_links_preserve_public_visibility() {
         "PRIVATE_LINKED_CONSTANT",
         "HIDDEN_LINKED_CONSTANT",
         "DocumentedType::unlinked_method",
+        "DocumentedType::unlinked_field",
         "AliasTarget::alias_unlinked_method",
+        "NO_INLINE_REEXPORT_LINKED_CONSTANT",
     ] {
         assert!(
             stdout.contains(&format!("`{unlinked}` is public")),

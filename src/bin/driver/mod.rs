@@ -15,7 +15,7 @@ use rustc_errors::Applicability;
 use rustc_hash::FxHasher;
 use rustc_hir as hir;
 use rustc_hir::Node;
-use rustc_hir::attrs::AttributeKind;
+use rustc_hir::attrs::{AttributeKind, DocInline};
 use rustc_hir::def::{CtorOf, DefKind, Namespace, Res};
 use rustc_hir::def_id::{CRATE_DEF_ID, DefId, LocalDefId};
 use rustc_hir::intravisit::{self, Visitor};
@@ -869,11 +869,12 @@ fn collect_fragment(
     // the exported path itself can be attributed to consumers.
     required_public_roots.extend(
         public_reexports
-            .into_iter()
+            .iter()
+            .copied()
             .filter_map(|def_id| enclosing_module(tcx, def_id))
             .map(|def_id| id(tcx, def_id.to_def_id())),
     );
-    required_public_roots.extend(doc_link_visibility_roots(tcx));
+    required_public_roots.extend(doc_link_visibility_roots(tcx, &public_reexports));
     if is_proc_macro_crate {
         // Public exports from a proc-macro crate can only be macro entry points.
         required_public_roots.extend(
@@ -957,15 +958,20 @@ fn collect_fragment(
 /// tried while resolving documentation. Pair those resolutions with the links
 /// parsed from each exported item's documentation so only the rendered target
 /// becomes a visibility root.
-fn doc_link_visibility_roots(tcx: TyCtxt<'_>) -> Vec<DefinitionId> {
+fn doc_link_visibility_roots(
+    tcx: TyCtxt<'_>,
+    public_reexports: &[LocalDefId],
+) -> Vec<DefinitionId> {
     let mut roots = Vec::new();
     let effective_visibilities = tcx.effective_visibilities(());
+    let inlined_reexport_doc_sources = inlined_reexport_doc_sources(tcx, public_reexports);
     for def_id in tcx.iter_local_def_id() {
         if def_id != CRATE_DEF_ID && !effective_visibilities.is_exported(def_id) {
             continue;
         }
         if std::iter::successors(Some(def_id), |def_id| tcx.opt_local_parent(*def_id))
             .any(|def_id| tcx.is_doc_hidden(def_id))
+            && !inlined_reexport_doc_sources.contains(&def_id)
         {
             continue;
         }
@@ -1008,6 +1014,98 @@ fn doc_link_visibility_roots(tcx: TyCtxt<'_>) -> Vec<DefinitionId> {
         }
     }
     roots
+}
+
+fn inlined_reexport_doc_sources(
+    tcx: TyCtxt<'_>,
+    public_reexports: &[LocalDefId],
+) -> HashSet<LocalDefId> {
+    let mut sources = HashSet::new();
+    for def_id in public_reexports.iter().copied() {
+        if std::iter::successors(Some(def_id), |def_id| tcx.opt_local_parent(*def_id))
+            .any(|def_id| tcx.is_doc_hidden(def_id))
+        {
+            continue;
+        }
+        let attrs = tcx.hir_attrs(tcx.local_def_id_to_hir_id(def_id));
+        let inline = attrs.iter().find_map(|attribute| {
+            let hir::Attribute::Parsed(AttributeKind::Doc(documentation)) = attribute else {
+                return None;
+            };
+            documentation.inline.first().map(|(inline, _)| *inline)
+        });
+        if inline == Some(DocInline::NoInline) {
+            continue;
+        }
+        let Node::Item(hir::Item {
+            kind: hir::ItemKind::Use(path, _),
+            ..
+        }) = tcx.hir_node_by_def_id(def_id)
+        else {
+            continue;
+        };
+        for target in path
+            .res
+            .present_items()
+            .filter_map(|resolution| resolution.opt_def_id()?.as_local())
+        {
+            let explicitly_inlined = inline == Some(DocInline::Inline);
+            if explicitly_inlined || !tcx.is_doc_hidden(target) {
+                extend_inlined_doc_sources(tcx, target, explicitly_inlined, &mut sources);
+            }
+        }
+    }
+    sources
+}
+
+fn extend_inlined_doc_sources(
+    tcx: TyCtxt<'_>,
+    def_id: LocalDefId,
+    include_hidden: bool,
+    sources: &mut HashSet<LocalDefId>,
+) {
+    if !include_hidden && tcx.is_doc_hidden(def_id) || !sources.insert(def_id) {
+        return;
+    }
+    match tcx.def_kind(def_id) {
+        DefKind::Mod => {
+            let Node::Item(hir::Item {
+                kind: hir::ItemKind::Mod(_, module),
+                ..
+            }) = tcx.hir_node_by_def_id(def_id)
+            else {
+                return;
+            };
+            for item_id in module.item_ids {
+                extend_inlined_doc_sources(tcx, item_id.owner_id.def_id, false, sources);
+            }
+        }
+        DefKind::Struct | DefKind::Union | DefKind::Enum => {
+            for variant in tcx.adt_def(def_id).variants() {
+                if let Some(variant_id) = variant.def_id.as_local() {
+                    extend_inlined_doc_sources(tcx, variant_id, false, sources);
+                }
+                for field in &variant.fields {
+                    if let Some(field_id) = field.did.as_local() {
+                        extend_inlined_doc_sources(tcx, field_id, false, sources);
+                    }
+                }
+            }
+            for impl_id in tcx.inherent_impls(def_id.to_def_id()) {
+                if let Some(impl_id) = impl_id.as_local() {
+                    extend_inlined_doc_sources(tcx, impl_id, false, sources);
+                }
+            }
+        }
+        DefKind::Trait | DefKind::Impl { .. } => {
+            for item in tcx.associated_items(def_id).in_definition_order() {
+                if let Some(item_id) = item.def_id.as_local() {
+                    extend_inlined_doc_sources(tcx, item_id, false, sources);
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
 #[derive(Debug)]
@@ -1169,6 +1267,32 @@ fn resolve_associated_doc_link(
         root_kind = tcx.def_kind(root_id);
     }
 
+    let mut resolved = Vec::new();
+    if namespace == Namespace::ValueNS {
+        match root_kind {
+            DefKind::Struct | DefKind::Union => resolved.extend(
+                tcx.adt_def(root_id)
+                    .non_enum_variant()
+                    .fields
+                    .iter()
+                    .filter(|field| field.name == item_name)
+                    .map(|field| field.did),
+            ),
+            DefKind::Variant => {
+                let adt = tcx.adt_def(tcx.parent(root_id));
+                resolved.extend(
+                    adt.variants()
+                        .iter()
+                        .filter(|variant| variant.def_id == root_id)
+                        .flat_map(|variant| &variant.fields)
+                        .filter(|field| field.name == item_name)
+                        .map(|field| field.did),
+                );
+            }
+            _ => {}
+        }
+    }
+
     let associated_items = match root_kind {
         DefKind::Struct | DefKind::Union | DefKind::Enum | DefKind::ForeignTy => tcx
             .inherent_impls(root_id)
@@ -1179,13 +1303,15 @@ fn resolve_associated_doc_link(
             .associated_items(root_id)
             .in_definition_order()
             .collect(),
-        _ => return Vec::new(),
+        _ => Vec::new(),
     };
-    associated_items
-        .into_iter()
-        .filter(|item| item.namespace() == namespace && item.name() == item_name)
-        .map(|item| item.def_id)
-        .collect()
+    resolved.extend(
+        associated_items
+            .into_iter()
+            .filter(|item| item.namespace() == namespace && item.name() == item_name)
+            .map(|item| item.def_id),
+    );
+    resolved
 }
 
 fn is_public_candidate_with_visibility(
