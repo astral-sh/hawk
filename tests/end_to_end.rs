@@ -2038,8 +2038,8 @@ fn production_products_reuse_shared_dependency_compilations() {
             .lines()
             .filter(|line| line.trim_start().starts_with("Checking library "))
             .count(),
-        2,
-        "the shared library should compile once for production and once for non-production:\n{stderr}"
+        3,
+        "the shared library should compile once per production, non-production, and documentation mode:\n{stderr}"
     );
 }
 
@@ -3358,6 +3358,12 @@ fn exported_rustdoc_links_preserve_public_visibility() {
         "INLINE_REEXPORT_LINKED_CONSTANT",
         "GLOB_INLINE_REEXPORT_LINKED_CONSTANT",
         "TRAIT_IMPL_LINKED_CONSTANT",
+        "INLINE_TRAIT_IMPL_LINKED_CONSTANT",
+        "INLINE_DIRECT_TRAIT_IMPL_LINKED_CONSTANT",
+        "NESTED_REEXPORT_LINKED_CONSTANT",
+        "USED_REFERENCE_DEFINITION",
+        "CFG_DOC_LINKED_CONSTANT",
+        "CFG_ATTR_DOC_LINKED_CONSTANT",
         "DocumentedEnum",
     ] {
         assert!(
@@ -3375,6 +3381,12 @@ fn exported_rustdoc_links_preserve_public_visibility() {
         "NO_INLINE_REEXPORT_LINKED_CONSTANT",
         "PRIVATE_TRAIT_IMPL_LINKED_CONSTANT",
         "HIDDEN_TRAIT_IMPL_LINKED_CONSTANT",
+        "UNUSED_REFERENCE_DEFINITION",
+        "HIDDEN_VARIANT_FIELD_LINKED_CONSTANT",
+        "HIDDEN_NESTED_REEXPORT_LINKED_CONSTANT",
+        "PRIVATE_INLINE_TRAIT_IMPL_LINKED_CONSTANT",
+        "PRIVATE_REFERENCE_INLINE_TRAIT_IMPL_LINKED_CONSTANT",
+        "PRIVATE_DYNAMIC_INLINE_TRAIT_IMPL_LINKED_CONSTANT",
     ] {
         assert!(
             stdout.contains(&format!("`{unlinked}` is public")),
@@ -3393,6 +3405,10 @@ fn exported_rustdoc_links_preserve_public_visibility() {
         stdout.matches("`NamespaceCollision` is public").count(),
         1,
         "the type namespace should be preserved without preserving the value namespace:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("cfg_doc_documented"),
+        "documentation-only definitions must not become candidates:\n{stdout}"
     );
 
     let rustdoc = context

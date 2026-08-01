@@ -8,8 +8,9 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 /// serialized value changes. Workspace source paths became canonical
 /// workspace-relative identities in 9, which also made the workspace root a
 /// required environment value; sources outside the workspace stay absolute.
-/// Uniform field group completeness became explicit in 10.
-pub const VERSION: u32 = 10;
+/// Uniform field group completeness became explicit in 10. Documentation-mode
+/// compilation became part of the frontend-driver contract in 11.
+pub const VERSION: u32 = 11;
 
 pub const VERSION_ARGUMENT: &str = "--hawk-protocol-version";
 
@@ -19,6 +20,7 @@ pub const ROOT_CRATE_ENV: &str = "HAWK_ROOT_CRATE";
 pub const WORKSPACE_ROOT_ENV: &str = "HAWK_WORKSPACE_ROOT";
 pub const CONSUMER_MODE_ENV: &str = "HAWK_CONSUMER_MODE";
 pub const COLLECTION_OPTIONS_ENV: &str = "HAWK_COLLECTION_OPTIONS";
+pub const DOCUMENTATION_ENV: &str = "HAWK_DOCUMENTATION";
 pub const RUN_ID_ENV: &str = "HAWK_RUN_ID";
 pub const FIX_PLAN_ENV: &str = "HAWK_FIX_PLAN";
 pub const RUSTC_PROBE_ENV: &str = "HAWK_RUSTC_PROBE";
@@ -31,6 +33,7 @@ pub const ENVIRONMENT_VARIABLES: &[&str] = &[
     WORKSPACE_ROOT_ENV,
     CONSUMER_MODE_ENV,
     COLLECTION_OPTIONS_ENV,
+    DOCUMENTATION_ENV,
     RUN_ID_ENV,
     FIX_PLAN_ENV,
     RUSTC_PROBE_ENV,
@@ -130,7 +133,7 @@ mod tests {
 
         assert_eq!(
             error.to_string(),
-            "unsupported Hawk protocol version 1; expected 10"
+            "unsupported Hawk protocol version 1; expected 11"
         );
     }
 }

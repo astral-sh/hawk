@@ -142,6 +142,7 @@ An analysis run proceeds as follows:
  cargo check --package <package> --bin <target>    (once per binary and feature profile)
  cargo check --package <package> --lib             (once per library and feature profile)
  cargo check --workspace --all-targets              (once per feature profile)
+ cargo check --workspace --lib --bins                (once per feature profile; rustc --cfg doc)
  cargo test --workspace|--package <package> --doc   (once per feature profile)
      |
      | RUSTC_WORKSPACE_WRAPPER=cargo-hawk-driver
@@ -159,10 +160,12 @@ An analysis run proceeds as follows:
 
 Every Cargo invocation includes the selected profile's feature arguments,
 `--locked`, a shared target directory, and optional `--target`. Each profile
-writes to separate production and non-production fragment directories. The
-frontend combines those fragments before graph analysis. Environment variables
-identify the fragment output directory, selected production-target root,
-analysis mode, and run ID.
+writes to separate production, non-production, and documentation fragment
+directories. The frontend projects required-public roots from the
+documentation fragments onto matching ordinary declarations, then combines
+only the production and non-production fragments for graph analysis.
+Environment variables identify the fragment output directory, selected
+production-target root, analysis mode, and run ID.
 For doctests, Hawk additionally uses rustdoc's test-builder wrapper to route
 the generated test crates through the compiler wrapper without executing
 them. The run ID is tracked as compiler dependency input so Cargo does not
@@ -270,7 +273,10 @@ declaration to retain visibility, regardless of whether the referencing item
 is reachable from a selected root: rustc privacy-checks compiled code, not
 only production runtime code. Resolved intra-doc links from exported
 documentation also require their targets to remain public so the documented
-links remain part of the public interface. The requirement propagates along
+links remain part of the public interface. Hawk collects these roots from both
+ordinary builds and a separate `cfg(doc)` build, then maps the latter back to
+ordinary source declarations; documentation-only definitions never become
+analysis candidates. The requirement propagates along
 interface, re-export, visibility-parent, and explicit visibility-requirement
 edges.
 

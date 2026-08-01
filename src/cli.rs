@@ -521,6 +521,7 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
             .join(format!("{index}-{}", feature_profile.name()));
         let production_dir = profile_graph_dir.join("production");
         let non_production_dir = profile_graph_dir.join("non-production");
+        let documentation_dir = profile_graph_dir.join("documentation");
         fs::create_dir_all(&production_dir).with_context(|| {
             format!(
                 "create production graph directory {}",
@@ -533,11 +534,18 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
                 non_production_dir.display()
             )
         })?;
+        fs::create_dir_all(&documentation_dir).with_context(|| {
+            format!(
+                "create documentation graph directory {}",
+                documentation_dir.display()
+            )
+        })?;
         profile_graphs.push(FeatureProfileGraph {
             feature_profile,
             run_id: format!("{run_id}-feature-profile-{index}"),
             production_dir,
             non_production_dir,
+            documentation_dir,
             production_consumer_packages: production_workspace_packages(
                 &resolved_metadata,
                 &production_products,
@@ -689,6 +697,7 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
             fix_iteration += 1;
             clear_fragments(&profile_graph.production_dir)?;
             clear_fragments(&profile_graph.non_production_dir)?;
+            clear_fragments(&profile_graph.documentation_dir)?;
             (production_fragments, test_fragments) = collect_profile_fragments(
                 &cargo,
                 profile_graph,
@@ -1047,6 +1056,7 @@ struct FeatureProfileGraph<'a> {
     run_id: String,
     production_dir: PathBuf,
     non_production_dir: PathBuf,
+    documentation_dir: PathBuf,
     production_consumer_packages: HashSet<String>,
 }
 
@@ -1057,6 +1067,7 @@ enum CargoInvocation<'a> {
     CheckDoctests {
         packages: Option<&'a [String]>,
     },
+    CheckDocumentation,
     FixProduction {
         plan: &'a Path,
         packages: &'a [String],
@@ -1076,6 +1087,7 @@ struct CargoInvocationSpec<'a> {
     root_crate: String,
     fix: Option<FixOptions<'a>>,
     doctests: bool,
+    documentation: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -1225,6 +1237,7 @@ impl<'a> CargoInvocation<'a> {
                 root_crate: product.product.name().replace('-', "_"),
                 fix: None,
                 doctests: false,
+                documentation: false,
             },
             Self::CheckNonProduction => CargoInvocationSpec {
                 subcommand: "check",
@@ -1233,6 +1246,7 @@ impl<'a> CargoInvocation<'a> {
                 root_crate: String::new(),
                 fix: None,
                 doctests: false,
+                documentation: false,
             },
             Self::CheckDoctests { packages } => CargoInvocationSpec {
                 subcommand: "test",
@@ -1244,6 +1258,16 @@ impl<'a> CargoInvocation<'a> {
                 root_crate: String::new(),
                 fix: None,
                 doctests: true,
+                documentation: false,
+            },
+            Self::CheckDocumentation => CargoInvocationSpec {
+                subcommand: "check",
+                selection_arguments: vec!["--workspace".into(), "--lib".into(), "--bins".into()],
+                consumer_mode: protocol::ConsumerMode::Production,
+                root_crate: String::new(),
+                fix: None,
+                doctests: false,
+                documentation: true,
             },
             Self::FixProduction {
                 plan,
@@ -1256,6 +1280,7 @@ impl<'a> CargoInvocation<'a> {
                 root_crate: String::new(),
                 fix: Some(FixOptions { plan, allow_dirty }),
                 doctests: false,
+                documentation: false,
             },
             Self::FixNonProduction {
                 plan,
@@ -1268,6 +1293,7 @@ impl<'a> CargoInvocation<'a> {
                 root_crate: String::new(),
                 fix: Some(FixOptions { plan, allow_dirty }),
                 doctests: false,
+                documentation: false,
             },
         }
     }
@@ -1298,6 +1324,7 @@ impl InstrumentedCargo<'_> {
             root_crate,
             fix,
             doctests,
+            documentation,
         } = invocation.specification();
         let mut command = Command::new("cargo");
         clear_protocol_environment(&mut command);
@@ -1341,6 +1368,9 @@ impl InstrumentedCargo<'_> {
                 protocol::COLLECTION_OPTIONS_ENV,
                 self.collection_options.as_env_value(),
             );
+        if documentation {
+            command.env(protocol::DOCUMENTATION_ENV, "1");
+        }
         if doctests {
             command
                 .arg("--quiet")
@@ -1423,6 +1453,7 @@ impl InstrumentedCargo<'_> {
         production_products: &[ProductionSelection<'_>],
         production_graph_dir: &Path,
         non_production_graph_dir: &Path,
+        documentation_graph_dir: &Path,
         feature_profile: &FeatureProfile,
         production_consumer_packages: &HashSet<String>,
     ) -> Result<CollectedFragments> {
@@ -1452,9 +1483,17 @@ impl InstrumentedCargo<'_> {
             },
             feature_profile,
         )?;
+        self.run(
+            &format!("{run_id}-documentation"),
+            documentation_graph_dir,
+            CargoInvocation::CheckDocumentation,
+            feature_profile,
+        )?;
 
         let mut production = read_fragments(production_graph_dir)?;
         let mut non_production = read_fragments(non_production_graph_dir)?;
+        let documentation = read_fragments(documentation_graph_dir)?;
+        apply_documentation_roots(&mut production, &mut non_production, &documentation);
         for fragment in &mut non_production {
             classify_non_production_target(
                 fragment,
@@ -1500,6 +1539,49 @@ impl InstrumentedCargo<'_> {
             production,
             non_production,
         })
+    }
+}
+
+fn apply_documentation_roots(
+    production: &mut [Fragment],
+    non_production: &mut [Fragment],
+    documentation: &[Fragment],
+) {
+    let rooted_definitions = documentation
+        .iter()
+        .flat_map(|fragment| {
+            fragment
+                .definitions
+                .iter()
+                .filter(|definition| fragment.required_public_roots.contains(&definition.id))
+        })
+        .map(|definition| {
+            DefinitionIdentity::new(
+                &definition.crate_name,
+                &definition.name,
+                definition.kind,
+                definition.span.as_ref(),
+            )
+        })
+        .collect::<HashSet<_>>();
+
+    for fragment in production.iter_mut().chain(non_production) {
+        fragment.required_public_roots.extend(
+            fragment
+                .definitions
+                .iter()
+                .filter(|definition| {
+                    rooted_definitions.contains(&DefinitionIdentity::new(
+                        &definition.crate_name,
+                        &definition.name,
+                        definition.kind,
+                        definition.span.as_ref(),
+                    ))
+                })
+                .map(|definition| definition.id),
+        );
+        fragment.required_public_roots.sort_unstable();
+        fragment.required_public_roots.dedup();
     }
 }
 
@@ -1581,6 +1663,7 @@ fn collect_profile_fragments(
         production_products,
         &profile_graph.production_dir,
         &profile_graph.non_production_dir,
+        &profile_graph.documentation_dir,
         profile_graph.feature_profile,
         &profile_graph.production_consumer_packages,
     )?;
@@ -2218,6 +2301,7 @@ mod tests {
         root_crate: &str,
         fix: Option<(&Path, bool)>,
         doctests: bool,
+        documentation: bool,
     ) {
         let specification = invocation.specification();
         assert_eq!(specification.subcommand, subcommand);
@@ -2235,6 +2319,7 @@ mod tests {
             fix
         );
         assert_eq!(specification.doctests, doctests);
+        assert_eq!(specification.documentation, documentation);
     }
 
     #[test]
@@ -2617,6 +2702,7 @@ mod tests {
             "app_cli",
             None,
             false,
+            false,
         );
         assert_cargo_invocation(
             CargoInvocation::CheckProduction(ProductionSelection {
@@ -2629,6 +2715,7 @@ mod tests {
             "public_api",
             None,
             false,
+            false,
         );
         assert_cargo_invocation(
             CargoInvocation::CheckNonProduction,
@@ -2637,6 +2724,7 @@ mod tests {
             ConsumerMode::NonProduction,
             "",
             None,
+            false,
             false,
         );
         assert_cargo_invocation(
@@ -2647,6 +2735,7 @@ mod tests {
             "",
             None,
             true,
+            false,
         );
         assert_cargo_invocation(
             CargoInvocation::CheckDoctests {
@@ -2657,6 +2746,17 @@ mod tests {
             ConsumerMode::NonProduction,
             "",
             None,
+            true,
+            false,
+        );
+        assert_cargo_invocation(
+            CargoInvocation::CheckDocumentation,
+            "check",
+            &["--workspace", "--lib", "--bins"],
+            ConsumerMode::Production,
+            "",
+            None,
+            false,
             true,
         );
         assert_cargo_invocation(
@@ -2670,6 +2770,7 @@ mod tests {
             ConsumerMode::Production,
             "",
             Some((fix_plan, false)),
+            false,
             false,
         );
         assert_cargo_invocation(
@@ -2689,6 +2790,7 @@ mod tests {
             ConsumerMode::NonProduction,
             "",
             Some((fix_plan, true)),
+            false,
             false,
         );
     }

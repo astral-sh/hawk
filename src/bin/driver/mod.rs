@@ -90,6 +90,14 @@ pub(crate) fn run_wrapper(mut args: Vec<String>) -> ExitCode {
                 return ExitCode::FAILURE;
             }
         };
+    let documentation =
+        match parse_documentation(env::var_os(protocol::DOCUMENTATION_ENV).as_deref()) {
+            Ok(documentation) => documentation,
+            Err(error) => {
+                eprintln!("hawk: invalid documentation mode: {error:#}");
+                return ExitCode::FAILURE;
+            }
+        };
     let fix_plan = match env::var_os(protocol::FIX_PLAN_ENV)
         .map(PathBuf::from)
         .map(|path| read_fix_plan(&path))
@@ -101,6 +109,10 @@ pub(crate) fn run_wrapper(mut args: Vec<String>) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    if documentation {
+        args.push("--cfg".to_owned());
+        args.push("doc".to_owned());
+    }
     if fix_plan.is_some() {
         args.push("--cap-lints".to_owned());
         args.push("allow".to_owned());
@@ -264,6 +276,18 @@ fn parse_collection_options(value: Option<&OsStr>) -> Result<CollectionOptions> 
             protocol::COLLECTION_OPTIONS_ENV
         )
     })
+}
+
+fn parse_documentation(value: Option<&OsStr>) -> Result<bool> {
+    match value {
+        None => Ok(false),
+        Some(value) if value == "1" => Ok(true),
+        Some(value) => bail!(
+            "unsupported {} value `{}`",
+            protocol::DOCUMENTATION_ENV,
+            value.to_string_lossy()
+        ),
+    }
 }
 
 fn read_fix_plan(path: &Path) -> Result<FixPlan> {
@@ -1027,55 +1051,70 @@ fn inlined_reexport_doc_sources(
         {
             continue;
         }
-        let attrs = tcx.hir_attrs(tcx.local_def_id_to_hir_id(def_id));
-        let inline = attrs.iter().find_map(|attribute| {
-            let hir::Attribute::Parsed(AttributeKind::Doc(documentation)) = attribute else {
-                return None;
-            };
-            documentation.inline.first().map(|(inline, _)| *inline)
-        });
-        if inline == Some(DocInline::NoInline) {
-            continue;
-        }
-        let Node::Item(hir::Item {
-            kind: hir::ItemKind::Use(path, _),
-            ..
-        }) = tcx.hir_node_by_def_id(def_id)
-        else {
-            continue;
-        };
-        for target in path
-            .res
-            .present_items()
-            .filter_map(|resolution| resolution.opt_def_id()?.as_local())
-        {
-            let explicitly_inlined = inline == Some(DocInline::Inline);
-            if explicitly_inlined || !tcx.is_doc_hidden(target) {
-                extend_inlined_doc_sources(tcx, target, explicitly_inlined, &mut sources);
-            }
-        }
+        extend_inlined_reexport_doc_sources(tcx, def_id, &mut sources);
     }
 
-    let trait_impls = tcx
-        .all_local_trait_impls(())
-        .iter()
-        .filter(|(trait_id, _)| rendered_trait(tcx, **trait_id, &sources))
-        .flat_map(|(_, impl_ids)| impl_ids)
-        .copied()
-        .filter(|impl_id| {
-            tcx.type_of(*impl_id)
-                .instantiate_identity()
-                .skip_norm_wip()
-                .ty_adt_def()
-                .and_then(|adt| adt.did().as_local())
-                .is_some_and(|adt_id| sources.contains(&adt_id))
-        })
-        .collect::<Vec<_>>();
+    let mut trait_impls = Vec::new();
+    for (trait_id, impl_ids) in tcx.all_local_trait_impls(()) {
+        if !rendered_trait(tcx, *trait_id, &sources) {
+            continue;
+        }
+        let trait_is_inlined = trait_id
+            .as_local()
+            .is_some_and(|trait_id| sources.contains(&trait_id));
+        trait_impls.extend(impl_ids.iter().copied().filter(|impl_id| {
+            trait_is_inlined && rendered_impl_self_type(tcx, *impl_id, &sources)
+                || tcx
+                    .type_of(*impl_id)
+                    .instantiate_identity()
+                    .skip_norm_wip()
+                    .ty_adt_def()
+                    .and_then(|adt| adt.did().as_local())
+                    .is_some_and(|adt_id| sources.contains(&adt_id))
+        }));
+    }
     for impl_id in trait_impls {
         extend_inlined_doc_sources(tcx, impl_id, false, &mut sources);
     }
 
     sources
+}
+
+fn extend_inlined_reexport_doc_sources(
+    tcx: TyCtxt<'_>,
+    def_id: LocalDefId,
+    sources: &mut HashSet<LocalDefId>,
+) {
+    if tcx.is_doc_hidden(def_id) {
+        return;
+    }
+    let attrs = tcx.hir_attrs(tcx.local_def_id_to_hir_id(def_id));
+    let inline = attrs.iter().find_map(|attribute| {
+        let hir::Attribute::Parsed(AttributeKind::Doc(documentation)) = attribute else {
+            return None;
+        };
+        documentation.inline.first().map(|(inline, _)| *inline)
+    });
+    if inline == Some(DocInline::NoInline) {
+        return;
+    }
+    let Node::Item(hir::Item {
+        kind: hir::ItemKind::Use(path, _),
+        ..
+    }) = tcx.hir_node_by_def_id(def_id)
+    else {
+        return;
+    };
+    for target in path
+        .res
+        .present_items()
+        .filter_map(|resolution| resolution.opt_def_id()?.as_local())
+    {
+        let explicitly_inlined = inline == Some(DocInline::Inline);
+        if explicitly_inlined || !tcx.is_doc_hidden(target) {
+            extend_inlined_doc_sources(tcx, target, explicitly_inlined, sources);
+        }
+    }
 }
 
 fn rendered_trait(
@@ -1086,10 +1125,41 @@ fn rendered_trait(
     let Some(trait_id) = trait_id.as_local() else {
         return !tcx.is_doc_hidden(trait_id);
     };
-    inlined_doc_sources.contains(&trait_id)
-        || !tcx.is_doc_hidden(trait_id)
-            && tcx.effective_visibilities(()).is_exported(trait_id)
-            && !std::iter::successors(tcx.opt_local_parent(trait_id), |def_id| {
+    rendered_local_doc_definition(tcx, trait_id, inlined_doc_sources)
+}
+
+fn rendered_impl_self_type(
+    tcx: TyCtxt<'_>,
+    impl_id: LocalDefId,
+    inlined_doc_sources: &HashSet<LocalDefId>,
+) -> bool {
+    tcx.type_of(impl_id)
+        .instantiate_identity()
+        .skip_norm_wip()
+        .walk()
+        .filter_map(rustc_middle::ty::GenericArg::as_type)
+        .all(|ty| {
+            let def_id = match ty.kind() {
+                ty::Adt(adt, _) => Some(adt.did()),
+                ty::Foreign(def_id) => Some(*def_id),
+                ty::Dynamic(predicates, ..) => predicates.principal_def_id(),
+                _ => None,
+            };
+            def_id.and_then(DefId::as_local).is_none_or(|def_id| {
+                rendered_local_doc_definition(tcx, def_id, inlined_doc_sources)
+            })
+        })
+}
+
+fn rendered_local_doc_definition(
+    tcx: TyCtxt<'_>,
+    def_id: LocalDefId,
+    inlined_doc_sources: &HashSet<LocalDefId>,
+) -> bool {
+    inlined_doc_sources.contains(&def_id)
+        || !tcx.is_doc_hidden(def_id)
+            && tcx.effective_visibilities(()).is_exported(def_id)
+            && !std::iter::successors(tcx.opt_local_parent(def_id), |def_id| {
                 tcx.opt_local_parent(*def_id)
             })
             .any(|def_id| tcx.is_doc_hidden(def_id))
@@ -1114,11 +1184,18 @@ fn extend_inlined_doc_sources(
                 return;
             };
             for item_id in module.item_ids {
-                extend_inlined_doc_sources(tcx, item_id.owner_id.def_id, false, sources);
+                let item_id = item_id.owner_id.def_id;
+                extend_inlined_doc_sources(tcx, item_id, false, sources);
+                if tcx.def_kind(item_id) == DefKind::Use {
+                    extend_inlined_reexport_doc_sources(tcx, item_id, sources);
+                }
             }
         }
         DefKind::Struct | DefKind::Union | DefKind::Enum => {
             for variant in tcx.adt_def(def_id).variants() {
+                if tcx.def_kind(def_id) == DefKind::Enum && tcx.is_doc_hidden(variant.def_id) {
+                    continue;
+                }
                 if let Some(variant_id) = variant.def_id.as_local() {
                     extend_inlined_doc_sources(tcx, variant_id, false, sources);
                 }
@@ -1155,13 +1232,13 @@ fn parsed_doc_links<'docs>(docs: &'docs str) -> Vec<ParsedDocLink> {
     use rustc_resolve::rustdoc::pulldown_cmark::{BrokenLink, Event, LinkType, Parser, Tag};
 
     let mut broken_link_callback = |link: BrokenLink<'docs>| Some((link.reference, "".into()));
-    let mut events = Parser::new_with_broken_link_callback(
+    let events = Parser::new_with_broken_link_callback(
         docs,
         rustc_resolve::rustdoc::main_body_opts(),
         Some(&mut broken_link_callback),
     );
     let mut links = Vec::new();
-    for event in events.by_ref() {
+    for event in events {
         if let Event::Start(Tag::Link {
             link_type,
             dest_url,
@@ -1173,14 +1250,6 @@ fn parsed_doc_links<'docs>(docs: &'docs str) -> Vec<ParsedDocLink> {
             links.push(link);
         }
     }
-    links.extend(
-        events
-            .reference_definitions()
-            .iter()
-            .filter_map(|(_, definition)| {
-                preprocess_doc_link(&definition.dest, LinkType::Reference)
-            }),
-    );
     links
 }
 
@@ -2087,9 +2156,10 @@ mod tests {
 
     use super::{
         FragmentClassification, SourcePathNormalizer, classify_fragment,
-        compact_visibility_modifier, parse_collection_options, parse_consumer_mode, parse_run_id,
-        parse_workspace_root, source_item_at_or_after, type_alias_interface_targets,
-        uniform_field_group, validate_frontend_protocol_version, write_fragment,
+        compact_visibility_modifier, parse_collection_options, parse_consumer_mode,
+        parse_documentation, parse_run_id, parse_workspace_root, source_item_at_or_after,
+        type_alias_interface_targets, uniform_field_group, validate_frontend_protocol_version,
+        write_fragment,
     };
     use cargo_hawk_internal::graph::{CollectionOptions, Edge, EdgeKind, Fragment};
     use rustc_session::config::CrateType;
@@ -2113,7 +2183,7 @@ mod tests {
 
         assert_eq!(
             error.to_string(),
-            "Hawk frontend uses compiler driver protocol 1, but this driver uses protocol 10; install `cargo-hawk` and `cargo-hawk-driver` from the same release"
+            "Hawk frontend uses compiler driver protocol 1, but this driver uses protocol 11; install `cargo-hawk` and `cargo-hawk-driver` from the same release"
         );
     }
 
@@ -2258,6 +2328,15 @@ mod tests {
 
     #[test]
     fn frontend_protocol_fields_are_validated() {
+        assert!(!parse_documentation(None).expect("default documentation mode"));
+        assert!(parse_documentation(Some(OsStr::new("1"))).expect("documentation mode"));
+        assert_eq!(
+            parse_documentation(Some(OsStr::new("true")))
+                .expect_err("invalid documentation mode should fail")
+                .to_string(),
+            "unsupported HAWK_DOCUMENTATION value `true`"
+        );
+
         assert_eq!(
             parse_consumer_mode(Some(OsStr::new("production"))).expect("production mode"),
             crate::protocol::ConsumerMode::Production
