@@ -268,8 +268,11 @@ Separately, Hawk computes the declarations whose public visibility is
 required. Any compiled cross-crate reference requires the referenced
 declaration to retain visibility, regardless of whether the referencing item
 is reachable from a selected root: rustc privacy-checks compiled code, not
-only production runtime code. The requirement propagates along interface,
-re-export, visibility-parent, and explicit visibility-requirement edges.
+only production runtime code. Resolved intra-doc links from exported
+documentation also require their targets to remain public so the documented
+links remain part of the public interface. The requirement propagates along
+interface, re-export, visibility-parent, and explicit visibility-requirement
+edges.
 
 For each public candidate in a non-excluded workspace library crate:
 
@@ -340,6 +343,8 @@ boundaries:
   public, even without a direct call path.
 - Proc-macro exports are required public because their attributed entry points
   are constrained by rustc.
+- Resolved paths and associated items linked from exported documentation are
+  required public.
 - Derive-expanded field interfaces preserve matching source-field visibility
   where generated exposure cannot otherwise be proven from HIR.
 

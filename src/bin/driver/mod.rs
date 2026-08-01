@@ -16,7 +16,7 @@ use rustc_hash::FxHasher;
 use rustc_hir as hir;
 use rustc_hir::Node;
 use rustc_hir::attrs::AttributeKind;
-use rustc_hir::def::{CtorOf, DefKind, Res};
+use rustc_hir::def::{CtorOf, DefKind, Namespace, Res};
 use rustc_hir::def_id::{CRATE_DEF_ID, DefId, LocalDefId};
 use rustc_hir::intravisit::{self, Visitor};
 use rustc_interface::interface;
@@ -873,6 +873,7 @@ fn collect_fragment(
             .filter_map(|def_id| enclosing_module(tcx, def_id))
             .map(|def_id| id(tcx, def_id.to_def_id())),
     );
+    required_public_roots.extend(doc_link_visibility_roots(tcx));
     if is_proc_macro_crate {
         // Public exports from a proc-macro crate can only be macro entry points.
         required_public_roots.extend(
@@ -948,6 +949,59 @@ fn collect_fragment(
         conservative_roots,
         required_public_roots,
     }
+}
+
+/// Returns declarations linked from exported documentation.
+///
+/// Rustc resolves paths in exported intra-doc links while producing crate
+/// metadata. Associated items need one additional lookup because the resolver
+/// records their containing type separately from the final item.
+fn doc_link_visibility_roots(tcx: TyCtxt<'_>) -> Vec<DefinitionId> {
+    let mut roots = Vec::new();
+    for resolutions in tcx.resolutions(()).doc_link_resolutions.values() {
+        for ((path, _), namespace, resolution) in resolutions
+            .items()
+            .map(|((path, namespace), resolution)| {
+                ((path.as_str(), *namespace as u8), *namespace, *resolution)
+            })
+            .into_sorted_stable_ord_by_key(|(key, _, _)| key)
+        {
+            if let Some(def_id) = resolution.and_then(|resolution| resolution.opt_def_id()) {
+                roots.push(id(tcx, def_id));
+                continue;
+            }
+            let Some((path_root, item_name)) = path.rsplit_once("::") else {
+                continue;
+            };
+            let root = resolutions
+                .get(&(Symbol::intern(path_root), Namespace::TypeNS))
+                .copied()
+                .flatten();
+            let Some(Res::Def(root_kind, root_id)) = root else {
+                continue;
+            };
+            let item_name = Symbol::intern(item_name);
+            let associated_items = match root_kind {
+                DefKind::Struct | DefKind::Union | DefKind::Enum | DefKind::ForeignTy => tcx
+                    .inherent_impls(root_id)
+                    .iter()
+                    .flat_map(|impl_id| tcx.associated_items(*impl_id).in_definition_order())
+                    .collect::<Vec<_>>(),
+                DefKind::Trait => tcx
+                    .associated_items(root_id)
+                    .in_definition_order()
+                    .collect(),
+                _ => continue,
+            };
+            roots.extend(
+                associated_items
+                    .into_iter()
+                    .filter(|item| item.namespace() == namespace && item.name() == item_name)
+                    .map(|item| id(tcx, item.def_id)),
+            );
+        }
+    }
+    roots
 }
 
 fn is_public_candidate_with_visibility(

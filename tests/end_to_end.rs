@@ -3344,6 +3344,31 @@ fn doctest_consumers_preserve_required_public_visibility_during_fixes() {
 }
 
 #[test]
+fn exported_rustdoc_links_preserve_public_visibility() {
+    let context = HawkTestContext::new("rustdoc_links");
+    let output = context.run(&[]);
+
+    context.assert_success(&output);
+    let stdout = context.normalized_stdout(&output);
+    for linked in ["LINKED_CONSTANT", "DocumentedType::linked_method"] {
+        assert!(
+            !stdout.contains(&format!("`{linked}` is public")),
+            "linked declaration was diagnosed:\n{stdout}"
+        );
+    }
+    for unlinked in [
+        "UNLINKED_CONSTANT",
+        "PRIVATE_LINKED_CONSTANT",
+        "DocumentedType::unlinked_method",
+    ] {
+        assert!(
+            stdout.contains(&format!("`{unlinked}` is public")),
+            "unlinked declaration was not diagnosed:\n{stdout}"
+        );
+    }
+}
+
+#[test]
 fn fixes_grouped_public_reexports_only_when_all_aliases_are_safe() {
     let context = HawkTestContext::new("grouped_reexport_fixes");
     let output = context.run(&["--fix", "--allow-no-vcs"]);

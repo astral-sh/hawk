@@ -19,7 +19,9 @@ The analysis includes:
 - one selected compilation target, defaulting to the host target;
 - production reachability from binary entry points and workspace library uses;
 - test reachability and visibility requirements from workspace
-  non-production targets, including doctests.
+  non-production targets, including doctests;
+- public visibility requirements from resolved intra-doc links in exported
+  documentation.
 
 When `hawk.toml` exists, every shipped binary or audited library must be listed
 explicitly. Without a configuration file, all workspace binaries are inferred
