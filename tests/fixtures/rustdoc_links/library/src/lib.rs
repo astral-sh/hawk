@@ -58,6 +58,8 @@ pub const CROSS_CRATE_CFG_DOC_LINKED_CONSTANT: usize = 23;
 
 pub const PRIVATE_BINARY_DOC_LINKED_CONSTANT: usize = 24;
 
+pub const PROC_MACRO_CFG_DOC_LINKED_CONSTANT: usize = 25;
+
 pub fn cross_crate_cfg_doc_linked_constant() -> usize {
     CROSS_CRATE_CFG_DOC_LINKED_CONSTANT
 }
@@ -65,6 +67,32 @@ pub fn cross_crate_cfg_doc_linked_constant() -> usize {
 pub fn private_binary_doc_linked_constant() -> usize {
     PRIVATE_BINARY_DOC_LINKED_CONSTANT
 }
+
+pub fn proc_macro_cfg_doc_linked_constant() -> usize {
+    PROC_MACRO_CFG_DOC_LINKED_CONSTANT
+}
+
+mod documented_reexport_source {
+    pub struct DirectTarget;
+
+    pub struct AssociatedTarget;
+
+    impl AssociatedTarget {
+        pub fn linked_method() {}
+    }
+}
+
+pub use documented_reexport_source::DirectTarget as DirectDocumentedReexport;
+pub use documented_reexport_source::AssociatedTarget as AssociatedDocumentedReexport;
+
+pub fn use_documented_reexports() {
+    let _ = DirectDocumentedReexport;
+    AssociatedDocumentedReexport::linked_method();
+}
+
+/// Links to [`DirectDocumentedReexport`] and
+/// [`AssociatedDocumentedReexport::linked_method`].
+pub fn reexport_documented() {}
 
 pub struct AliasTarget;
 

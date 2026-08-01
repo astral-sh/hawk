@@ -3344,7 +3344,7 @@ fn doctest_consumers_preserve_required_public_visibility_during_fixes() {
 }
 
 #[test]
-fn exported_rustdoc_links_preserve_public_visibility() {
+fn rustdoc_links_preserve_public_visibility() {
     let context = HawkTestContext::new("rustdoc_links");
     let output = context.run(&[]);
 
@@ -3366,6 +3366,7 @@ fn exported_rustdoc_links_preserve_public_visibility() {
         "CFG_ATTR_DOC_LINKED_CONSTANT",
         "CROSS_CRATE_CFG_DOC_LINKED_CONSTANT",
         "PRIVATE_BINARY_DOC_LINKED_CONSTANT",
+        "PROC_MACRO_CFG_DOC_LINKED_CONSTANT",
         "DocumentedEnum",
     ] {
         assert!(
@@ -3412,6 +3413,12 @@ fn exported_rustdoc_links_preserve_public_visibility() {
         !stdout.contains("cfg_doc_documented"),
         "documentation-only definitions must not become candidates:\n{stdout}"
     );
+    for reexport in ["DirectDocumentedReexport", "AssociatedDocumentedReexport"] {
+        assert!(
+            !stdout.contains(&format!("public re-export `{reexport}`")),
+            "re-export named by documentation was diagnosed:\n{stdout}"
+        );
+    }
 
     let rustdoc = context
         .cargo()

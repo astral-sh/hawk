@@ -1,8 +1,10 @@
 [package]
-name = "app"
+name = "macro-package"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+proc-macro = true
+
 [dependencies]
 library = { path = "../library" }
-macro-package = { path = "../macro-package" }

@@ -349,8 +349,8 @@ boundaries:
   public, even without a direct call path.
 - Proc-macro exports are required public because their attributed entry points
   are constrained by rustc.
-- Resolved paths and associated items linked from exported documentation are
-  required public.
+- Resolved paths and associated items linked from rendered documentation,
+  including Cargo's private binary documentation, are required public.
 - Derive-expanded field interfaces preserve matching source-field visibility
   where generated exposure cannot otherwise be proven from HIR.
 
