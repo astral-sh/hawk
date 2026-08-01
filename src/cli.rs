@@ -1547,14 +1547,15 @@ fn apply_documentation_roots(
     non_production: &mut [Fragment],
     documentation: &[Fragment],
 ) {
+    // A link can resolve to a definition in another crate's fragment.
+    let documentation_root_ids = documentation
+        .iter()
+        .flat_map(|fragment| fragment.required_public_roots.iter().copied())
+        .collect::<HashSet<_>>();
     let rooted_definitions = documentation
         .iter()
-        .flat_map(|fragment| {
-            fragment
-                .definitions
-                .iter()
-                .filter(|definition| fragment.required_public_roots.contains(&definition.id))
-        })
+        .flat_map(|fragment| fragment.definitions.iter())
+        .filter(|definition| documentation_root_ids.contains(&definition.id))
         .map(|definition| {
             DefinitionIdentity::new(
                 &definition.crate_name,

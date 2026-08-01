@@ -26,7 +26,7 @@ use rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrFlags;
 use rustc_middle::ty::{self, TyCtxt};
 use rustc_parse::lexer::StripTokens;
 use rustc_parse::parser::{AllowConstBlockItems, ForceCollect};
-use rustc_session::config::CrateType;
+use rustc_session::config::{CrateType, ResolveDocLinks};
 use rustc_session::lint::Level;
 use rustc_span::Symbol;
 use rustc_span::def_id::LOCAL_CRATE;
@@ -109,7 +109,10 @@ pub(crate) fn run_wrapper(mut args: Vec<String>) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    if documentation {
+    // Cargo runs build scripts and build dependencies for the host without
+    // `--target`; Rustdoc does not enable `cfg(doc)` for those compilations.
+    let documentation_target = documentation && is_target_compilation(&args);
+    if documentation_target {
         args.push("--cfg".to_owned());
         args.push("doc".to_owned());
     }
@@ -127,6 +130,7 @@ pub(crate) fn run_wrapper(mut args: Vec<String>) -> ExitCode {
         consumer_mode,
         run_id,
         collection_options,
+        documentation: documentation_target,
         fix_plan,
     };
 
@@ -189,11 +193,15 @@ struct HawkCallbacks {
     consumer_mode: protocol::ConsumerMode,
     run_id: String,
     collection_options: CollectionOptions,
+    documentation: bool,
     fix_plan: Option<FixPlan>,
 }
 
 impl Callbacks for HawkCallbacks {
     fn config(&mut self, config: &mut interface::Config) {
+        if self.documentation && config.opts.crate_types.contains(&CrateType::Executable) {
+            config.opts.resolve_doc_links = ResolveDocLinks::All;
+        }
         let run_id = self.run_id.clone();
         let collection_options = self.collection_options.as_env_value();
         // The workspace root determines every serialized source span, so a
@@ -225,6 +233,7 @@ impl Callbacks for HawkCallbacks {
             &self.output_dir,
             self.consumer_mode,
             self.collection_options,
+            self.documentation,
         ) {
             tcx.dcx()
                 .fatal(format!("hawk could not emit analysis graph: {error:#}"));
@@ -288,6 +297,11 @@ fn parse_documentation(value: Option<&OsStr>) -> Result<bool> {
             value.to_string_lossy()
         ),
     }
+}
+
+fn is_target_compilation(args: &[String]) -> bool {
+    args.iter()
+        .any(|argument| argument == "--target" || argument.starts_with("--target="))
 }
 
 fn read_fix_plan(path: &Path) -> Result<FixPlan> {
@@ -447,6 +461,7 @@ fn emit_fragment(
     output_dir: &Path,
     consumer_mode: protocol::ConsumerMode,
     collection_options: CollectionOptions,
+    documentation: bool,
 ) -> Result<()> {
     let package_name = env::var("CARGO_PKG_NAME").context("read Cargo package name")?;
     let crate_name = tcx.crate_name(LOCAL_CRATE).to_string();
@@ -464,11 +479,9 @@ fn emit_fragment(
         package_name,
         crate_name.clone(),
         crate_id,
-        classification.is_product_root,
-        classification.root_kind,
-        classification.test_surface,
-        classification.non_production_consumer,
+        classification,
         collection_options,
+        documentation,
     );
     let mut file = tempfile::NamedTempFile::new_in(output_dir)
         .with_context(|| format!("create temporary fragment in {}", output_dir.display()))?;
@@ -556,12 +569,16 @@ fn collect_fragment(
     package_name: String,
     crate_name: String,
     crate_id: DefinitionId,
-    is_product_root: bool,
-    root_kind: Option<protocol::ProductionTargetKind>,
-    test_surface: bool,
-    non_production_consumer: bool,
+    classification: FragmentClassification,
     collection_options: CollectionOptions,
+    documentation: bool,
 ) -> Fragment {
+    let FragmentClassification {
+        is_product_root,
+        root_kind,
+        test_surface,
+        non_production_consumer,
+    } = classification;
     let mut definitions = Vec::new();
     let mut defined = HashSet::new();
     let mut adt_members = Vec::new();
@@ -898,7 +915,11 @@ fn collect_fragment(
             .filter_map(|def_id| enclosing_module(tcx, def_id))
             .map(|def_id| id(tcx, def_id.to_def_id())),
     );
-    required_public_roots.extend(doc_link_visibility_roots(tcx, &public_reexports));
+    required_public_roots.extend(doc_link_visibility_roots(
+        tcx,
+        &public_reexports,
+        documentation && tcx.crate_types().contains(&CrateType::Executable),
+    ));
     if is_proc_macro_crate {
         // Public exports from a proc-macro crate can only be macro entry points.
         required_public_roots.extend(
@@ -980,17 +1001,21 @@ fn collect_fragment(
 ///
 /// Rustc's resolution cache contains every namespace and path prefix that it
 /// tried while resolving documentation. Pair those resolutions with the links
-/// parsed from each exported item's documentation so only the rendered target
+/// parsed from each rendered item's documentation so only the rendered target
 /// becomes a visibility root.
 fn doc_link_visibility_roots(
     tcx: TyCtxt<'_>,
     public_reexports: &[LocalDefId],
+    document_private_items: bool,
 ) -> Vec<DefinitionId> {
     let mut roots = Vec::new();
     let effective_visibilities = tcx.effective_visibilities(());
     let inlined_reexport_doc_sources = inlined_reexport_doc_sources(tcx, public_reexports);
     for def_id in tcx.iter_local_def_id() {
-        if def_id != CRATE_DEF_ID && !effective_visibilities.is_exported(def_id) {
+        if def_id != CRATE_DEF_ID
+            && !document_private_items
+            && !effective_visibilities.is_exported(def_id)
+        {
             continue;
         }
         if std::iter::successors(Some(def_id), |def_id| tcx.opt_local_parent(*def_id))
@@ -2156,10 +2181,10 @@ mod tests {
 
     use super::{
         FragmentClassification, SourcePathNormalizer, classify_fragment,
-        compact_visibility_modifier, parse_collection_options, parse_consumer_mode,
-        parse_documentation, parse_run_id, parse_workspace_root, source_item_at_or_after,
-        type_alias_interface_targets, uniform_field_group, validate_frontend_protocol_version,
-        write_fragment,
+        compact_visibility_modifier, is_target_compilation, parse_collection_options,
+        parse_consumer_mode, parse_documentation, parse_run_id, parse_workspace_root,
+        source_item_at_or_after, type_alias_interface_targets, uniform_field_group,
+        validate_frontend_protocol_version, write_fragment,
     };
     use cargo_hawk_internal::graph::{CollectionOptions, Edge, EdgeKind, Fragment};
     use rustc_session::config::CrateType;
@@ -2374,6 +2399,24 @@ mod tests {
                 .to_string(),
             "HAWK_RUN_ID must not be empty"
         );
+    }
+
+    #[test]
+    fn documentation_mode_only_configures_target_compilations() {
+        assert!(is_target_compilation(&[
+            "cargo-hawk-driver".into(),
+            "--target".into(),
+            "aarch64-apple-darwin".into(),
+        ]));
+        assert!(is_target_compilation(&[
+            "cargo-hawk-driver".into(),
+            "--target=aarch64-apple-darwin".into(),
+        ]));
+        assert!(!is_target_compilation(&[
+            "cargo-hawk-driver".into(),
+            "--crate-name".into(),
+            "build_script_build".into(),
+        ]));
     }
 
     #[test]

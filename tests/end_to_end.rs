@@ -3364,6 +3364,8 @@ fn exported_rustdoc_links_preserve_public_visibility() {
         "USED_REFERENCE_DEFINITION",
         "CFG_DOC_LINKED_CONSTANT",
         "CFG_ATTR_DOC_LINKED_CONSTANT",
+        "CROSS_CRATE_CFG_DOC_LINKED_CONSTANT",
+        "PRIVATE_BINARY_DOC_LINKED_CONSTANT",
         "DocumentedEnum",
     ] {
         assert!(
@@ -3416,8 +3418,7 @@ fn exported_rustdoc_links_preserve_public_visibility() {
         .arg("doc")
         .arg("--manifest-path")
         .arg(context.workspace().join("Cargo.toml"))
-        .arg("--package")
-        .arg("library")
+        .arg("--workspace")
         .arg("--no-deps")
         .arg("--locked")
         .arg("--target-dir")

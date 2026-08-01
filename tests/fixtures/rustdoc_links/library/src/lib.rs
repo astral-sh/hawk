@@ -54,6 +54,18 @@ pub const PRIVATE_REFERENCE_INLINE_TRAIT_IMPL_LINKED_CONSTANT: usize = 21;
 
 pub const PRIVATE_DYNAMIC_INLINE_TRAIT_IMPL_LINKED_CONSTANT: usize = 22;
 
+pub const CROSS_CRATE_CFG_DOC_LINKED_CONSTANT: usize = 23;
+
+pub const PRIVATE_BINARY_DOC_LINKED_CONSTANT: usize = 24;
+
+pub fn cross_crate_cfg_doc_linked_constant() -> usize {
+    CROSS_CRATE_CFG_DOC_LINKED_CONSTANT
+}
+
+pub fn private_binary_doc_linked_constant() -> usize {
+    PRIVATE_BINARY_DOC_LINKED_CONSTANT
+}
+
 pub struct AliasTarget;
 
 impl AliasTarget {
