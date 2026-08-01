@@ -3350,7 +3350,11 @@ fn exported_rustdoc_links_preserve_public_visibility() {
 
     context.assert_success(&output);
     let stdout = context.normalized_stdout(&output);
-    for linked in ["LINKED_CONSTANT", "DocumentedType::linked_method"] {
+    for linked in [
+        "LINKED_CONSTANT",
+        "DocumentedType::linked_method",
+        "AliasTarget::alias_linked_method",
+    ] {
         assert!(
             !stdout.contains(&format!("`{linked}` is public")),
             "linked declaration was diagnosed:\n{stdout}"
@@ -3359,13 +3363,20 @@ fn exported_rustdoc_links_preserve_public_visibility() {
     for unlinked in [
         "UNLINKED_CONSTANT",
         "PRIVATE_LINKED_CONSTANT",
+        "HIDDEN_LINKED_CONSTANT",
         "DocumentedType::unlinked_method",
+        "AliasTarget::alias_unlinked_method",
     ] {
         assert!(
             stdout.contains(&format!("`{unlinked}` is public")),
             "unlinked declaration was not diagnosed:\n{stdout}"
         );
     }
+    assert_eq!(
+        stdout.matches("`NamespaceCollision` is public").count(),
+        1,
+        "the type namespace should be preserved without preserving the value namespace:\n{stdout}"
+    );
 }
 
 #[test]

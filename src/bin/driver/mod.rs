@@ -951,57 +951,241 @@ fn collect_fragment(
     }
 }
 
-/// Returns declarations linked from exported documentation.
+/// Returns declarations linked from rendered documentation.
 ///
-/// Rustc resolves paths in exported intra-doc links while producing crate
-/// metadata. Associated items need one additional lookup because the resolver
-/// records their containing type separately from the final item.
+/// Rustc's resolution cache contains every namespace and path prefix that it
+/// tried while resolving documentation. Pair those resolutions with the links
+/// parsed from each exported item's documentation so only the rendered target
+/// becomes a visibility root.
 fn doc_link_visibility_roots(tcx: TyCtxt<'_>) -> Vec<DefinitionId> {
     let mut roots = Vec::new();
-    for resolutions in tcx.resolutions(()).doc_link_resolutions.values() {
-        for ((path, _), namespace, resolution) in resolutions
-            .items()
-            .map(|((path, namespace), resolution)| {
-                ((path.as_str(), *namespace as u8), *namespace, *resolution)
-            })
-            .into_sorted_stable_ord_by_key(|(key, _, _)| key)
+    let effective_visibilities = tcx.effective_visibilities(());
+    for def_id in tcx.iter_local_def_id() {
+        if def_id != CRATE_DEF_ID && !effective_visibilities.is_exported(def_id) {
+            continue;
+        }
+        if std::iter::successors(Some(def_id), |def_id| tcx.opt_local_parent(*def_id))
+            .any(|def_id| tcx.is_doc_hidden(def_id))
         {
-            if let Some(def_id) = resolution.and_then(|resolution| resolution.opt_def_id()) {
-                roots.push(id(tcx, def_id));
-                continue;
-            }
-            let Some((path_root, item_name)) = path.rsplit_once("::") else {
-                continue;
+            continue;
+        }
+
+        let attrs = tcx.hir_attrs(tcx.local_def_id_to_hir_id(def_id));
+        let (doc_fragments, other_attrs) = rustc_resolve::rustdoc::attrs_to_doc_fragments(
+            attrs.iter().map(|attribute| (attribute, None)),
+            false,
+        );
+        let mut docs = rustc_resolve::rustdoc::prepare_to_doc_link_resolution(&doc_fragments)
+            .into_values()
+            .collect::<Vec<_>>();
+        docs.extend(other_attrs.iter().filter_map(|attribute| {
+            let hir::Attribute::Parsed(AttributeKind::Deprecated { deprecation, .. }) = attribute
+            else {
+                return None;
             };
-            let root = resolutions
-                .get(&(Symbol::intern(path_root), Namespace::TypeNS))
-                .copied()
-                .flatten();
-            let Some(Res::Def(root_kind, root_id)) = root else {
-                continue;
-            };
-            let item_name = Symbol::intern(item_name);
-            let associated_items = match root_kind {
-                DefKind::Struct | DefKind::Union | DefKind::Enum | DefKind::ForeignTy => tcx
-                    .inherent_impls(root_id)
-                    .iter()
-                    .flat_map(|impl_id| tcx.associated_items(*impl_id).in_definition_order())
-                    .collect::<Vec<_>>(),
-                DefKind::Trait => tcx
-                    .associated_items(root_id)
-                    .in_definition_order()
-                    .collect(),
-                _ => continue,
-            };
+            deprecation.note.map(|note| note.to_string())
+        }));
+        if docs.is_empty() {
+            continue;
+        }
+
+        let module = if matches!(tcx.def_kind(def_id), DefKind::Mod)
+            && rustc_resolve::rustdoc::inner_docs(attrs)
+        {
+            def_id
+        } else {
+            tcx.parent_module_from_def_id(def_id).to_local_def_id()
+        };
+        let Some(resolutions) = tcx.resolutions(()).doc_link_resolutions.get(&module) else {
+            continue;
+        };
+        for link in docs.iter().flat_map(|docs| parsed_doc_links(docs)) {
             roots.extend(
-                associated_items
+                resolved_doc_link(tcx, resolutions, &link)
                     .into_iter()
-                    .filter(|item| item.namespace() == namespace && item.name() == item_name)
-                    .map(|item| id(tcx, item.def_id)),
+                    .map(|def_id| id(tcx, def_id)),
             );
         }
     }
     roots
+}
+
+#[derive(Debug)]
+struct ParsedDocLink {
+    path: Box<str>,
+    namespace: Option<Namespace>,
+}
+
+fn parsed_doc_links<'docs>(docs: &'docs str) -> Vec<ParsedDocLink> {
+    use rustc_resolve::rustdoc::pulldown_cmark::{BrokenLink, Event, LinkType, Parser, Tag};
+
+    let mut broken_link_callback = |link: BrokenLink<'docs>| Some((link.reference, "".into()));
+    let mut events = Parser::new_with_broken_link_callback(
+        docs,
+        rustc_resolve::rustdoc::main_body_opts(),
+        Some(&mut broken_link_callback),
+    );
+    let mut links = Vec::new();
+    for event in events.by_ref() {
+        if let Event::Start(Tag::Link {
+            link_type,
+            dest_url,
+            ..
+        }) = event
+            && !matches!(link_type, LinkType::Autolink | LinkType::Email)
+            && let Some(link) = preprocess_doc_link(&dest_url, link_type)
+        {
+            links.push(link);
+        }
+    }
+    links.extend(
+        events
+            .reference_definitions()
+            .iter()
+            .filter_map(|(_, definition)| {
+                preprocess_doc_link(&definition.dest, LinkType::Reference)
+            }),
+    );
+    links
+}
+
+fn preprocess_doc_link(
+    original: &str,
+    link_type: rustc_resolve::rustdoc::pulldown_cmark::LinkType,
+) -> Option<ParsedDocLink> {
+    use rustc_resolve::rustdoc::pulldown_cmark::LinkType;
+
+    let can_be_url = !matches!(
+        link_type,
+        LinkType::ShortcutUnknown | LinkType::CollapsedUnknown | LinkType::ReferenceUnknown
+    );
+    if original.is_empty() || can_be_url && original.contains('/') {
+        return None;
+    }
+
+    let stripped = original.replace('`', "");
+    let mut fragments = stripped.split('#');
+    let link = fragments.next()?.trim();
+    if link.is_empty() || fragments.nth(1).is_some() {
+        return None;
+    }
+    let (namespace, path) = doc_link_namespace(link)?;
+    let path = rustc_resolve::rustdoc::strip_generics_from_path(path.trim()).ok()?;
+    (!path.contains(' ')).then_some(ParsedDocLink { path, namespace })
+}
+
+fn doc_link_namespace(link: &str) -> Option<(Option<Namespace>, &str)> {
+    let suffixes = [
+        ("!()", Namespace::MacroNS),
+        ("!{}", Namespace::MacroNS),
+        ("![]", Namespace::MacroNS),
+        ("()", Namespace::ValueNS),
+        ("!", Namespace::MacroNS),
+    ];
+    if let Some((prefix, rest)) = link.split_once('@') {
+        let namespace = match prefix {
+            "struct" | "enum" | "trait" | "union" | "module" | "mod" | "variant" | "type"
+            | "prim" | "primitive" | "tyalias" | "typealias" => Namespace::TypeNS,
+            "const" | "constant" | "static" | "function" | "fn" | "method" | "field" | "value" => {
+                Namespace::ValueNS
+            }
+            "derive" | "macro" => Namespace::MacroNS,
+            _ => return None,
+        };
+        for (suffix, suffix_namespace) in suffixes {
+            if let Some(path) = rest.strip_suffix(suffix) {
+                return (namespace == suffix_namespace && !path.is_empty())
+                    .then_some((Some(namespace), path));
+            }
+        }
+        return Some((Some(namespace), rest));
+    }
+    for (suffix, namespace) in suffixes {
+        if let Some(path) = link.strip_suffix(suffix)
+            && !path.is_empty()
+        {
+            return Some((Some(namespace), path));
+        }
+    }
+    Some((None, link))
+}
+
+fn resolved_doc_link(
+    tcx: TyCtxt<'_>,
+    resolutions: &hir::def::DocLinkResMap,
+    link: &ParsedDocLink,
+) -> Vec<DefId> {
+    let mut roots = Vec::new();
+    for namespace in [Namespace::TypeNS, Namespace::ValueNS, Namespace::MacroNS] {
+        if link.namespace.is_some_and(|expected| expected != namespace) {
+            continue;
+        }
+        if let Some(def_id) = resolutions
+            .get(&(Symbol::intern(&link.path), namespace))
+            .copied()
+            .flatten()
+            .and_then(|resolution| resolution.opt_def_id())
+        {
+            roots.push(def_id);
+            continue;
+        }
+
+        let Some((path_root, item_name)) = link.path.rsplit_once("::") else {
+            continue;
+        };
+        let root = resolutions
+            .get(&(Symbol::intern(path_root), Namespace::TypeNS))
+            .copied()
+            .flatten();
+        roots.extend(resolve_associated_doc_link(
+            tcx,
+            root,
+            Symbol::intern(item_name),
+            namespace,
+        ));
+    }
+    roots
+}
+
+fn resolve_associated_doc_link(
+    tcx: TyCtxt<'_>,
+    root: Option<Res<ast::NodeId>>,
+    item_name: Symbol,
+    namespace: Namespace,
+) -> Vec<DefId> {
+    let Some(Res::Def(mut root_kind, mut root_id)) = root else {
+        return Vec::new();
+    };
+    if root_kind == DefKind::TyAlias {
+        let Some(adt) = tcx
+            .type_of(root_id)
+            .instantiate_identity()
+            .skip_norm_wip()
+            .ty_adt_def()
+        else {
+            return Vec::new();
+        };
+        root_id = adt.did();
+        root_kind = tcx.def_kind(root_id);
+    }
+
+    let associated_items = match root_kind {
+        DefKind::Struct | DefKind::Union | DefKind::Enum | DefKind::ForeignTy => tcx
+            .inherent_impls(root_id)
+            .iter()
+            .flat_map(|impl_id| tcx.associated_items(*impl_id).in_definition_order())
+            .collect::<Vec<_>>(),
+        DefKind::Trait => tcx
+            .associated_items(root_id)
+            .in_definition_order()
+            .collect(),
+        _ => return Vec::new(),
+    };
+    associated_items
+        .into_iter()
+        .filter(|item| item.namespace() == namespace && item.name() == item_name)
+        .map(|item| item.def_id)
+        .collect()
 }
 
 fn is_public_candidate_with_visibility(
