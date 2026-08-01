@@ -1055,7 +1055,44 @@ fn inlined_reexport_doc_sources(
             }
         }
     }
+
+    let trait_impls = tcx
+        .all_local_trait_impls(())
+        .iter()
+        .filter(|(trait_id, _)| rendered_trait(tcx, **trait_id, &sources))
+        .flat_map(|(_, impl_ids)| impl_ids)
+        .copied()
+        .filter(|impl_id| {
+            tcx.type_of(*impl_id)
+                .instantiate_identity()
+                .skip_norm_wip()
+                .ty_adt_def()
+                .and_then(|adt| adt.did().as_local())
+                .is_some_and(|adt_id| sources.contains(&adt_id))
+        })
+        .collect::<Vec<_>>();
+    for impl_id in trait_impls {
+        extend_inlined_doc_sources(tcx, impl_id, false, &mut sources);
+    }
+
     sources
+}
+
+fn rendered_trait(
+    tcx: TyCtxt<'_>,
+    trait_id: DefId,
+    inlined_doc_sources: &HashSet<LocalDefId>,
+) -> bool {
+    let Some(trait_id) = trait_id.as_local() else {
+        return !tcx.is_doc_hidden(trait_id);
+    };
+    inlined_doc_sources.contains(&trait_id)
+        || !tcx.is_doc_hidden(trait_id)
+            && tcx.effective_visibilities(()).is_exported(trait_id)
+            && !std::iter::successors(tcx.opt_local_parent(trait_id), |def_id| {
+                tcx.opt_local_parent(*def_id)
+            })
+            .any(|def_id| tcx.is_doc_hidden(def_id))
 }
 
 fn extend_inlined_doc_sources(
@@ -1280,14 +1317,17 @@ fn resolve_associated_doc_link(
             ),
             DefKind::Variant => {
                 let adt = tcx.adt_def(tcx.parent(root_id));
-                resolved.extend(
-                    adt.variants()
-                        .iter()
-                        .filter(|variant| variant.def_id == root_id)
-                        .flat_map(|variant| &variant.fields)
-                        .filter(|field| field.name == item_name)
-                        .map(|field| field.did),
-                );
+                if adt
+                    .variants()
+                    .iter()
+                    .filter(|variant| variant.def_id == root_id)
+                    .flat_map(|variant| &variant.fields)
+                    .any(|field| field.name == item_name)
+                {
+                    // Enum variant fields are not independent visibility
+                    // candidates, so preserve their modeled owner instead.
+                    resolved.push(root_id);
+                }
             }
             _ => {}
         }

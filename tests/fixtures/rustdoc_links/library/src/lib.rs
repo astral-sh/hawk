@@ -24,6 +24,12 @@ pub const GLOB_INLINE_REEXPORT_LINKED_CONSTANT: usize = 6;
 
 pub const NO_INLINE_REEXPORT_LINKED_CONSTANT: usize = 7;
 
+pub const TRAIT_IMPL_LINKED_CONSTANT: usize = 8;
+
+pub const PRIVATE_TRAIT_IMPL_LINKED_CONSTANT: usize = 9;
+
+pub const HIDDEN_TRAIT_IMPL_LINKED_CONSTANT: usize = 10;
+
 pub struct AliasTarget;
 
 impl AliasTarget {
@@ -39,6 +45,18 @@ pub type NamespaceCollision = usize;
 #[allow(non_upper_case_globals)]
 pub const NamespaceCollision: usize = 8;
 
+pub trait RenderedTrait {}
+
+trait PrivateTrait {}
+
+#[doc(hidden)]
+pub trait HiddenTrait {}
+
+pub enum DocumentedEnum {
+    Linked { field: usize },
+    Unlinked { field: usize },
+}
+
 /// Links to [`LINKED_CONSTANT`], [`DocumentedType::linked_method`], and
 /// [`field@DocumentedType::linked_field`].
 pub fn documented() {}
@@ -48,6 +66,9 @@ pub fn alias_documented() {}
 
 /// Links to [`type@NamespaceCollision`], but not the value with the same name.
 pub fn namespace_documented() {}
+
+/// Links to [`field@DocumentedEnum::Linked::field`].
+pub fn enum_field_documented() {}
 
 #[doc(hidden)]
 /// Links to [`HIDDEN_LINKED_CONSTANT`].
@@ -60,6 +81,15 @@ fn private_documented() {}
 pub mod hidden_source {
     /// Links to [`crate::INLINE_REEXPORT_LINKED_CONSTANT`].
     pub struct InlinedDocumentedType;
+
+    /// Links to [`crate::TRAIT_IMPL_LINKED_CONSTANT`].
+    impl crate::RenderedTrait for InlinedDocumentedType {}
+
+    /// Links to [`crate::PRIVATE_TRAIT_IMPL_LINKED_CONSTANT`].
+    impl crate::PrivateTrait for InlinedDocumentedType {}
+
+    /// Links to [`crate::HIDDEN_TRAIT_IMPL_LINKED_CONSTANT`].
+    impl crate::HiddenTrait for InlinedDocumentedType {}
 }
 
 #[doc(inline)]

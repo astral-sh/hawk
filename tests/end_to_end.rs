@@ -3357,6 +3357,8 @@ fn exported_rustdoc_links_preserve_public_visibility() {
         "AliasTarget::alias_linked_method",
         "INLINE_REEXPORT_LINKED_CONSTANT",
         "GLOB_INLINE_REEXPORT_LINKED_CONSTANT",
+        "TRAIT_IMPL_LINKED_CONSTANT",
+        "DocumentedEnum",
     ] {
         assert!(
             !stdout.contains(&format!("`{linked}` is public")),
@@ -3371,16 +3373,49 @@ fn exported_rustdoc_links_preserve_public_visibility() {
         "DocumentedType::unlinked_field",
         "AliasTarget::alias_unlinked_method",
         "NO_INLINE_REEXPORT_LINKED_CONSTANT",
+        "PRIVATE_TRAIT_IMPL_LINKED_CONSTANT",
+        "HIDDEN_TRAIT_IMPL_LINKED_CONSTANT",
     ] {
         assert!(
             stdout.contains(&format!("`{unlinked}` is public")),
             "unlinked declaration was not diagnosed:\n{stdout}"
         );
     }
+    assert!(
+        !stdout.contains("`DocumentedEnum::Linked` is a public enum variant"),
+        "linked enum variant was diagnosed:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("`DocumentedEnum::Unlinked` is a public enum variant"),
+        "unlinked enum variant was not diagnosed:\n{stdout}"
+    );
     assert_eq!(
         stdout.matches("`NamespaceCollision` is public").count(),
         1,
         "the type namespace should be preserved without preserving the value namespace:\n{stdout}"
+    );
+
+    let rustdoc = context
+        .cargo()
+        .arg("doc")
+        .arg("--manifest-path")
+        .arg(context.workspace().join("Cargo.toml"))
+        .arg("--package")
+        .arg("library")
+        .arg("--no-deps")
+        .arg("--locked")
+        .arg("--target-dir")
+        .arg(context.target_dir())
+        .env(
+            "RUSTDOCFLAGS",
+            "-D rustdoc::broken_intra_doc_links -D rustdoc::private_intra_doc_links",
+        )
+        .output()
+        .expect("render fixture documentation");
+    assert!(
+        rustdoc.status.success(),
+        "rustdoc failed:\n{}",
+        context.normalized_stderr(&rustdoc)
     );
 }
 
