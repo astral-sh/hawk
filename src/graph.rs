@@ -81,6 +81,8 @@ pub struct Fragment {
     pub roots: Vec<DefinitionId>,
     pub conservative_roots: Vec<DefinitionId>,
     pub required_public_roots: Vec<DefinitionId>,
+    pub conservative_documentation_roots: Vec<DefinitionId>,
+    pub conservative_documentation_crates: Vec<DefinitionId>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1510,6 +1512,8 @@ mod tests {
                 roots: vec![test_id("main")],
                 conservative_roots: vec![],
                 required_public_roots: vec![],
+                conservative_documentation_roots: vec![],
+                conservative_documentation_crates: vec![],
             },
             Fragment {
                 protocol_version: ProtocolVersion,
@@ -1527,6 +1531,8 @@ mod tests {
                 roots: vec![],
                 conservative_roots: vec![],
                 required_public_roots: vec![],
+                conservative_documentation_roots: vec![],
+                conservative_documentation_crates: vec![],
             },
         ]
     }
@@ -1553,6 +1559,8 @@ mod tests {
                 roots: vec![test_id("test_main")],
                 conservative_roots: vec![],
                 required_public_roots: vec![],
+                conservative_documentation_roots: vec![],
+                conservative_documentation_crates: vec![],
             },
             Fragment {
                 protocol_version: ProtocolVersion,
@@ -1570,6 +1578,8 @@ mod tests {
                 roots: vec![],
                 conservative_roots: vec![],
                 required_public_roots: vec![],
+                conservative_documentation_roots: vec![],
+                conservative_documentation_crates: vec![],
             },
         ]
     }
@@ -1696,6 +1706,8 @@ mod tests {
             roots: vec![],
             conservative_roots: vec![],
             required_public_roots: vec![],
+            conservative_documentation_roots: vec![],
+            conservative_documentation_crates: vec![],
         }];
 
         let findings =
@@ -1785,6 +1797,8 @@ mod tests {
                 roots: vec![test_id("consumer_test")],
                 conservative_roots: vec![],
                 required_public_roots: vec![],
+                conservative_documentation_roots: vec![],
+                conservative_documentation_crates: vec![],
             },
             library_dependency,
         ];
@@ -1847,6 +1861,8 @@ mod tests {
                 roots: vec![],
                 conservative_roots: vec![],
                 required_public_roots: vec![],
+                conservative_documentation_roots: vec![],
+                conservative_documentation_crates: vec![],
             },
             Fragment {
                 protocol_version: ProtocolVersion,
@@ -1871,6 +1887,8 @@ mod tests {
                 roots: vec![test_id("consumer_test")],
                 conservative_roots: vec![],
                 required_public_roots: vec![],
+                conservative_documentation_roots: vec![],
+                conservative_documentation_crates: vec![],
             },
             library_dependency,
         ];
@@ -1929,6 +1947,8 @@ mod tests {
                 roots: vec![test_id("example_main")],
                 conservative_roots: vec![],
                 required_public_roots: vec![],
+                conservative_documentation_roots: vec![],
+                conservative_documentation_crates: vec![],
             },
             library_dependency,
         ];
@@ -3184,6 +3204,8 @@ mod tests {
             roots: vec![],
             conservative_roots: vec![],
             required_public_roots: vec![],
+            conservative_documentation_roots: vec![],
+            conservative_documentation_crates: vec![],
         });
         input[0].edges.push(Edge {
             from: test_id("main"),
@@ -3296,6 +3318,8 @@ mod tests {
             roots: vec![],
             conservative_roots: vec![],
             required_public_roots: vec![],
+            conservative_documentation_roots: vec![],
+            conservative_documentation_crates: vec![],
         });
         input[0].edges.push(Edge {
             from: test_id("main"),
@@ -3342,6 +3366,8 @@ mod tests {
             roots: vec![],
             conservative_roots: vec![],
             required_public_roots: vec![],
+            conservative_documentation_roots: vec![],
+            conservative_documentation_crates: vec![],
         });
         input[0].edges.push(Edge {
             from: test_id("main"),
@@ -3398,6 +3424,8 @@ mod tests {
                 roots: vec![test_id("binary_main")],
                 conservative_roots: vec![],
                 required_public_roots: vec![],
+                conservative_documentation_roots: vec![],
+                conservative_documentation_crates: vec![],
             });
 
             let findings = analyze(&input, &HashSet::new());
@@ -3457,6 +3485,8 @@ mod tests {
                 roots: vec![test_id("test")],
                 conservative_roots: vec![],
                 required_public_roots: vec![],
+                conservative_documentation_roots: vec![],
+                conservative_documentation_crates: vec![],
             });
 
             let findings = analyze(&input, &HashSet::new());

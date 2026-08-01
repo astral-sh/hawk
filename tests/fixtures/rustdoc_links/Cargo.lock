@@ -6,8 +6,16 @@ version = 4
 name = "app"
 version = "0.1.0"
 dependencies = [
+ "facade",
  "library",
  "macro-package",
+]
+
+[[package]]
+name = "facade"
+version = "0.1.0"
+dependencies = [
+ "library",
 ]
 
 [[package]]

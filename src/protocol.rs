@@ -9,8 +9,9 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 /// workspace-relative identities in 9, which also made the workspace root a
 /// required environment value; sources outside the workspace stay absolute.
 /// Uniform field group completeness became explicit in 10. Documentation-mode
-/// compilation became part of the frontend-driver contract in 11.
-pub const VERSION: u32 = 11;
+/// compilation became part of the frontend-driver contract in 11. Conservative
+/// source-crate documentation roots were added in 12.
+pub const VERSION: u32 = 12;
 
 pub const VERSION_ARGUMENT: &str = "--hawk-protocol-version";
 
@@ -133,7 +134,7 @@ mod tests {
 
         assert_eq!(
             error.to_string(),
-            "unsupported Hawk protocol version 1; expected 11"
+            "unsupported Hawk protocol version 1; expected 12"
         );
     }
 }

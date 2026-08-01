@@ -1548,14 +1548,26 @@ fn apply_documentation_roots(
     documentation: &[Fragment],
 ) {
     // A link can resolve to a definition in another crate's fragment.
-    let documentation_root_ids = documentation
+    let required_root_ids = documentation
         .iter()
         .flat_map(|fragment| fragment.required_public_roots.iter().copied())
+        .collect::<HashSet<_>>();
+    let conservative_source_crates = documentation
+        .iter()
+        .flat_map(|fragment| fragment.conservative_documentation_crates.iter().copied())
+        .collect::<HashSet<_>>();
+    let conservative_root_ids = documentation
+        .iter()
+        .filter(|fragment| conservative_source_crates.contains(&fragment.crate_id))
+        .flat_map(|fragment| fragment.conservative_documentation_roots.iter().copied())
         .collect::<HashSet<_>>();
     let rooted_definitions = documentation
         .iter()
         .flat_map(|fragment| fragment.definitions.iter())
-        .filter(|definition| documentation_root_ids.contains(&definition.id))
+        .filter(|definition| {
+            required_root_ids.contains(&definition.id)
+                || conservative_root_ids.contains(&definition.id)
+        })
         .map(|definition| {
             DefinitionIdentity::new(
                 &definition.crate_name,
@@ -1565,7 +1577,6 @@ fn apply_documentation_roots(
             )
         })
         .collect::<HashSet<_>>();
-
     for fragment in production.iter_mut().chain(non_production) {
         fragment.required_public_roots.extend(
             fragment
@@ -2282,8 +2293,9 @@ mod tests {
     use super::{
         Args, CargoInvocation, DEFAULT_TARGET_DIR_COMPONENT_MAX_BYTES, DiagnosticRenderer,
         LintLevel, LintLevels, ProductionProduct, ProductionSelection, WorkspaceLibrarySource,
-        classify_non_production_target, default_target_dir, definition_packages,
-        fix_plan_signature, json_definition_kind, json_finding_kind, validate_excluded_crates,
+        apply_documentation_roots, classify_non_production_target, default_target_dir,
+        definition_packages, fix_plan_signature, json_definition_kind, json_finding_kind,
+        validate_excluded_crates,
     };
 
     fn render_diagnostic(finding: &Finding<'_>) -> String {
@@ -2443,6 +2455,62 @@ mod tests {
     }
 
     #[test]
+    fn foreign_inline_roots_only_documentation_targets_from_the_source_crate() {
+        let definition = |id: &str| Definition {
+            id: test_id(id),
+            crate_name: "support".into(),
+            name: id.into(),
+            kind: DefinitionKind::Constant,
+            span: None,
+            declaration_span: None,
+            expansion_span: None,
+            public_api: true,
+            restricted_visible_api: false,
+            crate_visible_api: false,
+            visible_reexport_api: false,
+            module_scope: vec![],
+            uniform_field_group: None,
+            dead_code_allowed: false,
+        };
+        let fragment = |crate_name: &str, crate_id: DefinitionId| Fragment {
+            protocol_version: crate::protocol::ProtocolVersion,
+            package_name: crate_name.into(),
+            crate_name: crate_name.into(),
+            compilation_target: "aarch64-apple-darwin".into(),
+            crate_id,
+            crate_root: None,
+            is_product_root: false,
+            product_root_kind: None,
+            test_surface: false,
+            non_production_consumer: false,
+            definitions: vec![],
+            edges: vec![],
+            roots: vec![],
+            conservative_roots: vec![],
+            required_public_roots: vec![],
+            conservative_documentation_roots: vec![],
+            conservative_documentation_crates: vec![],
+        };
+        let support_crate = test_id("support-crate");
+        let linked = definition("linked");
+        let unlinked = definition("unlinked");
+        let mut production = fragment("support", support_crate);
+        production.definitions = vec![linked.clone(), unlinked];
+        let mut support_docs = production.clone();
+        support_docs.conservative_documentation_roots = vec![linked.id];
+        let mut facade_docs = fragment("facade", test_id("facade-crate"));
+        facade_docs.conservative_documentation_crates = vec![support_crate];
+
+        apply_documentation_roots(
+            std::slice::from_mut(&mut production),
+            &mut [],
+            &[support_docs, facade_docs],
+        );
+
+        assert_eq!(production.required_public_roots, [linked.id]);
+    }
+
+    #[test]
     fn definition_packages_only_indexes_emitted_findings() {
         let definition = |id: &str, name: &str| Definition {
             id: test_id(id),
@@ -2476,6 +2544,8 @@ mod tests {
             roots: vec![],
             conservative_roots: vec![],
             required_public_roots: vec![],
+            conservative_documentation_roots: vec![],
+            conservative_documentation_crates: vec![],
         };
         let production = vec![fragment(
             "library-package",
@@ -2561,6 +2631,8 @@ mod tests {
             roots: vec![],
             conservative_roots: vec![],
             required_public_roots: vec![],
+            conservative_documentation_roots: vec![],
+            conservative_documentation_crates: vec![],
         };
 
         let mut library = fragment("consumer/src/lib.rs");

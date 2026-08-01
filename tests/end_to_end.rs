@@ -3367,6 +3367,7 @@ fn rustdoc_links_preserve_public_visibility() {
         "CROSS_CRATE_CFG_DOC_LINKED_CONSTANT",
         "PRIVATE_BINARY_DOC_LINKED_CONSTANT",
         "PROC_MACRO_CFG_DOC_LINKED_CONSTANT",
+        "FOREIGN_INLINE_LINKED_CONSTANT",
         "DocumentedEnum",
     ] {
         assert!(
@@ -3377,23 +3378,32 @@ fn rustdoc_links_preserve_public_visibility() {
     for unlinked in [
         "UNLINKED_CONSTANT",
         "PRIVATE_LINKED_CONSTANT",
-        "HIDDEN_LINKED_CONSTANT",
+        "SHADOWED_EXTERNAL_LINK",
         "DocumentedType::unlinked_method",
         "DocumentedType::unlinked_field",
         "AliasTarget::alias_unlinked_method",
-        "NO_INLINE_REEXPORT_LINKED_CONSTANT",
         "PRIVATE_TRAIT_IMPL_LINKED_CONSTANT",
-        "HIDDEN_TRAIT_IMPL_LINKED_CONSTANT",
         "UNUSED_REFERENCE_DEFINITION",
-        "HIDDEN_VARIANT_FIELD_LINKED_CONSTANT",
-        "HIDDEN_NESTED_REEXPORT_LINKED_CONSTANT",
         "PRIVATE_INLINE_TRAIT_IMPL_LINKED_CONSTANT",
-        "PRIVATE_REFERENCE_INLINE_TRAIT_IMPL_LINKED_CONSTANT",
         "PRIVATE_DYNAMIC_INLINE_TRAIT_IMPL_LINKED_CONSTANT",
     ] {
         assert!(
             stdout.contains(&format!("`{unlinked}` is public")),
             "unlinked declaration was not diagnosed:\n{stdout}"
+        );
+    }
+    for conservatively_linked in [
+        "HIDDEN_LINKED_CONSTANT",
+        "NO_INLINE_REEXPORT_LINKED_CONSTANT",
+        "HIDDEN_TRAIT_IMPL_LINKED_CONSTANT",
+        "HIDDEN_VARIANT_FIELD_LINKED_CONSTANT",
+        "HIDDEN_NESTED_REEXPORT_LINKED_CONSTANT",
+        "PRIVATE_REFERENCE_INLINE_TRAIT_IMPL_LINKED_CONSTANT",
+        "PRIVATE_MODULE_NO_INLINE_LINKED_CONSTANT",
+    ] {
+        assert!(
+            !stdout.contains(&format!("`{conservatively_linked}` is public")),
+            "declaration linked from an ambiguous source was diagnosed:\n{stdout}"
         );
     }
     assert!(
@@ -3413,7 +3423,11 @@ fn rustdoc_links_preserve_public_visibility() {
         !stdout.contains("cfg_doc_documented"),
         "documentation-only definitions must not become candidates:\n{stdout}"
     );
-    for reexport in ["DirectDocumentedReexport", "AssociatedDocumentedReexport"] {
+    for reexport in [
+        "DirectDocumentedReexport",
+        "ConservativeDocumentedReexport",
+        "AssociatedDocumentedReexport",
+    ] {
         assert!(
             !stdout.contains(&format!("public re-export `{reexport}`")),
             "re-export named by documentation was diagnosed:\n{stdout}"

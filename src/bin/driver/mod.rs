@@ -956,7 +956,9 @@ fn collect_fragment(
     );
     let documentation_roots =
         doc_link_visibility_roots(tcx, &public_reexports, document_private_items);
-    let documentation_root_ids: HashSet<_> = documentation_roots.iter().copied().collect();
+    let conservative_documentation_crates =
+        explicitly_inlined_foreign_crates(tcx, &public_reexports);
+    let documentation_root_ids: HashSet<_> = documentation_roots.required.iter().copied().collect();
     // A resolved link names a public re-export path even though rustc records
     // the target declaration. Keep the alias when that target is linked.
     required_public_roots.extend(
@@ -969,7 +971,7 @@ fn collect_fragment(
             })
             .map(|edge| edge.from),
     );
-    required_public_roots.extend(documentation_roots);
+    required_public_roots.extend(documentation_roots.required);
     if is_proc_macro_crate {
         // Public exports from a proc-macro crate can only be macro entry points.
         required_public_roots.extend(
@@ -1044,21 +1046,29 @@ fn collect_fragment(
         roots,
         conservative_roots,
         required_public_roots,
+        conservative_documentation_roots: documentation_roots.conservative,
+        conservative_documentation_crates,
     }
 }
 
-/// Returns declarations linked from rendered documentation.
+struct DocumentationRoots {
+    required: Vec<DefinitionId>,
+    conservative: Vec<DefinitionId>,
+}
+
+/// Returns declarations linked from rendered or potentially inlined documentation.
 ///
 /// Rustc's resolution cache contains every namespace and path prefix that it
-/// tried while resolving documentation. Pair those resolutions with the links
-/// parsed from each rendered item's documentation so only the rendered target
-/// becomes a visibility root.
+/// tried while resolving documentation. Pair those resolutions with parsed
+/// links, retaining both the roots known to be rendered locally and a
+/// conservative set that can be activated by a foreign inline re-export.
 fn doc_link_visibility_roots(
     tcx: TyCtxt<'_>,
     public_reexports: &[LocalDefId],
     document_private_items: bool,
-) -> Vec<DefinitionId> {
-    let mut roots = Vec::new();
+) -> DocumentationRoots {
+    let mut required = Vec::new();
+    let mut conservative = Vec::new();
     let effective_visibilities = tcx.effective_visibilities(());
     let inlined_reexport_doc_sources = inlined_reexport_doc_sources(tcx, public_reexports);
     for def_id in tcx.iter_local_def_id() {
@@ -1068,12 +1078,9 @@ fn doc_link_visibility_roots(
         {
             continue;
         }
-        if std::iter::successors(Some(def_id), |def_id| tcx.opt_local_parent(*def_id))
+        let rendered = !std::iter::successors(Some(def_id), |def_id| tcx.opt_local_parent(*def_id))
             .any(|def_id| tcx.is_doc_hidden(def_id))
-            && !inlined_reexport_doc_sources.contains(&def_id)
-        {
-            continue;
-        }
+            || inlined_reexport_doc_sources.contains(&def_id);
 
         let attrs = tcx.hir_attrs(tcx.local_def_id_to_hir_id(def_id));
         let (doc_fragments, other_attrs) = rustc_resolve::rustdoc::attrs_to_doc_fragments(
@@ -1105,14 +1112,22 @@ fn doc_link_visibility_roots(
             continue;
         };
         for link in docs.iter().flat_map(|docs| parsed_doc_links(docs)) {
-            roots.extend(
-                resolved_doc_link(tcx, resolutions, &link)
-                    .into_iter()
-                    .map(|def_id| id(tcx, def_id)),
-            );
+            let link_roots = resolved_doc_link(tcx, resolutions, &link)
+                .into_iter()
+                .map(|def_id| id(tcx, def_id))
+                .collect::<Vec<_>>();
+            if rendered {
+                required.extend(link_roots.iter().copied());
+            }
+            conservative.extend(link_roots);
         }
     }
-    roots
+    conservative.sort_unstable();
+    conservative.dedup();
+    DocumentationRoots {
+        required,
+        conservative,
+    }
 }
 
 fn inlined_reexport_doc_sources(
@@ -1155,6 +1170,52 @@ fn inlined_reexport_doc_sources(
     sources
 }
 
+/// Returns workspace crates whose documentation links may need to be preserved
+/// because Rustdoc can copy documentation from them into this crate.
+///
+/// Rustc does not retain resolved documentation links for foreign items in the
+/// re-exporting crate. Preserve the source crate's potential documentation
+/// roots instead of reconstructing Rustdoc's cross-crate rendering behavior.
+fn explicitly_inlined_foreign_crates(
+    tcx: TyCtxt<'_>,
+    public_reexports: &[LocalDefId],
+) -> Vec<DefinitionId> {
+    let mut crates = public_reexports
+        .iter()
+        .copied()
+        .filter(|def_id| doc_inline(tcx, *def_id) == Some(DocInline::Inline))
+        .filter_map(|def_id| {
+            let Node::Item(hir::Item {
+                kind: hir::ItemKind::Use(path, _),
+                ..
+            }) = tcx.hir_node_by_def_id(def_id)
+            else {
+                return None;
+            };
+            Some(path)
+        })
+        .flat_map(|path| path.res.present_items())
+        .filter_map(|resolution| {
+            let target = resolution.opt_def_id()?;
+            (!target.is_local()).then(|| id(tcx, target.krate.as_def_id()))
+        })
+        .collect::<Vec<_>>();
+    crates.sort_unstable();
+    crates.dedup();
+    crates
+}
+
+fn doc_inline(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Option<DocInline> {
+    tcx.hir_attrs(tcx.local_def_id_to_hir_id(def_id))
+        .iter()
+        .find_map(|attribute| {
+            let hir::Attribute::Parsed(AttributeKind::Doc(documentation)) = attribute else {
+                return None;
+            };
+            documentation.inline.first().map(|(inline, _)| *inline)
+        })
+}
+
 fn extend_inlined_reexport_doc_sources(
     tcx: TyCtxt<'_>,
     def_id: LocalDefId,
@@ -1163,13 +1224,7 @@ fn extend_inlined_reexport_doc_sources(
     if tcx.is_doc_hidden(def_id) {
         return;
     }
-    let attrs = tcx.hir_attrs(tcx.local_def_id_to_hir_id(def_id));
-    let inline = attrs.iter().find_map(|attribute| {
-        let hir::Attribute::Parsed(AttributeKind::Doc(documentation)) = attribute else {
-            return None;
-        };
-        documentation.inline.first().map(|(inline, _)| *inline)
-    });
+    let inline = doc_inline(tcx, def_id);
     if inline == Some(DocInline::NoInline) {
         return;
     }
@@ -1434,7 +1489,12 @@ fn resolved_doc_link(
             namespace,
         ));
     }
-    roots.extend(resolve_external_doc_link(tcx, link));
+    // Proc-macro documentation can refer to crates that rustc exposes only
+    // through loaded metadata. For ordinary crates, the lexical resolution
+    // above must stay authoritative so a local module can shadow a dependency.
+    if tcx.crate_types().contains(&CrateType::ProcMacro) {
+        roots.extend(resolve_external_doc_link(tcx, link));
+    }
     roots
 }
 
@@ -2348,7 +2408,7 @@ mod tests {
 
         assert_eq!(
             error.to_string(),
-            "Hawk frontend uses compiler driver protocol 1, but this driver uses protocol 11; install `cargo-hawk` and `cargo-hawk-driver` from the same release"
+            "Hawk frontend uses compiler driver protocol 1, but this driver uses protocol 12; install `cargo-hawk` and `cargo-hawk-driver` from the same release"
         );
     }
 
@@ -2370,6 +2430,8 @@ mod tests {
             roots: vec![],
             conservative_roots: vec![],
             required_public_roots: vec![],
+            conservative_documentation_roots: vec![],
+            conservative_documentation_crates: vec![],
         };
 
         let error = write_fragment(FailingWriter, &fragment, Path::new("fragment.json"))

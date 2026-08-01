@@ -20,7 +20,7 @@ The analysis includes:
 - production reachability from binary entry points and workspace library uses;
 - test reachability and visibility requirements from workspace
   non-production targets, including doctests;
-- public visibility requirements from resolved intra-doc links in exported
+- public visibility requirements from resolved intra-doc links in rendered
   documentation.
 
 When `hawk.toml` exists, every shipped binary or audited library must be listed

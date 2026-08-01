@@ -271,7 +271,7 @@ Separately, Hawk computes the declarations whose public visibility is
 required. Any compiled cross-crate reference requires the referenced
 declaration to retain visibility, regardless of whether the referencing item
 is reachable from a selected root: rustc privacy-checks compiled code, not
-only production runtime code. Resolved intra-doc links from exported
+only production runtime code. Resolved intra-doc links from rendered
 documentation also require their targets to remain public so the documented
 links remain part of the public interface. Hawk collects these roots from both
 ordinary builds and a separate `cfg(doc)` build, then maps the latter back to
@@ -351,6 +351,10 @@ boundaries:
   are constrained by rustc.
 - Resolved paths and associated items linked from rendered documentation,
   including Cargo's private binary documentation, are required public.
+- An explicit cross-crate `#[doc(inline)]` preserves every resolved link target
+  from potentially rendered documentation in the source crate. Rustc does not
+  retain enough foreign rendering provenance to select only the copied item, so
+  Hawk can retain extra visibility rather than risk degrading rendered links.
 - Derive-expanded field interfaces preserve matching source-field visibility
   where generated exposure cannot otherwise be proven from HIR.
 

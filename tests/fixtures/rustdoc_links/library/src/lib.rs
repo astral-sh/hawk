@@ -60,6 +60,24 @@ pub const PRIVATE_BINARY_DOC_LINKED_CONSTANT: usize = 24;
 
 pub const PROC_MACRO_CFG_DOC_LINKED_CONSTANT: usize = 25;
 
+pub const FOREIGN_INLINE_LINKED_CONSTANT: usize = 26;
+
+pub const SHADOWED_EXTERNAL_LINK: usize = 27;
+
+pub const PRIVATE_MODULE_NO_INLINE_LINKED_CONSTANT: usize = 28;
+
+pub fn foreign_inline_linked_constant() -> usize {
+    FOREIGN_INLINE_LINKED_CONSTANT
+}
+
+pub fn shadowed_external_link() -> usize {
+    SHADOWED_EXTERNAL_LINK
+}
+
+pub fn private_module_no_inline_linked_constant() -> usize {
+    PRIVATE_MODULE_NO_INLINE_LINKED_CONSTANT
+}
+
 pub fn cross_crate_cfg_doc_linked_constant() -> usize {
     CROSS_CRATE_CFG_DOC_LINKED_CONSTANT
 }
@@ -72,6 +90,10 @@ pub fn proc_macro_cfg_doc_linked_constant() -> usize {
     PROC_MACRO_CFG_DOC_LINKED_CONSTANT
 }
 
+#[doc(hidden)]
+/// Links to [`crate::FOREIGN_INLINE_LINKED_CONSTANT`].
+pub struct ForeignInlinedDocumented;
+
 mod documented_reexport_source {
     pub struct DirectTarget;
 
@@ -83,6 +105,7 @@ mod documented_reexport_source {
 }
 
 pub use documented_reexport_source::DirectTarget as DirectDocumentedReexport;
+pub use documented_reexport_source::DirectTarget as ConservativeDocumentedReexport;
 pub use documented_reexport_source::AssociatedTarget as AssociatedDocumentedReexport;
 
 pub fn use_documented_reexports() {
@@ -276,3 +299,11 @@ pub mod no_inline_source {
 
 #[doc(no_inline)]
 pub use no_inline_source::NotInlinedDocumentedType;
+
+mod private_no_inline_source {
+    /// Links to [`crate::PRIVATE_MODULE_NO_INLINE_LINKED_CONSTANT`].
+    pub struct PrivateNotInlinedDocumentedType;
+}
+
+#[doc(no_inline)]
+pub use private_no_inline_source::PrivateNotInlinedDocumentedType;
