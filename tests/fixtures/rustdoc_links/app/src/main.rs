@@ -22,8 +22,11 @@ fn main() {
         library::cross_crate_cfg_doc_linked_constant(),
         library::private_binary_doc_linked_constant(),
         library::proc_macro_cfg_doc_linked_constant(),
+        library::SelfLinkedType,
+        library::QualifiedLinkedType,
     );
     let _ = facade::ForeignInlinedDocumented;
+    let _ = std::mem::size_of::<library::SelfLinkedEnum>();
     facade::cross_crate_reexport_documented();
     facade::docs::shadowed_documentation();
     library::use_documented_reexports();

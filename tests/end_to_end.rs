@@ -2033,13 +2033,21 @@ fn production_products_reuse_shared_dependency_compilations() {
 
     context.assert_success(&output);
     let stderr = context.normalized_stderr(&output);
-    assert_eq!(
+    let compilation_count = |action: &str| {
         stderr
             .lines()
-            .filter(|line| line.trim_start().starts_with("Checking library "))
-            .count(),
-        3,
-        "the shared library should compile once per production, non-production, and documentation mode:\n{stderr}"
+            .filter(|line| line.trim_start().starts_with(&format!("{action} library ")))
+            .count()
+    };
+    assert_eq!(
+        compilation_count("Checking"),
+        2,
+        "the shared library should compile once in each ordinary mode:\n{stderr}"
+    );
+    assert_eq!(
+        compilation_count("Compiling"),
+        2,
+        "documentation targets should share one ordinary dependency artifact and compile one cfg(doc) root:\n{stderr}"
     );
 }
 
@@ -3354,6 +3362,8 @@ fn rustdoc_links_preserve_public_visibility() {
         "LINKED_CONSTANT",
         "DocumentedType::linked_method",
         "DocumentedType::linked_field",
+        "SelfLinkedType::linked_method",
+        "QualifiedLinkedType::linked_method",
         "AliasTarget::alias_linked_method",
         "INLINE_REEXPORT_LINKED_CONSTANT",
         "GLOB_INLINE_REEXPORT_LINKED_CONSTANT",
@@ -3413,7 +3423,15 @@ fn rustdoc_links_preserve_public_visibility() {
         "linked enum variant was diagnosed:\n{stdout}"
     );
     assert!(
+        !stdout.contains("`SelfLinkedEnum::Linked` is a public enum variant"),
+        "Self-linked enum variant was diagnosed:\n{stdout}"
+    );
+    assert!(
         stdout.contains("`DocumentedEnum::Unlinked` is a public enum variant"),
+        "unlinked enum variant was not diagnosed:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("`SelfLinkedEnum::Unlinked` is a public enum variant"),
         "unlinked enum variant was not diagnosed:\n{stdout}"
     );
     assert_eq!(

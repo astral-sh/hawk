@@ -441,7 +441,6 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
     let workspace_crates = workspace_library_crates(&metadata, audited_library_crates.as_ref())?;
     validate_excluded_crates(&args.excluded_crates, &workspace_crates)?;
     let candidate_crates = audited_library_crates.unwrap_or(workspace_crates);
-    let documentation_targets = documentation_targets(&metadata);
     let doctest_packages = config
         .doctest_packages()
         .map(|packages| {
@@ -547,6 +546,7 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
             production_dir,
             non_production_dir,
             documentation_dir,
+            documentation_targets: documentation_targets(&resolved_metadata),
             production_consumer_packages: production_workspace_packages(
                 &resolved_metadata,
                 &production_products,
@@ -576,7 +576,6 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
             CollectionOptions::new(config.preserve_uniform_field_visibility())
         },
         doctest_packages: doctest_packages.as_deref(),
-        documentation_targets: &documentation_targets,
         workspace_library_sources,
         workspace_library_source_paths,
     };
@@ -1037,7 +1036,6 @@ struct InstrumentedCargo<'a> {
     toolchain: &'a RustToolchain,
     collection_options: CollectionOptions,
     doctest_packages: Option<&'a [String]>,
-    documentation_targets: &'a [DocumentationTarget],
     workspace_library_sources: HashMap<String, WorkspaceLibrarySource>,
     workspace_library_source_paths: HashSet<PathBuf>,
 }
@@ -1064,6 +1062,7 @@ enum DocumentationTargetKind {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct DocumentationTarget {
     package_name: String,
+    target_name: String,
     crate_name: String,
     kind: DocumentationTargetKind,
 }
@@ -1074,6 +1073,7 @@ struct FeatureProfileGraph<'a> {
     production_dir: PathBuf,
     non_production_dir: PathBuf,
     documentation_dir: PathBuf,
+    documentation_targets: Vec<DocumentationTarget>,
     production_consumer_packages: HashSet<String>,
 }
 
@@ -1084,8 +1084,7 @@ enum CargoInvocation<'a> {
     CheckDoctests {
         packages: Option<&'a [String]>,
     },
-    CheckDocumentation,
-    CheckProcMacroDocumentation(&'a DocumentationTarget),
+    CheckDocumentation(&'a DocumentationTarget),
     FixProduction {
         plan: &'a Path,
         packages: &'a [String],
@@ -1106,22 +1105,21 @@ struct CargoInvocationSpec<'a> {
     fix: Option<FixOptions<'a>>,
     doctests: bool,
     documentation: DocumentationMode<'a>,
+    rustc_arguments: Vec<OsString>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum DocumentationMode<'a> {
     None,
-    Targets,
-    ProcMacro(&'a DocumentationTarget),
+    Target(&'a DocumentationTarget),
 }
 
 impl DocumentationMode<'_> {
     fn env_value(self) -> Option<String> {
         match self {
             Self::None => None,
-            Self::Targets => Some("targets".to_owned()),
-            Self::ProcMacro(target) => Some(format!(
-                "proc-macro:{}:{}",
+            Self::Target(target) => Some(format!(
+                "target:{}:{}",
                 target.package_name, target.crate_name
             )),
         }
@@ -1276,6 +1274,7 @@ impl<'a> CargoInvocation<'a> {
                 fix: None,
                 doctests: false,
                 documentation: DocumentationMode::None,
+                rustc_arguments: Vec::new(),
             },
             Self::CheckNonProduction => CargoInvocationSpec {
                 subcommand: "check",
@@ -1285,6 +1284,7 @@ impl<'a> CargoInvocation<'a> {
                 fix: None,
                 doctests: false,
                 documentation: DocumentationMode::None,
+                rustc_arguments: Vec::new(),
             },
             Self::CheckDoctests { packages } => CargoInvocationSpec {
                 subcommand: "test",
@@ -1297,28 +1297,27 @@ impl<'a> CargoInvocation<'a> {
                 fix: None,
                 doctests: true,
                 documentation: DocumentationMode::None,
+                rustc_arguments: Vec::new(),
             },
-            Self::CheckDocumentation => CargoInvocationSpec {
-                subcommand: "check",
-                selection_arguments: vec!["--workspace".into(), "--lib".into(), "--bins".into()],
-                consumer_mode: protocol::ConsumerMode::Production,
-                root_crate: String::new(),
-                fix: None,
-                doctests: false,
-                documentation: DocumentationMode::Targets,
-            },
-            Self::CheckProcMacroDocumentation(target) => CargoInvocationSpec {
-                subcommand: "check",
-                selection_arguments: vec![
-                    "--package".into(),
-                    target.package_name.as_str().into(),
-                    "--lib".into(),
-                ],
+            Self::CheckDocumentation(target) => CargoInvocationSpec {
+                subcommand: "rustc",
+                selection_arguments: ["--package".into(), target.package_name.as_str().into()]
+                    .into_iter()
+                    .chain(match target.kind {
+                        DocumentationTargetKind::Library | DocumentationTargetKind::ProcMacro => {
+                            vec!["--lib".into()]
+                        }
+                        DocumentationTargetKind::Binary => {
+                            vec!["--bin".into(), target.target_name.as_str().into()]
+                        }
+                    })
+                    .collect(),
                 consumer_mode: protocol::ConsumerMode::Production,
                 root_crate: target.crate_name.clone(),
                 fix: None,
                 doctests: false,
-                documentation: DocumentationMode::ProcMacro(target),
+                documentation: DocumentationMode::Target(target),
+                rustc_arguments: vec!["--cfg".into(), "doc".into()],
             },
             Self::FixProduction {
                 plan,
@@ -1332,6 +1331,7 @@ impl<'a> CargoInvocation<'a> {
                 fix: Some(FixOptions { plan, allow_dirty }),
                 doctests: false,
                 documentation: DocumentationMode::None,
+                rustc_arguments: Vec::new(),
             },
             Self::FixNonProduction {
                 plan,
@@ -1345,6 +1345,7 @@ impl<'a> CargoInvocation<'a> {
                 fix: Some(FixOptions { plan, allow_dirty }),
                 doctests: false,
                 documentation: DocumentationMode::None,
+                rustc_arguments: Vec::new(),
             },
         }
     }
@@ -1376,6 +1377,7 @@ impl InstrumentedCargo<'_> {
             fix,
             doctests,
             documentation,
+            rustc_arguments,
         } = invocation.specification();
         let mut command = Command::new("cargo");
         clear_protocol_environment(&mut command);
@@ -1395,6 +1397,9 @@ impl InstrumentedCargo<'_> {
         command
             .arg("--target")
             .arg(self.args.target.as_deref().unwrap_or(self.toolchain.host()));
+        if !rustc_arguments.is_empty() {
+            command.arg("--").args(rustc_arguments);
+        }
         if let Some(fix) = fix {
             if self.args.allow_dirty || fix.allow_dirty {
                 command.arg("--allow-dirty");
@@ -1506,6 +1511,7 @@ impl InstrumentedCargo<'_> {
         non_production_graph_dir: &Path,
         documentation_graph_dir: &Path,
         feature_profile: &FeatureProfile,
+        documentation_targets: &[DocumentationTarget],
         production_consumer_packages: &HashSet<String>,
     ) -> Result<CollectedFragments> {
         // Every production product uses the same compiler mode and feature set. Reuse one
@@ -1534,22 +1540,12 @@ impl InstrumentedCargo<'_> {
             },
             feature_profile,
         )?;
-        self.run(
-            &format!("{run_id}-documentation"),
-            documentation_graph_dir,
-            CargoInvocation::CheckDocumentation,
-            feature_profile,
-        )?;
-        for (index, target) in self
-            .documentation_targets
-            .iter()
-            .filter(|target| target.kind == DocumentationTargetKind::ProcMacro)
-            .enumerate()
-        {
+        let documentation_run_id = format!("{run_id}-documentation");
+        for target in documentation_targets {
             self.run(
-                &format!("{run_id}-documentation-proc-macro-{index}"),
+                &documentation_run_id,
                 documentation_graph_dir,
-                CargoInvocation::CheckProcMacroDocumentation(target),
+                CargoInvocation::CheckDocumentation(target),
                 feature_profile,
             )?;
         }
@@ -1561,7 +1557,7 @@ impl InstrumentedCargo<'_> {
             &mut production,
             &mut non_production,
             &documentation,
-            self.documentation_targets,
+            documentation_targets,
         );
         for fragment in &mut non_production {
             classify_non_production_target(
@@ -1776,6 +1772,7 @@ fn collect_profile_fragments(
         &profile_graph.non_production_dir,
         &profile_graph.documentation_dir,
         profile_graph.feature_profile,
+        &profile_graph.documentation_targets,
         &profile_graph.production_consumer_packages,
     )?;
     if !production_fragments
@@ -2019,12 +2016,24 @@ fn is_library_target(target: &Target) -> bool {
 fn documentation_targets(metadata: &cargo_metadata::Metadata) -> Vec<DocumentationTarget> {
     let mut targets = Vec::new();
     for package in metadata.workspace_packages() {
+        let enabled_features = metadata
+            .resolve
+            .as_ref()
+            .and_then(|resolve| resolve.nodes.iter().find(|node| node.id == package.id))
+            .map(|node| node.features.as_slice())
+            .unwrap_or_default();
         let library_name = package.targets.iter().find_map(|target| {
             (is_library_target(target) || target.kind.contains(&TargetKind::ProcMacro))
                 .then_some(target.name.as_str())
         });
         targets.extend(package.targets.iter().filter_map(|target| {
-            if !target.doc {
+            if !target.doc
+                || !target.required_features.iter().all(|feature| {
+                    enabled_features
+                        .iter()
+                        .any(|enabled| enabled.as_ref() == feature)
+                })
+            {
                 return None;
             }
             let kind = if target.kind.contains(&TargetKind::ProcMacro) {
@@ -2040,6 +2049,7 @@ fn documentation_targets(metadata: &cargo_metadata::Metadata) -> Vec<Documentati
             };
             Some(DocumentationTarget {
                 package_name: package.name.to_string(),
+                target_name: target.name.clone(),
                 crate_name: target.name.replace('-', "_"),
                 kind,
             })
@@ -2451,6 +2461,7 @@ mod tests {
         fix: Option<(&Path, bool)>,
         doctests: bool,
         documentation: DocumentationMode<'_>,
+        rustc_arguments: &[&str],
     ) {
         let specification = invocation.specification();
         assert_eq!(specification.subcommand, subcommand);
@@ -2469,6 +2480,13 @@ mod tests {
         );
         assert_eq!(specification.doctests, doctests);
         assert_eq!(specification.documentation, documentation);
+        assert_eq!(
+            specification.rustc_arguments,
+            rustc_arguments
+                .iter()
+                .map(|argument| OsString::from(*argument))
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -2647,6 +2665,7 @@ mod tests {
         facade_docs.conservative_documentation_crates = vec![support_crate];
         let documentation_targets = [DocumentationTarget {
             package_name: "facade".into(),
+            target_name: "facade".into(),
             crate_name: "facade".into(),
             kind: DocumentationTargetKind::Library,
         }];
@@ -2918,8 +2937,21 @@ mod tests {
         let fix_plan = Path::new("fix-plan.json");
         let binary = ProductionProduct::Binary("app-cli".to_owned());
         let library = ProductionProduct::Library("public-api".to_owned());
+        let library_docs = DocumentationTarget {
+            package_name: "api-package".into(),
+            target_name: "public-api".into(),
+            crate_name: "public_api".into(),
+            kind: DocumentationTargetKind::Library,
+        };
+        let binary_docs = DocumentationTarget {
+            package_name: "app-package".into(),
+            target_name: "app-cli".into(),
+            crate_name: "app_cli".into(),
+            kind: DocumentationTargetKind::Binary,
+        };
         let proc_macro = DocumentationTarget {
             package_name: "macro-package".into(),
+            target_name: "macro-package".into(),
             crate_name: "macro_package".into(),
             kind: DocumentationTargetKind::ProcMacro,
         };
@@ -2936,6 +2968,7 @@ mod tests {
             None,
             false,
             DocumentationMode::None,
+            &[],
         );
         assert_cargo_invocation(
             CargoInvocation::CheckProduction(ProductionSelection {
@@ -2949,6 +2982,7 @@ mod tests {
             None,
             false,
             DocumentationMode::None,
+            &[],
         );
         assert_cargo_invocation(
             CargoInvocation::CheckNonProduction,
@@ -2959,6 +2993,7 @@ mod tests {
             None,
             false,
             DocumentationMode::None,
+            &[],
         );
         assert_cargo_invocation(
             CargoInvocation::CheckDoctests { packages: None },
@@ -2969,6 +3004,7 @@ mod tests {
             None,
             true,
             DocumentationMode::None,
+            &[],
         );
         assert_cargo_invocation(
             CargoInvocation::CheckDoctests {
@@ -2981,26 +3017,40 @@ mod tests {
             None,
             true,
             DocumentationMode::None,
+            &[],
         );
         assert_cargo_invocation(
-            CargoInvocation::CheckDocumentation,
-            "check",
-            &["--workspace", "--lib", "--bins"],
+            CargoInvocation::CheckDocumentation(&library_docs),
+            "rustc",
+            &["--package", "api-package", "--lib"],
             ConsumerMode::Production,
-            "",
+            "public_api",
             None,
             false,
-            DocumentationMode::Targets,
+            DocumentationMode::Target(&library_docs),
+            &["--cfg", "doc"],
         );
         assert_cargo_invocation(
-            CargoInvocation::CheckProcMacroDocumentation(&proc_macro),
-            "check",
+            CargoInvocation::CheckDocumentation(&binary_docs),
+            "rustc",
+            &["--package", "app-package", "--bin", "app-cli"],
+            ConsumerMode::Production,
+            "app_cli",
+            None,
+            false,
+            DocumentationMode::Target(&binary_docs),
+            &["--cfg", "doc"],
+        );
+        assert_cargo_invocation(
+            CargoInvocation::CheckDocumentation(&proc_macro),
+            "rustc",
             &["--package", "macro-package", "--lib"],
             ConsumerMode::Production,
             "macro_package",
             None,
             false,
-            DocumentationMode::ProcMacro(&proc_macro),
+            DocumentationMode::Target(&proc_macro),
+            &["--cfg", "doc"],
         );
         assert_cargo_invocation(
             CargoInvocation::FixProduction {
@@ -3015,6 +3065,7 @@ mod tests {
             Some((fix_plan, false)),
             false,
             DocumentationMode::None,
+            &[],
         );
         assert_cargo_invocation(
             CargoInvocation::FixNonProduction {
@@ -3035,6 +3086,7 @@ mod tests {
             Some((fix_plan, true)),
             false,
             DocumentationMode::None,
+            &[],
         );
     }
 

@@ -116,10 +116,6 @@ pub(crate) fn run_wrapper(mut args: Vec<String>) -> ExitCode {
         package_name.as_deref(),
         &args,
     );
-    if documentation.enabled {
-        args.push("--cfg".to_owned());
-        args.push("doc".to_owned());
-    }
     if fix_plan.is_some() {
         args.push("--cap-lints".to_owned());
         args.push("allow".to_owned());
@@ -296,8 +292,7 @@ fn parse_collection_options(value: Option<&OsStr>) -> Result<CollectionOptions> 
 
 #[derive(Debug, Eq, PartialEq)]
 enum DocumentationRequest {
-    Targets,
-    ProcMacro {
+    Target {
         package_name: String,
         crate_name: String,
     },
@@ -306,12 +301,11 @@ enum DocumentationRequest {
 fn parse_documentation(value: Option<&OsStr>) -> Result<Option<DocumentationRequest>> {
     match value {
         None => Ok(None),
-        Some(value) if value == "targets" => Ok(Some(DocumentationRequest::Targets)),
         Some(value) => {
             let Some(value) = value.to_str() else {
                 bail!("{} must be valid UTF-8", protocol::DOCUMENTATION_ENV);
             };
-            let Some(value) = value.strip_prefix("proc-macro:") else {
+            let Some(value) = value.strip_prefix("target:") else {
                 bail!(
                     "unsupported {} value `{value}`",
                     protocol::DOCUMENTATION_ENV
@@ -319,27 +313,22 @@ fn parse_documentation(value: Option<&OsStr>) -> Result<Option<DocumentationRequ
             };
             let Some((package_name, crate_name)) = value.split_once(':') else {
                 bail!(
-                    "unsupported {} value `proc-macro:{value}`",
+                    "unsupported {} value `target:{value}`",
                     protocol::DOCUMENTATION_ENV
                 );
             };
             if package_name.is_empty() || crate_name.is_empty() || crate_name.contains(':') {
                 bail!(
-                    "unsupported {} value `proc-macro:{value}`",
+                    "unsupported {} value `target:{value}`",
                     protocol::DOCUMENTATION_ENV
                 );
             }
-            Ok(Some(DocumentationRequest::ProcMacro {
+            Ok(Some(DocumentationRequest::Target {
                 package_name: package_name.to_owned(),
                 crate_name: crate_name.to_owned(),
             }))
         }
     }
-}
-
-fn is_target_compilation(args: &[String]) -> bool {
-    args.iter()
-        .any(|argument| argument == "--target" || argument.starts_with("--target="))
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -354,19 +343,12 @@ impl DocumentationOptions {
         package_name: Option<&str>,
         args: &[String],
     ) -> Self {
-        // Cargo runs build scripts and build dependencies for the host without
-        // `--target`. Proc macros need a separate documentation invocation so
-        // downstream crates never execute an artifact compiled with `cfg(doc)`.
         let enabled = match requested {
-            Some(DocumentationRequest::Targets) => {
-                is_target_compilation(args) && !has_crate_type(args, "proc-macro")
-            }
-            Some(DocumentationRequest::ProcMacro {
+            Some(DocumentationRequest::Target {
                 package_name: requested_package,
                 crate_name: requested_crate,
             }) => {
-                has_crate_type(args, "proc-macro")
-                    && package_name == Some(requested_package.as_str())
+                package_name == Some(requested_package.as_str())
                     && argument_value(args, "--crate-name") == Some(requested_crate.as_str())
             }
             None => false,
@@ -1165,7 +1147,7 @@ fn doc_link_visibility_roots(
             continue;
         };
         for link in docs.iter().flat_map(|docs| parsed_doc_links(docs)) {
-            let link_roots = resolved_doc_link(tcx, resolutions, &link)
+            let link_roots = resolved_doc_link(tcx, resolutions, def_id, &link)
                 .into_iter()
                 .map(|def_id| id(tcx, def_id))
                 .collect::<Vec<_>>();
@@ -1500,8 +1482,12 @@ fn doc_link_namespace(link: &str) -> Option<(Option<Namespace>, &str)> {
 fn resolved_doc_link(
     tcx: TyCtxt<'_>,
     resolutions: &hir::def::DocLinkResMap,
+    documented_def_id: LocalDefId,
     link: &ParsedDocLink,
 ) -> Vec<DefId> {
+    if let Some(roots) = resolve_self_doc_link(tcx, documented_def_id, link) {
+        return roots;
+    }
     let mut roots = Vec::new();
     for (separator, _) in link.path.match_indices("::") {
         let prefix = &link.path[..separator];
@@ -1549,6 +1535,82 @@ fn resolved_doc_link(
         roots.extend(resolve_external_doc_link(tcx, link));
     }
     roots
+}
+
+fn resolve_self_doc_link(
+    tcx: TyCtxt<'_>,
+    documented_def_id: LocalDefId,
+    link: &ParsedDocLink,
+) -> Option<Vec<DefId>> {
+    let suffix = link.path.strip_prefix("Self")?;
+    if !suffix.is_empty() && !suffix.starts_with("::") {
+        return None;
+    }
+
+    let mut roots = documentation_self_roots(tcx, documented_def_id);
+    let mut current = roots.clone();
+    let components = suffix
+        .strip_prefix("::")
+        .into_iter()
+        .flat_map(|suffix| suffix.split("::"))
+        .collect::<Vec<_>>();
+    for (index, component) in components.iter().enumerate() {
+        let is_last = index + 1 == components.len();
+        let mut next = Vec::new();
+        for root in current {
+            for namespace in [Namespace::TypeNS, Namespace::ValueNS, Namespace::MacroNS] {
+                if is_last && link.namespace.is_some_and(|expected| expected != namespace) {
+                    continue;
+                }
+                for resolved in resolve_associated_doc_link(
+                    tcx,
+                    Some(Res::Def(tcx.def_kind(root), root)),
+                    Symbol::intern(component),
+                    namespace,
+                ) {
+                    if !next.contains(&resolved) {
+                        next.push(resolved);
+                    }
+                }
+            }
+        }
+        for resolved in &next {
+            if !roots.contains(resolved) {
+                roots.push(*resolved);
+            }
+        }
+        current = next;
+    }
+    Some(roots)
+}
+
+fn documentation_self_roots(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Vec<DefId> {
+    for def_id in std::iter::successors(Some(def_id), |def_id| tcx.opt_local_parent(*def_id)) {
+        match tcx.def_kind(def_id) {
+            DefKind::Struct
+            | DefKind::Union
+            | DefKind::Enum
+            | DefKind::Trait
+            | DefKind::TraitAlias
+            | DefKind::TyAlias
+            | DefKind::ForeignTy => return vec![def_id.to_def_id()],
+            DefKind::Impl { .. } => {
+                let self_type = tcx.type_of(def_id).instantiate_identity().skip_norm_wip();
+                let mut roots = match self_type.kind() {
+                    ty::Adt(adt, _) => vec![adt.did()],
+                    ty::Foreign(def_id) => vec![*def_id],
+                    ty::Dynamic(predicates, ..) => {
+                        predicates.principal_def_id().into_iter().collect()
+                    }
+                    _ => Vec::new(),
+                };
+                roots.extend(tcx.impl_opt_trait_id(def_id));
+                return roots;
+            }
+            _ => {}
+        }
+    }
+    Vec::new()
 }
 
 /// Resolve an external path that rustc intentionally omits from proc-macro
@@ -1652,6 +1714,15 @@ fn resolve_associated_doc_link(
     }
 
     let mut resolved = Vec::new();
+    if namespace == Namespace::TypeNS && root_kind == DefKind::Enum {
+        resolved.extend(
+            tcx.adt_def(root_id)
+                .variants()
+                .iter()
+                .filter(|variant| variant.name == item_name)
+                .map(|variant| variant.def_id),
+        );
+    }
     if namespace == Namespace::ValueNS {
         match root_kind {
             DefKind::Struct | DefKind::Union => resolved.extend(
@@ -2614,13 +2685,9 @@ mod tests {
             None
         );
         assert_eq!(
-            parse_documentation(Some(OsStr::new("targets"))).expect("target documentation mode"),
-            Some(DocumentationRequest::Targets)
-        );
-        assert_eq!(
-            parse_documentation(Some(OsStr::new("proc-macro:macro-package:macro_package")))
-                .expect("proc-macro documentation mode"),
-            Some(DocumentationRequest::ProcMacro {
+            parse_documentation(Some(OsStr::new("target:macro-package:macro_package")))
+                .expect("target documentation mode"),
+            Some(DocumentationRequest::Target {
                 package_name: "macro-package".into(),
                 crate_name: "macro_package".into(),
             })
@@ -2672,20 +2739,23 @@ mod tests {
     }
 
     #[test]
-    fn documentation_options_match_rustdoc_compilations() {
-        let targets = DocumentationRequest::Targets;
-        let proc_macro = DocumentationRequest::ProcMacro {
-            package_name: "macro-package".into(),
-            crate_name: "macro_package".into(),
+    fn documentation_options_match_the_requested_target() {
+        let library = DocumentationRequest::Target {
+            package_name: "library".into(),
+            crate_name: "library".into(),
+        };
+        let binary = DocumentationRequest::Target {
+            package_name: "app".into(),
+            crate_name: "app".into(),
         };
         assert_eq!(
             DocumentationOptions::from_args(
-                Some(&targets),
+                Some(&library),
                 Some("library"),
                 &[
                     "cargo-hawk-driver".into(),
-                    "--target".into(),
-                    "aarch64-apple-darwin".into(),
+                    "--crate-name".into(),
+                    "library".into(),
                     "--crate-type".into(),
                     "lib".into(),
                 ],
@@ -2697,11 +2767,11 @@ mod tests {
         );
         assert_eq!(
             DocumentationOptions::from_args(
-                Some(&targets),
+                Some(&binary),
                 Some("app"),
                 &[
                     "cargo-hawk-driver".into(),
-                    "--target=aarch64-apple-darwin".into(),
+                    "--crate-name=app".into(),
                     "--crate-type=bin".into(),
                 ],
             ),
@@ -2712,35 +2782,32 @@ mod tests {
         );
         assert_eq!(
             DocumentationOptions::from_args(
-                Some(&targets),
-                Some("macro-package"),
+                Some(&library),
+                Some("library"),
                 &[
                     "cargo-hawk-driver".into(),
-                    "--crate-name=macro_package".into(),
-                    "--crate-type=proc-macro".into(),
+                    "--crate-name=dependency".into(),
+                    "--crate-type=lib".into(),
                 ],
             ),
             DocumentationOptions::default()
         );
         assert_eq!(
             DocumentationOptions::from_args(
-                Some(&proc_macro),
-                Some("macro-package"),
+                Some(&library),
+                Some("dependency"),
                 &[
                     "cargo-hawk-driver".into(),
                     "--crate-name".into(),
-                    "macro_package".into(),
-                    "--crate-type=proc-macro".into(),
+                    "library".into(),
+                    "--crate-type=lib".into(),
                 ],
             ),
-            DocumentationOptions {
-                enabled: true,
-                document_private_items: false,
-            }
+            DocumentationOptions::default()
         );
         assert_eq!(
             DocumentationOptions::from_args(
-                Some(&targets),
+                Some(&library),
                 Some("build-script"),
                 &[
                     "cargo-hawk-driver".into(),
@@ -2758,8 +2825,8 @@ mod tests {
                 Some("app"),
                 &[
                     "cargo-hawk-driver".into(),
-                    "--target".into(),
-                    "aarch64-apple-darwin".into(),
+                    "--crate-name".into(),
+                    "app".into(),
                     "--crate-type=bin".into(),
                 ]
             ),

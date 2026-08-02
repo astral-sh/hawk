@@ -10,8 +10,8 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 /// required environment value; sources outside the workspace stay absolute.
 /// Uniform field group completeness became explicit in 10. Documentation-mode
 /// compilation became part of the frontend-driver contract in 11. Conservative
-/// source-crate roots, distinct documentation root fields, and separate target
-/// and proc-macro documentation modes were added in 12.
+/// source-crate roots, distinct documentation root fields, and exact-target
+/// documentation mode were added in 12.
 pub const VERSION: u32 = 12;
 
 pub const VERSION_ARGUMENT: &str = "--hawk-protocol-version";

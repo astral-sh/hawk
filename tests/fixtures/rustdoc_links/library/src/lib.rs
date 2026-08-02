@@ -4,6 +4,26 @@ pub struct DocumentedType {
     pub unlinked_field: usize,
 }
 
+/// Links to [`Self::linked_method`].
+pub struct SelfLinkedType;
+
+impl SelfLinkedType {
+    pub fn linked_method() {}
+}
+
+/// Links to [`QualifiedLinkedType::linked_method`].
+pub struct QualifiedLinkedType;
+
+impl QualifiedLinkedType {
+    pub fn linked_method() {}
+}
+
+/// Links to [`Self::Linked`] and [`field@Self::Linked::field`].
+pub enum SelfLinkedEnum {
+    Linked { field: usize },
+    Unlinked,
+}
+
 impl DocumentedType {
     pub fn linked_method() {}
 

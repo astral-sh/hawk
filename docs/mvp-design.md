@@ -156,10 +156,11 @@ the analysis; it is intended for source areas such as generated code.
 `cargo hawk check` invokes each configured production target build, `cargo check
 --workspace --all-targets`, a documentation-configured workspace build, and
 compile-only workspace or explicitly scoped doctests with
-`RUSTC_WORKSPACE_WRAPPER=hawk-driver`. The documentation pass contributes only
-public-visibility requirements from Cargo's default documentation targets and
-documentation enabled by `cfg(doc)`. Proc macros use a separate documentation
-invocation so downstream targets execute their ordinary host artifacts. The
+`RUSTC_WORKSPACE_WRAPPER=hawk-driver`. The documentation pass compiles each of
+Cargo's default documentation targets as an isolated root with `cfg(doc)` and
+contributes only its public-visibility requirements. Dependencies, build
+scripts, and skipped targets remain ordinary compilations, so downstream
+targets never execute a proc-macro artifact compiled with `cfg(doc)`. The
 doctest pass uses rustdoc's test-builder wrapper so documentation example
 references are emitted into the same non-production graph. The compiler
 driver is pinned to the workspace Rust toolchain and emits resolved graph
