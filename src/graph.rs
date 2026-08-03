@@ -815,6 +815,12 @@ fn preserve_uniform_field_visibility_findings<'a>(
             };
             required.then_some(&group.span)
         })
+        .chain(
+            findings
+                .iter()
+                .filter(|finding| finding.kind == FindingKind::DeadPublic)
+                .filter_map(|finding| field_group_identity(finding.definition)),
+        )
         .collect();
 
     let super_reduction_groups: FxHashSet<_> = observed_definitions
@@ -2136,6 +2142,33 @@ mod tests {
         input[0].edges.push(Edge {
             from: test_id("main"),
             to: test_id("required"),
+            kind: EdgeKind::Body,
+        });
+
+        let findings = analyze_preserving_uniform_fields(&input);
+
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, FindingKind::DeadPublic);
+        assert_eq!(findings[0].definition.id, test_id("dead"));
+    }
+
+    #[test]
+    fn dead_public_field_preserves_uniform_sibling_visibility() {
+        let mut input = fragments(
+            vec![
+                uniform_field(node("internal", "lib", true)),
+                uniform_field(node("dead", "lib", true)),
+                node("entry", "lib", false),
+            ],
+            vec![Edge {
+                from: test_id("entry"),
+                to: test_id("internal"),
+                kind: EdgeKind::Body,
+            }],
+        );
+        input[0].edges.push(Edge {
+            from: test_id("main"),
+            to: test_id("entry"),
             kind: EdgeKind::Body,
         });
 
