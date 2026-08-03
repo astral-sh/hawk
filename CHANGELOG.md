@@ -2,6 +2,16 @@
 
 <!-- prettier-ignore-start -->
 
+## 0.1.12
+
+Released on 2026-08-03.
+
+### Other changes
+
+- Preserve items referenced by `global_asm` operands ([#155](https://github.com/astral-sh/hawk/pull/155))
+- Preserve uniform field visibility for dead public fields ([#158](https://github.com/astral-sh/hawk/pull/158))
+- Support expected diagnostic exclusions ([#157](https://github.com/astral-sh/hawk/pull/157))
+
 ## 0.1.11
 
 Released on 2026-07-31.
