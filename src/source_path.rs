@@ -11,7 +11,8 @@ pub fn lexically_normalize(path: &Path) -> PathBuf {
                 Some(Component::Normal(_)) => {
                     normalized.pop();
                 }
-                Some(Component::RootDir | Component::Prefix(_)) => {}
+                // A drive-relative Windows prefix (`C:`) is not a root and cannot absorb `..`.
+                Some(Component::RootDir) => {}
                 _ => normalized.push(component.as_os_str()),
             },
             _ => normalized.push(component.as_os_str()),
@@ -82,6 +83,19 @@ mod tests {
         assert_eq!(
             lexically_normalize(Path::new("../../workspace/src/lib.rs")),
             Path::new("../../workspace/src/lib.rs")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn drive_relative_paths_preserve_parents_beyond_the_prefix() {
+        assert_eq!(
+            lexically_normalize(Path::new(r"C:..\workspace\src\lib.rs")),
+            Path::new(r"C:..\workspace\src\lib.rs")
+        );
+        assert_eq!(
+            lexically_normalize(Path::new(r"C:workspace\..\..\src\lib.rs")),
+            Path::new(r"C:..\src\lib.rs")
         );
     }
 
