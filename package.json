@@ -1,6 +1,9 @@
 {
   "name": "hawk-dev",
   "private": true,
+  "engines": {
+    "npm": ">=11.10.0"
+  },
   "devDependencies": {
     "prettier": "3.9.6"
   }
