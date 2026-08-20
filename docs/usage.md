@@ -236,7 +236,7 @@ checkout, prepare the pinned toolchain once:
 ```sh
 rustup target add x86_64-pc-windows-msvc
 rustup component add llvm-tools-preview
-cargo install cargo-xwin --locked
+cargo install --locked cargo-xwin@0.23.1
 ```
 
 Then export the linker and Windows SDK configuration for Hawk's child Cargo
