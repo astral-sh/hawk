@@ -2,6 +2,17 @@
 
 <!-- prettier-ignore-start -->
 
+## 0.1.13
+
+Released on 2026-08-21.
+
+### Other changes
+
+- Lock Prettier for formatting checks ([#161](https://github.com/astral-sh/hawk/pull/161))
+- Preserve parents in drive-relative source paths ([#160](https://github.com/astral-sh/hawk/pull/160))
+- Require a cooldown for npm dependency updates ([#162](https://github.com/astral-sh/hawk/pull/162))
+- Upgrade to Rust 1.98.0 ([#164](https://github.com/astral-sh/hawk/pull/164))
+
 ## 0.1.12
 
 Released on 2026-08-03.
