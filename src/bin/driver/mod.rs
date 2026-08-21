@@ -407,7 +407,7 @@ fn emit_fix(
         visibility_span,
         "public visibility can be restricted for the selected Hawk product",
     );
-    diagnostic.is_lint(kind.code().to_owned(), false);
+    diagnostic.is_lint(kind.code().to_owned(), false, None);
     diagnostic.span_suggestion(
         visibility_span,
         "change this visibility to",
