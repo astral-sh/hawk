@@ -44,5 +44,21 @@ fn main() -> Result<(), Box<dyn Error>> {
             .ok_or_else(|| io::Error::other(format!("rustc -vV did not report {field}")))?;
         println!("cargo:rustc-env={environment}={value}");
     }
+
+    // The driver links unstable rustc_private APIs whose signatures drift between
+    // compiler versions; gate the affected call sites on the selected compiler.
+    println!("cargo:rustc-check-cfg=cfg(hawk_rustc_1_99)");
+    let release = version
+        .lines()
+        .find_map(|line| line.strip_prefix("release: "))
+        .ok_or_else(|| io::Error::other("rustc -vV did not report release"))?;
+    let minor = release
+        .split('.')
+        .nth(1)
+        .and_then(|minor| minor.parse::<u32>().ok())
+        .ok_or_else(|| io::Error::other(format!("unrecognized rustc release {release}")))?;
+    if minor >= 99 {
+        println!("cargo:rustc-cfg=hawk_rustc_1_99");
+    }
     Ok(())
 }
