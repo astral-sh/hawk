@@ -2,6 +2,14 @@
 
 <!-- prettier-ignore-start -->
 
+## 0.1.14
+
+Released on 2026-09-04.
+
+### Other changes
+
+- Upgrade to Rust 1.98.1 ([#166](https://github.com/astral-sh/hawk/pull/166))
+
 ## 0.1.13
 
 Released on 2026-08-21.
