@@ -77,6 +77,7 @@ pub(crate) fn run_wrapper(mut args: Vec<String>) -> ExitCode {
         .set(source_paths)
         .expect("source paths are initialized once per driver invocation");
     args.remove(1);
+    args.extend(["--cfg=hawk".to_owned(), "--check-cfg=cfg(hawk)".to_owned()]);
     let output_dir = PathBuf::from(
         env::var_os(protocol::OUTPUT_DIR_ENV).expect("HAWK_OUTPUT_DIR checked before dispatch"),
     );

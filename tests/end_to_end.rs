@@ -3328,6 +3328,68 @@ fn codegen_roots_preserve_reachable_items() {
 }
 
 #[test]
+fn defines_hawk_cfg_for_workspace_targets_and_doctests() {
+    let context = HawkTestContext::new("doctest_consumers");
+    let library_path = context.workspace().join("library/src/lib.rs");
+    fs::write(
+        &library_path,
+        r#"#[cfg(not(hawk))]
+compile_error!("Hawk must set cfg(hawk)");
+
+/// ```
+/// #![deny(warnings)]
+/// #[cfg(not(hawk))]
+/// compile_error!("Hawk must set cfg(hawk) in merged doctests");
+/// ```
+///
+/// ```standalone_crate
+/// #![deny(warnings)]
+/// #[cfg(not(hawk))]
+/// compile_error!("Hawk must set cfg(hawk) in standalone doctests");
+/// ```
+pub fn product_api() {}
+"#,
+    )
+    .expect("write Hawk cfg guards");
+
+    let output = context
+        .command()
+        .env("CARGO_ENCODED_RUSTFLAGS", "-Dwarnings")
+        .env("CARGO_ENCODED_RUSTDOCFLAGS", "-Dwarnings")
+        .env_remove("RUSTFLAGS")
+        .env_remove("RUSTDOCFLAGS")
+        .output()
+        .expect("run cargo-hawk with cfg guards");
+    context.assert_success(&output);
+
+    fs::write(
+        library_path,
+        r#"#[cfg(hawk)]
+compile_error!("ordinary Cargo must not set cfg(hawk)");
+pub fn product_api() {}
+"#,
+    )
+    .expect("write ordinary Cargo cfg guard");
+    let output = context
+        .cargo()
+        .args(["check", "--workspace", "--all-targets", "--locked"])
+        .arg("--target-dir")
+        .arg(context.target_dir())
+        .env(
+            "CARGO_ENCODED_RUSTFLAGS",
+            "--check-cfg=cfg(hawk)\u{1f}-Dwarnings",
+        )
+        .env_remove("RUSTFLAGS")
+        .output()
+        .expect("check fixture without Hawk");
+    assert!(
+        output.status.success(),
+        "ordinary Cargo failed:\n{}",
+        context.normalized_stderr(&output)
+    );
+}
+
+#[test]
 fn doctest_consumers_preserve_apis_from_multiple_packages() {
     let context = HawkTestContext::new("doctest_consumers");
     fs::write(

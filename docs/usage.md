@@ -144,6 +144,28 @@ excluded scope, along with the configuration location and reason.
 profile. Hawk rejects fixing runs with a multi-profile matrix; run analysis
 without `--fix` to review the combined findings.
 
+## Conditional compilation
+
+Hawk sets `cfg(hawk)` when compiling workspace targets and doctests. For example,
+use it to exclude a nightly-only test harness from Hawk's stable compiler:
+
+```rust
+#![cfg_attr(all(test, not(hawk)), feature(test))]
+
+#[cfg(all(test, not(hawk)))]
+mod tests {
+    // Tests that require nightly Rust.
+}
+```
+
+Hawk registers this name with `--check-cfg`. To recognize it in ordinary Cargo
+builds too, declare it in the package's `Cargo.toml`:
+
+```toml
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(hawk)'] }
+```
+
 ## Enforce diagnostics
 
 Hawk reports diagnostics as warnings by default, so it can be introduced

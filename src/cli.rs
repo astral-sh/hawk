@@ -1687,7 +1687,13 @@ fn doctest_rustdoc_flags(executable: &Path) -> OsString {
     };
     // Hawk is pinned to compiler internals; rustdoc's builder wrapper is the
     // corresponding unstable hook needed to observe compiled doctest crates.
-    for flag in ["-Zunstable-options", "--no-run", "--test-builder-wrapper"] {
+    for flag in [
+        "--cfg=hawk",
+        "--check-cfg=cfg(hawk)",
+        "-Zunstable-options",
+        "--no-run",
+        "--test-builder-wrapper",
+    ] {
         push_encoded_rustdoc_flag(&mut flags, OsStr::new(flag));
     }
     push_encoded_rustdoc_flag(&mut flags, executable.as_os_str());
