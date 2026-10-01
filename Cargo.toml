@@ -2,7 +2,7 @@
 name = "cargo-hawk"
 version = "0.1.14"
 edition = "2024"
-rust-version = "1.98"
+rust-version = "1.99"
 license = "MIT OR Apache-2.0"
 description = "Workspace-aware public API lints"
 repository = "https://github.com/astral-sh/hawk"
@@ -70,6 +70,7 @@ unreachable_pub = "warn"
 [lints.clippy]
 pedantic = { level = "warn", priority = -2 }
 # Allowed pedantic lints, matching the Astral workspace defaults.
+assert_is_empty = "allow"
 char_lit_as_u8 = "allow"
 collapsible_else_if = "allow"
 collapsible_if = "allow"
