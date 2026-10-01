@@ -17,7 +17,7 @@ use rustc_hir as hir;
 use rustc_hir::Node;
 use rustc_hir::attrs::AttributeKind;
 use rustc_hir::def::{CtorOf, DefKind, Res};
-use rustc_hir::def_id::{CRATE_DEF_ID, DefId, LocalDefId};
+use rustc_hir::def_id::{CRATE_DEF_ID, CRATE_MOD_ID, DefId, LocalDefId};
 use rustc_hir::intravisit::{self, Visitor};
 use rustc_interface::interface;
 use rustc_lexer::{FrontmatterAllowed, TokenKind};
@@ -1178,7 +1178,7 @@ fn definition(
         restricted_visible_api,
         crate_visible_api: restricted_visible_api
             && visibility == Some("pub(crate)")
-            && restricted_visibility == Some(ty::Visibility::Restricted(CRATE_DEF_ID)),
+            && restricted_visibility == Some(ty::Visibility::Restricted(CRATE_MOD_ID)),
         visible_reexport_api: kind == DefinitionKind::Reexport && has_explicit_visibility,
         module_scope: module_scope(tcx, def_id),
         uniform_field_group: None,
