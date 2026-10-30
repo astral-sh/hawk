@@ -470,6 +470,52 @@ fn resolves_workspace_cargo_configuration_from_an_external_launch_directory() {
     context.assert_success(&output);
 }
 
+#[cfg(unix)]
+#[test]
+fn scopes_bootstrap_to_the_configured_rustdoc() {
+    let context = HawkTestContext::new("basic");
+    let config = context.workspace().join(".cargo");
+    fs::create_dir(&config).unwrap();
+    fs::write(config.join("config.toml"), "include = ['doc.toml']\n").unwrap();
+    fs::write(
+        config.join("doc.toml"),
+        "[build]\nrustdoc = './custom-rustdoc'\n",
+    )
+    .unwrap();
+    let rustdoc = context.workspace().join("custom-rustdoc");
+    fs::write(
+        &rustdoc,
+        r#"#!/bin/sh
+set -eu
+test "$RUSTC_BOOTSTRAP" = 1
+touch "$HAWK_TEST_RUSTDOC_CALLED"
+exec rustdoc "$@"
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&rustdoc, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::write(
+        context.workspace().join("library/build.rs"),
+        r#"fn main() {
+    println!("cargo::rerun-if-env-changed=RUSTC_BOOTSTRAP");
+    assert_eq!(std::env::var("RUSTC_BOOTSTRAP").unwrap(), "caller");
+}"#,
+    )
+    .unwrap();
+    let called = context.workspace().join("rustdoc-called");
+    let output = context
+        .command()
+        .args(["-A", "warnings"])
+        .env_remove("RUSTDOC")
+        .env_remove("CARGO_BUILD_RUSTDOC")
+        .env("RUSTC_BOOTSTRAP", "caller")
+        .env("HAWK_TEST_RUSTDOC_CALLED", &called)
+        .output()
+        .unwrap();
+    context.assert_success(&output);
+    assert!(called.is_file());
+}
+
 #[test]
 fn ignores_stale_fix_plan_during_analysis() {
     let context = HawkTestContext::new("basic");

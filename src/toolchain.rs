@@ -109,6 +109,53 @@ impl RustToolchain {
     }
 }
 
+/// A host build script receives Cargo's resolved rustdoc, including relative paths
+/// from included config files. Keep the probe independent of the user's packages.
+pub(crate) fn cargo_rustdoc(workspace_root: &Path, host: &str) -> Result<PathBuf> {
+    if let Some(rustdoc) = env::var_os("RUSTDOC") {
+        return Ok(rustdoc.into());
+    }
+    let probe = tempfile::tempdir().context("create Cargo rustdoc probe directory")?;
+    let manifest = probe.path().join("Cargo.toml");
+    fs::write(
+        &manifest,
+        "[workspace]\n[package]\nname='hawk-rustdoc-probe'\nversion='0.0.0'\nedition='2024'\n[lib]\npath='lib.rs'\n",
+    )?;
+    fs::write(probe.path().join("lib.rs"), "")?;
+    fs::write(
+        probe.path().join("build.rs"),
+        r#"fn main() {
+    std::fs::write("rustdoc-path", std::env::var("RUSTDOC").unwrap()).unwrap();
+}"#,
+    )?;
+    let mut command = Command::new("cargo");
+    clear_protocol_environment(&mut command);
+    let output = command
+        .current_dir(workspace_root)
+        .args([
+            "check",
+            "--quiet",
+            "--offline",
+            "--target",
+            host,
+            "--manifest-path",
+        ])
+        .arg(&manifest)
+        .arg("--target-dir")
+        .arg(probe.path().join("target"))
+        .output()
+        .context("query Cargo's selected rustdoc")?;
+    if !output.status.success() {
+        bail!(
+            "query Cargo's selected rustdoc: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(fs::read_to_string(probe.path().join("rustdoc-path"))
+        .context("read Cargo's selected rustdoc")?
+        .into())
+}
+
 fn cargo_rustc(workspace_root: &Path, manifest_path: &Path) -> Result<OsString> {
     let probe_dir = tempfile::tempdir().context("create Cargo rustc probe directory")?;
     let output_path = probe_dir.path().join("rustc");

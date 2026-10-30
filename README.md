@@ -61,10 +61,10 @@ curl --proto '=https' --tlsv1.2 -LsSf \
   https://github.com/astral-sh/hawk/releases/latest/download/cargo-hawk-installer.sh | sh
 ```
 
-The installer places `cargo-hawk` and its internal `cargo-hawk-driver`
-executable together on your `PATH`. You can instead download the archive for
-your platform from [GitHub Releases](https://github.com/astral-sh/hawk/releases)
-and place both executables on your `PATH` in the same directory. A prebuilt
+The installer places `cargo-hawk` and its internal `cargo-hawk-driver` and
+`cargo-hawk-rustdoc` executables together on your `PATH`. You can instead
+download the archive for your platform from [GitHub Releases](https://github.com/astral-sh/hawk/releases)
+and place all three executables on your `PATH` in the same directory. A prebuilt
 release does not require `rustc-dev`, `RUSTC_BOOTSTRAP`, or a source build.
 
 Hawk validates the selected compiler before analysis. If a workspace selects

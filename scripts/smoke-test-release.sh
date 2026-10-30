@@ -8,7 +8,7 @@ project_root="$(dirname "$script_root")"
 fixture="$(mktemp -d)"
 trap 'rm -rf "$fixture"' EXIT
 
-for binary in cargo-hawk cargo-hawk-driver; do
+for binary in cargo-hawk cargo-hawk-driver cargo-hawk-rustdoc; do
   if [[ ! -x "$binary_dir/$binary" ]]; then
     echo "missing release executable: $binary_dir/$binary" >&2
     exit 1

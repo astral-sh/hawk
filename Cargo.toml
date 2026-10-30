@@ -24,6 +24,11 @@ name = "cargo-hawk-driver"
 path = "src/bin/cargo-hawk-driver.rs"
 required-features = ["driver"]
 
+[[bin]]
+name = "cargo-hawk-rustdoc"
+path = "src/bin/cargo-hawk-rustdoc.rs"
+required-features = ["frontend"]
+
 [[test]]
 name = "end_to_end"
 path = "tests/end_to_end.rs"
