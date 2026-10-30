@@ -2,6 +2,15 @@
 
 <!-- prettier-ignore-start -->
 
+## 0.1.16
+
+Released on 2026-10-30.
+
+### Other changes
+
+- Reuse graph fragments from fresh Cargo workspace units ([#175](https://github.com/astral-sh/hawk/pull/175))
+- Scope the doctest bootstrap override to rustdoc ([#174](https://github.com/astral-sh/hawk/pull/174))
+
 ## 0.1.15
 
 Released on 2026-10-01.
