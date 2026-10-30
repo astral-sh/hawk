@@ -145,6 +145,21 @@ excluded scope, along with the configuration location and reason.
 profile. Hawk rejects fixing runs with a multi-profile matrix; run analysis
 without `--fix` to review the combined findings.
 
+## Reuse build artifacts in CI
+
+Hawk stores workspace graph fragments under `hawk-fragments/` in its Cargo
+target directory. When Cargo reports a workspace unit as fresh, Hawk verifies
+its saved fragment and includes it in the current analysis. A missing or
+damaged fragment triggers a fresh collection. Generated doctests run on every
+check. Runs with `--fix` or an explicit `--graph-dir` collect fresh fragments.
+
+To reuse this work across CI jobs, pass the same `--target-dir` and cache the
+whole directory, including workspace build artifacts and `hawk-fragments/`.
+Dependency-only Cargo caches omit these inputs. Cargo also considers source
+modification times when checking freshness. If the CI checkout restores those
+times, verify file contents and directory membership first so that a change to
+a build script's inputs still triggers a rebuild.
+
 ## Enforce diagnostics
 
 Hawk reports diagnostics as warnings by default, so it can be introduced

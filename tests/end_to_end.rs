@@ -544,6 +544,51 @@ fn workspace_lints_apply_only_to_the_analyzed_crates() {
 }
 
 #[test]
+fn reuses_fragments_and_recovers_from_a_damaged_cache() {
+    let context = HawkTestContext::new("basic");
+    let args = ["--output-format=json"];
+    let first = context.run(&args);
+    context.assert_success(&first);
+    let warm = context.run(&args);
+    context.assert_success(&warm);
+    assert_eq!(first.stdout, warm.stdout);
+    let stderr = String::from_utf8_lossy(&warm.stderr);
+    assert!(!stderr.contains("Checking library v"), "{stderr}");
+
+    let cache = fs::read_dir(context.target_dir().join("hawk-fragments"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let unit = fs::read_dir(&cache)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    fs::write(&unit, b"damaged").unwrap();
+    let recovered = context.run(&args);
+    context.assert_success(&recovered);
+    assert_eq!(first.stdout, recovered.stdout);
+
+    fs::remove_file(context.workspace().join("app/tests/integration.rs")).unwrap();
+    let changed = context.run(&args);
+    context.assert_success(&changed);
+    assert_ne!(first.stdout, changed.stdout);
+    let graphs = tempfile::tempdir().unwrap();
+    let control = context
+        .command()
+        .args(args)
+        .arg("--graph-dir")
+        .arg(graphs.path())
+        .output()
+        .unwrap();
+    context.assert_success(&control);
+    assert_eq!(changed.stdout, control.stdout);
+}
+
+#[test]
 fn ignores_stale_fix_plan_during_analysis() {
     let context = HawkTestContext::new("basic");
     let output = context

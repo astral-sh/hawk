@@ -14,7 +14,9 @@ fn main() -> ExitCode {
         .args(env::args_os().skip(1))
         .env("RUSTC_BOOTSTRAP", "1")
         .env("RUSTDOC", &rustdoc)
-        .env_remove(protocol::RUSTDOC_ENV);
+        .env_remove(protocol::RUSTDOC_ENV)
+        // Rustdoc generates fresh doctest crates outside Cargo's unit graph.
+        .env_remove(protocol::FRAGMENT_CACHE_ENV);
     #[cfg(unix)]
     let error = std::os::unix::process::CommandExt::exec(&mut command);
     #[cfg(not(unix))]
