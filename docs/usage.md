@@ -94,14 +94,12 @@ targets:
   --exclude-crate supported_library
 ```
 
-Instrumented Cargo artifacts are reused under
-`cargo-hawk-target/<workspace-name>-<path-hash>` in the platform temporary
-directory by default. Including the workspace path prevents same-named
-checkouts and worktrees from sharing Cargo locks and artifacts. Use
-`--target-dir` to override that location and `--graph-dir` to retain serialized
-compiler fragments for investigation. Diagnostics are colored automatically
-in a terminal; use `--color=always` or `--color=never` to override terminal
-detection.
+Hawk reuses instrumented builds in a `hawk/` subdirectory of the workspace's
+Cargo target directory, normally `target/hawk/`. This honors Cargo's
+`build.target-dir` setting and `CARGO_TARGET_DIR`. Pass `--target-dir` to choose
+the exact directory. Use `--graph-dir` to retain serialized compiler fragments
+for investigation. Diagnostics are colored automatically in a terminal. Use
+`--color=always` or `--color=never` to override terminal detection.
 
 Use `--output-format=json` for a machine-readable diagnostic report. For a
 completed analysis, Cargo progress and compiler output remain on stderr, so
@@ -153,8 +151,8 @@ its saved fragment and includes it in the current analysis. A missing or
 damaged fragment triggers a fresh collection. Generated doctests run on every
 check. Runs with `--fix` or an explicit `--graph-dir` collect fresh fragments.
 
-To reuse this work across CI jobs, pass the same `--target-dir` and cache the
-whole directory, including workspace build artifacts and `hawk-fragments/`.
+To reuse this work across CI jobs, cache Hawk's target directory, including
+workspace build artifacts and `hawk-fragments/`.
 Dependency-only Cargo caches omit these inputs. Cargo also considers source
 modification times when checking freshness. If the CI checkout restores those
 times, verify file contents and directory membership first so that a change to

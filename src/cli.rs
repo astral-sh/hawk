@@ -1,9 +1,8 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, hash_map::DefaultHasher};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fmt::Write as _;
 use std::fs::{self, File};
-use std::hash::{Hash, Hasher};
 use std::io::{BufReader, PipeReader, Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, ExitStatus, Stdio};
@@ -63,7 +62,7 @@ struct CheckArgs {
     #[arg(long = "exclude-crate")]
     excluded_crates: Vec<String>,
 
-    /// Reusable Cargo target directory for the instrumented build.
+    /// Directory for instrumented builds. Defaults to `hawk/` inside Cargo's target directory.
     #[arg(long)]
     target_dir: Option<PathBuf>,
 
@@ -468,15 +467,14 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
                 .collect::<Result<Vec<_>>>()
         })
         .transpose()?;
-    let target_dir = args.target_dir.as_ref().map_or_else(
-        || Ok(default_target_dir(&workspace_root)),
-        |target_dir| {
+    let mut target_dir = args
+        .target_dir
+        .as_ref()
+        .map(|target_dir| {
             std::path::absolute(target_dir)
                 .with_context(|| format!("resolve target directory {}", target_dir.display()))
-        },
-    )?;
-    fs::create_dir_all(&target_dir)
-        .with_context(|| format!("create target directory {}", target_dir.display()))?;
+        })
+        .transpose()?;
 
     let temporary_graph_dir;
     let graph_dir = match &args.graph_dir {
@@ -521,6 +519,8 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
                 feature_profile.name()
             )
         })?;
+        // This Cargo invocation reads configuration from the analyzed workspace.
+        target_dir.get_or_insert_with(|| resolved_metadata.target_directory.join("hawk").into());
         let profile_graph_dir = graph_dir
             .join("feature-profiles")
             .join(format!("{index}-{}", feature_profile.name()));
@@ -551,6 +551,9 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
         });
     }
 
+    let target_dir = target_dir.expect("configuration has at least one feature profile");
+    fs::create_dir_all(&target_dir)
+        .with_context(|| format!("create target directory {}", target_dir.display()))?;
     let rustdoc = crate::toolchain::cargo_rustdoc(&workspace_root, toolchain.host())?;
     let driver = driver_executable()?;
     validate_driver_protocol(&driver, &toolchain)?;
@@ -2266,27 +2269,6 @@ fn workspace_package<'a>(
     Ok(package)
 }
 
-// Stay below the 255-byte/code-unit component limits of supported filesystems
-// while leaving the ordinary workspace name readable.
-const DEFAULT_TARGET_DIR_COMPONENT_MAX_BYTES: usize = 240;
-
-fn default_target_dir(workspace_root: &Path) -> PathBuf {
-    let workspace = workspace_root
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("workspace");
-    let mut hasher = DefaultHasher::new();
-    workspace_root.hash(&mut hasher);
-    let suffix = format!("-{:016x}", hasher.finish());
-    let max_workspace_bytes = DEFAULT_TARGET_DIR_COMPONENT_MAX_BYTES - suffix.len();
-    let mut workspace_end = workspace.len().min(max_workspace_bytes);
-    while !workspace.is_char_boundary(workspace_end) {
-        workspace_end -= 1;
-    }
-    let workspace = format!("{}{suffix}", &workspace[..workspace_end]);
-    env::temp_dir().join("cargo-hawk-target").join(workspace)
-}
-
 fn read_fragments(graph_dir: &Path) -> Result<Vec<Fragment>> {
     let mut paths = fs::read_dir(graph_dir)
         .with_context(|| format!("read graph directory {}", graph_dir.display()))?
@@ -2357,10 +2339,10 @@ mod tests {
     #[cfg(unix)]
     use super::normalize_workspace_source_path;
     use super::{
-        Args, CargoInvocation, DEFAULT_TARGET_DIR_COMPONENT_MAX_BYTES, DiagnosticRenderer,
-        LintLevel, LintLevels, ProductionProduct, ProductionSelection, WorkspaceLibrarySource,
-        classify_non_production_target, default_target_dir, definition_packages,
-        fix_plan_signature, json_definition_kind, json_finding_kind, validate_excluded_crates,
+        Args, CargoInvocation, DiagnosticRenderer, LintLevel, LintLevels, ProductionProduct,
+        ProductionSelection, WorkspaceLibrarySource, classify_non_production_target,
+        definition_packages, fix_plan_signature, json_definition_kind, json_finding_kind,
+        validate_excluded_crates,
     };
 
     fn render_diagnostic(finding: &Finding<'_>) -> String {
@@ -2399,27 +2381,6 @@ mod tests {
     }
 
     #[test]
-    fn default_target_dir_uses_platform_temp_directory() {
-        let workspace_root = Path::new("/path/to/example-workspace");
-        let target_dir = default_target_dir(workspace_root);
-
-        assert_eq!(
-            target_dir.parent(),
-            Some(std::env::temp_dir().join("cargo-hawk-target").as_path())
-        );
-        assert!(
-            target_dir
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with("example-workspace-"))
-        );
-        assert_ne!(
-            target_dir,
-            default_target_dir(Path::new("/another/path/to/example-workspace"))
-        );
-    }
-
-    #[test]
     fn rejects_unknown_excluded_crates_without_workspace_libraries() {
         let error = validate_excluded_crates(&["foo".to_owned()], &HashSet::new())
             .expect_err("unknown excluded crate is rejected");
@@ -2428,53 +2389,6 @@ mod tests {
             error.to_string(),
             "unknown --exclude-crate value(s): `foo`; this workspace has no library crates"
         );
-    }
-
-    #[test]
-    fn default_target_dir_truncates_long_workspace_names() {
-        let workspace = "a".repeat(245);
-        let workspace_root = PathBuf::from("/path/to").join(&workspace);
-        let other_workspace_root = PathBuf::from("/another/path/to").join(&workspace);
-        let target_dir = default_target_dir(&workspace_root);
-        let other_target_dir = default_target_dir(&other_workspace_root);
-        let component = target_dir
-            .file_name()
-            .and_then(|name| name.to_str())
-            .expect("UTF-8 target directory component");
-        let other_component = other_target_dir
-            .file_name()
-            .and_then(|name| name.to_str())
-            .expect("UTF-8 target directory component");
-
-        assert_eq!(component.len(), DEFAULT_TARGET_DIR_COMPONENT_MAX_BYTES);
-        let (workspace, suffix) = component
-            .rsplit_once('-')
-            .expect("target directory has a hash suffix");
-        assert_eq!(
-            workspace,
-            "a".repeat(DEFAULT_TARGET_DIR_COMPONENT_MAX_BYTES - suffix.len() - 1)
-        );
-        assert_eq!(suffix.len(), 16);
-        assert!(suffix.bytes().all(|byte| byte.is_ascii_hexdigit()));
-        assert_ne!(component, other_component);
-    }
-
-    #[test]
-    fn default_target_dir_truncates_at_a_utf8_boundary() {
-        let workspace_root = PathBuf::from("/path/to").join("é".repeat(123));
-        let target_dir = default_target_dir(&workspace_root);
-        let component = target_dir
-            .file_name()
-            .and_then(|name| name.to_str())
-            .expect("UTF-8 target directory component");
-        let (workspace, suffix) = component
-            .rsplit_once('-')
-            .expect("target directory has a hash suffix");
-
-        assert!(component.len() <= DEFAULT_TARGET_DIR_COMPONENT_MAX_BYTES);
-        assert!(!workspace.is_empty());
-        assert!(workspace.chars().all(|character| character == 'é'));
-        assert_eq!(suffix.len(), 16);
     }
 
     #[test]

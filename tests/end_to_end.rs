@@ -396,6 +396,43 @@ fn repeated_runs_do_not_reuse_a_failed_rustc_probe() {
 }
 
 #[test]
+fn defaults_to_a_hawk_subdirectory_of_cargos_target_directory() {
+    let context = HawkTestContext::new("basic");
+    let launch_directory = tempfile::tempdir().expect("temporary launch directory");
+    let mut check = Command::new(env!("CARGO_BIN_EXE_cargo-hawk"));
+    check
+        .current_dir(launch_directory.path())
+        .args(["check", "-A", "warnings", "--manifest-path"])
+        .arg(context.workspace().join("Cargo.toml"))
+        .env("CARGO_HOME", launch_directory.path().join("cargo-home"))
+        .env_remove("CARGO_TARGET_DIR")
+        .env_remove("CARGO_BUILD_TARGET_DIR");
+    let assert_target = |check: &mut Command, cargo_target: &Path| {
+        context.assert_success(&check.output().expect("run cargo-hawk"));
+        let build = cargo_target.join("hawk/debug");
+        assert!(
+            build.is_dir(),
+            "expected build artifacts in {}",
+            build.display()
+        );
+    };
+
+    assert_target(&mut check, &context.workspace().join("target"));
+
+    let config = context.workspace().join(".cargo");
+    fs::create_dir(&config).unwrap();
+    fs::write(
+        config.join("config.toml"),
+        "[build]\ntarget-dir = 'artifacts'\n",
+    )
+    .unwrap();
+    assert_target(&mut check, &context.workspace().join("artifacts"));
+
+    check.env("CARGO_TARGET_DIR", context.target_dir());
+    assert_target(&mut check, context.target_dir());
+}
+
+#[test]
 fn resolves_relative_target_directory_from_the_launch_directory() {
     let context = HawkTestContext::new("basic");
     let launch_directory = tempfile::tempdir().expect("temporary launch directory");
