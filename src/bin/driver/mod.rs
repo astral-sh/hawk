@@ -471,8 +471,11 @@ fn emit_fragment(
             &tcx.sess.opts.cg.extra_filename,
             classification.test_surface,
         ));
-        let entry = fragment_cache::Entry::write(&cache, unit, &fragment)?;
-        tcx.dcx().note(entry.note());
+        // An artifact without a reference tells the frontend to collect a
+        // fresh graph, even when the cache becomes unwritable during a build.
+        if let Ok(entry) = fragment_cache::Entry::write(&cache, unit, &fragment) {
+            tcx.dcx().note(entry.note());
+        }
         return Ok(());
     }
     let mut file = tempfile::NamedTempFile::new_in(output_dir)

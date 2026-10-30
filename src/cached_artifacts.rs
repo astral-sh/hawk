@@ -3,7 +3,7 @@ use std::fs::{self, File};
 use std::io::{self, BufReader, Write as _};
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use cargo_hawk_internal::fragment_cache::{Entry, fingerprint};
 use cargo_hawk_internal::graph::CollectionOptions;
 use cargo_hawk_internal::protocol;
@@ -21,13 +21,13 @@ impl CachedArtifacts {
         driver: &Path,
         options: CollectionOptions,
         members: &[PackageId],
-    ) -> Result<Self> {
-        let driver = fs::read(driver).context("fingerprint Hawk compiler driver")?;
+    ) -> Option<Self> {
+        let driver = fs::read(driver).ok()?;
         let generation = fingerprint((protocol::VERSION, &driver, options.as_env_value()));
         let run_id = format!("hawk-cache-{generation:016x}");
         let directory = target.join("hawk-fragments").join(&run_id);
-        fs::create_dir_all(&directory).context("create Hawk fragment cache")?;
-        Ok(Self {
+        fs::create_dir_all(&directory).ok()?;
+        Some(Self {
             directory,
             run_id,
             members: members.iter().cloned().collect(),

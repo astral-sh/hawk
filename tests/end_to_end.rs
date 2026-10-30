@@ -572,6 +572,16 @@ fn reuses_fragments_and_recovers_from_a_damaged_cache() {
     context.assert_success(&recovered);
     assert_eq!(first.stdout, recovered.stdout);
 
+    // The recovery run invalidated the cached units. Block the next atomic
+    // write for one of them and verify the same fresh-collection fallback.
+    fs::remove_file(&unit).unwrap();
+    fs::create_dir(&unit).unwrap();
+    let unwritable = context.run(&args);
+    context.assert_success(&unwritable);
+    assert_eq!(first.stdout, unwritable.stdout);
+    fs::remove_dir(unit).unwrap();
+    context.assert_success(&context.run(&args));
+
     fs::remove_file(context.workspace().join("app/tests/integration.rs")).unwrap();
     let changed = context.run(&args);
     context.assert_success(&changed);
@@ -586,6 +596,13 @@ fn reuses_fragments_and_recovers_from_a_damaged_cache() {
         .unwrap();
     context.assert_success(&control);
     assert_eq!(changed.stdout, control.stdout);
+
+    let cache_root = context.target_dir().join("hawk-fragments");
+    fs::rename(&cache_root, context.target_dir().join("previous-fragments")).unwrap();
+    fs::write(cache_root, b"occupied").unwrap();
+    let unavailable = context.run(&args);
+    context.assert_success(&unavailable);
+    assert_eq!(unavailable.stdout, control.stdout);
 }
 
 #[cfg(unix)]

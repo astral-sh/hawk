@@ -567,12 +567,12 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
     let cache = if args.fix || args.graph_dir.is_some() {
         None
     } else {
-        Some(CachedArtifacts::new(
+        CachedArtifacts::new(
             &target_dir,
             &driver,
             collection_options,
             &metadata.workspace_members,
-        )?)
+        )
     };
     let cargo = InstrumentedCargo {
         args: &args,
