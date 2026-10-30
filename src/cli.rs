@@ -547,6 +547,7 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
         });
     }
 
+    let rustdoc = crate::toolchain::cargo_rustdoc(&workspace_root, toolchain.host())?;
     let driver = driver_executable()?;
     validate_driver_protocol(&driver, &toolchain)?;
     let workspace_library_sources = workspace_library_sources(&metadata);
@@ -560,6 +561,7 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
         manifest_path: &manifest_path,
         target_dir: &target_dir,
         driver: &driver,
+        rustdoc: &rustdoc,
         toolchain: &toolchain,
         collection_options: if args.output_format == OutputFormat::Json {
             CollectionOptions::new(config.preserve_uniform_field_visibility())
@@ -1042,6 +1044,7 @@ struct InstrumentedCargo<'a> {
     manifest_path: &'a Path,
     target_dir: &'a Path,
     driver: &'a Path,
+    rustdoc: &'a Path,
     toolchain: &'a RustToolchain,
     collection_options: CollectionOptions,
     doctest_packages: Option<&'a [String]>,
@@ -1363,7 +1366,12 @@ impl InstrumentedCargo<'_> {
         if doctests {
             command
                 .arg("--quiet")
-                .env("RUSTC_BOOTSTRAP", "1")
+                .env(
+                    "RUSTDOC",
+                    self.driver
+                        .with_file_name(format!("cargo-hawk-rustdoc{}", env::consts::EXE_SUFFIX)),
+                )
+                .env(protocol::RUSTDOC_ENV, self.rustdoc)
                 .env(
                     "CARGO_ENCODED_RUSTDOCFLAGS",
                     doctest_rustdoc_flags(self.driver),

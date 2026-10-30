@@ -7,9 +7,10 @@ profile="${2:-release}"
 binary_dir="${CARGO_TARGET_DIR:-target}/$target/$profile"
 frontend="$binary_dir/cargo-hawk"
 driver="$binary_dir/cargo-hawk-driver"
+binaries=("$frontend" "$driver" "$binary_dir/cargo-hawk-rustdoc")
 sysroot="$(rustc --print sysroot)"
 
-for binary in "$frontend" "$driver"; do
+for binary in "${binaries[@]}"; do
   if [[ ! -x "$binary" ]]; then
     echo "missing release executable: $binary" >&2
     exit 1
@@ -28,7 +29,7 @@ case "$(uname -s)" in
       echo "cargo-hawk-driver must link librustc_driver" >&2
       exit 1
     fi
-    for binary in "$frontend" "$driver"; do
+    for binary in "${binaries[@]}"; do
       loader_metadata="$(otool -l "$binary")"
       if grep -Fq "$sysroot" <<<"$loader_metadata"; then
         echo "$binary must not embed the build sysroot in loader metadata" >&2
@@ -47,7 +48,7 @@ case "$(uname -s)" in
       echo "cargo-hawk-driver must link librustc_driver" >&2
       exit 1
     fi
-    for binary in "$frontend" "$driver"; do
+    for binary in "${binaries[@]}"; do
       loader_metadata="$(readelf -d "$binary")"
       if grep -Fq "$sysroot" <<<"$loader_metadata"; then
         echo "$binary must not embed the build sysroot in loader metadata" >&2
