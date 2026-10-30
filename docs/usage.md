@@ -23,10 +23,11 @@ curl --proto '=https' --tlsv1.2 -LsSf \
   https://github.com/astral-sh/hawk/releases/latest/download/cargo-hawk-installer.sh | sh
 ```
 
-The installer places `cargo-hawk` and `cargo-hawk-driver` on your `PATH` in
-the same directory. You can instead download the archive for your platform
-from [GitHub Releases](https://github.com/astral-sh/hawk/releases) and place
-both executables on your `PATH` manually.
+The installer places `cargo-hawk`, `cargo-hawk-driver`, and
+`cargo-hawk-rustdoc` in the same directory on your `PATH`. You can also
+download the archive for your platform from
+[GitHub Releases](https://github.com/astral-sh/hawk/releases) and place the
+three executables together on your `PATH` manually.
 
 Run the Cargo subcommand with the pinned toolchain:
 
@@ -38,7 +39,7 @@ cargo +1.99.0 hawk check --manifest-path /path/to/workspace/Cargo.toml
 
 Hawk is pinned to Rust 1.99.0 and uses `rustc_private`; the repository
 toolchain configuration installs `rustc-dev` when necessary. A source build
-produces a `cargo-hawk` frontend and a `cargo-hawk-driver` compiler wrapper.
+produces the `cargo-hawk` frontend and its compiler and rustdoc wrappers.
 
 ```sh
 cargo build

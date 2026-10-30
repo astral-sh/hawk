@@ -53,12 +53,13 @@ its lint decision as a workspace-level post-processing step.
 Clippy and Hawk are both coupled to a particular compiler because their
 drivers link Rust compiler internals. Clippy is distributed as a rustup
 component alongside its matching compiler. Hawk is not a rustup component, so
-cargo-dist packages each prebuilt release with two executables:
+cargo-dist packages three executables together.
 
-- `cargo-hawk` is the user-facing frontend and does not link Rust compiler
-  libraries;
+- `cargo-hawk` is the user-facing frontend.
 - `cargo-hawk-driver` is the internal compiler wrapper and dynamically links
   `librustc_driver`.
+- `cargo-hawk-rustdoc` enables unstable doctest instrumentation in the
+  configured rustdoc process.
 
 The archive and shell installer keep the executables in the same directory.
 Before starting analysis, the frontend verifies that the selected `rustc`
