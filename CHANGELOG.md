@@ -2,6 +2,14 @@
 
 <!-- prettier-ignore-start -->
 
+## 0.1.17
+
+Released on 2026-10-30.
+
+### Other changes
+
+- Default to `target/hawk/` for instrumented builds and honor Cargo's configured target directory ([#177](https://github.com/astral-sh/hawk/pull/177))
+
 ## 0.1.16
 
 Released on 2026-10-30.
