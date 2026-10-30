@@ -9,7 +9,8 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 /// workspace-relative identities in 9, which also made the workspace root a
 /// required environment value; sources outside the workspace stay absolute.
 /// Uniform field group completeness became explicit in 10.
-pub const VERSION: u32 = 10;
+/// Version 11 adds replayable fragment references to instrumented Cargo checks.
+pub const VERSION: u32 = 11;
 
 pub const VERSION_ARGUMENT: &str = "--hawk-protocol-version";
 
@@ -21,6 +22,7 @@ pub const CONSUMER_MODE_ENV: &str = "HAWK_CONSUMER_MODE";
 pub const COLLECTION_OPTIONS_ENV: &str = "HAWK_COLLECTION_OPTIONS";
 pub const RUN_ID_ENV: &str = "HAWK_RUN_ID";
 pub const FIX_PLAN_ENV: &str = "HAWK_FIX_PLAN";
+pub const FRAGMENT_CACHE_ENV: &str = "HAWK_FRAGMENT_CACHE";
 pub const RUSTDOC_ENV: &str = "HAWK_RUSTDOC";
 pub const RUSTC_PROBE_ENV: &str = "HAWK_RUSTC_PROBE";
 pub const RUSTC_PROBE_TOKEN_ENV: &str = "HAWK_RUSTC_PROBE_TOKEN";
@@ -34,6 +36,7 @@ pub const ENVIRONMENT_VARIABLES: &[&str] = &[
     COLLECTION_OPTIONS_ENV,
     RUN_ID_ENV,
     FIX_PLAN_ENV,
+    FRAGMENT_CACHE_ENV,
     RUSTDOC_ENV,
     RUSTC_PROBE_ENV,
     RUSTC_PROBE_TOKEN_ENV,
@@ -132,7 +135,7 @@ mod tests {
 
         assert_eq!(
             error.to_string(),
-            "unsupported Hawk protocol version 1; expected 10"
+            "unsupported Hawk protocol version 1; expected 11"
         );
     }
 }

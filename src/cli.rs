@@ -15,6 +15,7 @@ use cargo_metadata::{DependencyKind, MetadataCommand, Target, TargetKind};
 use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use tempfile::NamedTempFile;
 
+use crate::cached_artifacts::CachedArtifacts;
 use crate::config::{
     AnalysisTarget, Config, ConfigDiagnostic, ConfigDiagnosticKind, FeatureProfile,
     ProductionProduct,
@@ -24,6 +25,7 @@ use crate::protocol;
 use crate::toolchain::{
     RustToolchain, clear_protocol_environment, driver_executable, validate_driver_protocol,
 };
+use cargo_hawk_internal::fragment_cache::Entry;
 use cargo_hawk_internal::graph::{
     CollectionOptions, Definition, DefinitionId, DefinitionIdentity, DefinitionKind, Finding,
     FindingKind, FixPlan, FixTarget, Fragment, analyze_with_options,
@@ -332,8 +334,14 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
         lint_levels.overrides.len(),
         args.allow.len() + args.warn.len() + args.deny.len()
     );
+    // Cargo embeds the workspace path in local package IDs. Use the same
+    // manifest spelling for metadata and for the instrumented builds.
+    let manifest_path = args
+        .manifest_path
+        .canonicalize()
+        .with_context(|| format!("resolve manifest path for {}", args.manifest_path.display()))?;
     let metadata = MetadataCommand::new()
-        .manifest_path(&args.manifest_path)
+        .manifest_path(&manifest_path)
         .no_deps()
         .exec()
         .with_context(|| format!("read Cargo metadata from {}", args.manifest_path.display()))?;
@@ -343,10 +351,6 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
     let workspace_root = workspace_root
         .canonicalize()
         .with_context(|| format!("resolve workspace root {}", workspace_root.display()))?;
-    let manifest_path = args
-        .manifest_path
-        .canonicalize()
-        .with_context(|| format!("resolve manifest path for {}", args.manifest_path.display()))?;
     let config = Config::load(&workspace_root, args.config.as_deref())?;
     if args.fix && config.feature_profiles().len() > 1 {
         bail!(
@@ -555,6 +559,21 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
         .values()
         .map(|source| source.path.clone())
         .collect();
+    let collection_options = if args.output_format == OutputFormat::Json {
+        CollectionOptions::new(config.preserve_uniform_field_visibility()).with_declaration_spans()
+    } else {
+        CollectionOptions::new(config.preserve_uniform_field_visibility())
+    };
+    let cache = if args.fix || args.graph_dir.is_some() {
+        None
+    } else {
+        CachedArtifacts::new(
+            &target_dir,
+            &driver,
+            collection_options,
+            &metadata.workspace_members,
+        )
+    };
     let cargo = InstrumentedCargo {
         args: &args,
         workspace_root: &workspace_root,
@@ -563,12 +582,8 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
         driver: &driver,
         rustdoc: &rustdoc,
         toolchain: &toolchain,
-        collection_options: if args.output_format == OutputFormat::Json {
-            CollectionOptions::new(config.preserve_uniform_field_visibility())
-                .with_declaration_spans()
-        } else {
-            CollectionOptions::new(config.preserve_uniform_field_visibility())
-        },
+        collection_options,
+        cache,
         doctest_packages: doctest_packages.as_deref(),
         workspace_library_sources,
         workspace_library_source_paths,
@@ -1047,6 +1062,7 @@ struct InstrumentedCargo<'a> {
     rustdoc: &'a Path,
     toolchain: &'a RustToolchain,
     collection_options: CollectionOptions,
+    cache: Option<CachedArtifacts>,
     doctest_packages: Option<&'a [String]>,
     workspace_library_sources: HashMap<String, WorkspaceLibrarySource>,
     workspace_library_source_paths: HashSet<PathBuf>,
@@ -1401,12 +1417,34 @@ impl InstrumentedCargo<'_> {
         invocation: CargoInvocation<'_>,
         feature_profile: &FeatureProfile,
     ) -> Result<()> {
+        self.invoke(run_id, graph_dir, invocation, feature_profile, None)?;
+        Ok(())
+    }
+
+    fn invoke(
+        &self,
+        run_id: &str,
+        graph_dir: &Path,
+        invocation: CargoInvocation<'_>,
+        feature_profile: &FeatureProfile,
+        cache: Option<&CachedArtifacts>,
+    ) -> Result<Option<BTreeSet<Entry>>> {
         let ConfiguredCargoCommand {
             mut command,
             subcommand,
             capture_output,
             cargo_output,
         } = self.command(run_id, graph_dir, invocation, feature_profile)?;
+        let messages = if let Some(cache) = cache {
+            let file = NamedTempFile::new().context("create Cargo artifact log")?;
+            command
+                .arg("--message-format=json-diagnostic-rendered-ansi")
+                .env(protocol::FRAGMENT_CACHE_ENV, &cache.directory)
+                .stdout(file.reopen()?);
+            Some((cache, file))
+        } else {
+            None
+        };
         let status = if let Some(cargo_output) = cargo_output {
             let (status, cargo_output) = cargo_output.run(command, subcommand)?;
             let mut reader = cargo_output
@@ -1438,10 +1476,92 @@ impl InstrumentedCargo<'_> {
                 .status()
                 .with_context(|| format!("run instrumented Cargo {subcommand}"))?
         };
+        let entries = if let Some((cache, file)) = messages {
+            cache.read_messages(
+                file.reopen()?,
+                self.args.color.into(),
+                !capture_output || !status.success(),
+                self.args.output_format == OutputFormat::Text,
+            )?
+        } else {
+            None
+        };
         if !status.success() {
             bail!("instrumented Cargo {subcommand} failed with {status}");
         }
-        Ok(())
+        Ok(entries)
+    }
+
+    fn collect_cached(
+        &self,
+        cache: &CachedArtifacts,
+        products: &[ProductionSelection<'_>],
+        profile: &FeatureProfile,
+    ) -> Result<Option<CollectedFragments>> {
+        let scratch = tempfile::tempdir().context("create doctest fragment directory")?;
+        let run = |invocation| {
+            self.invoke(
+                &cache.run_id,
+                scratch.path(),
+                invocation,
+                profile,
+                Some(cache),
+            )
+        };
+        let mut production_units = BTreeMap::<Entry, BTreeSet<String>>::new();
+        for &product in products {
+            let invocation = CargoInvocation::CheckProduction(product);
+            let Some(units) = run(invocation)?.filter(|units| !units.is_empty()) else {
+                return Ok(None);
+            };
+            let root = invocation.specification().root_crate;
+            for unit in units {
+                production_units
+                    .entry(unit)
+                    .or_default()
+                    .insert(root.clone());
+            }
+        }
+        let Some(mut non_production_units) = run(CargoInvocation::CheckNonProduction)? else {
+            return Ok(None);
+        };
+        let Some(doctest_units) = run(CargoInvocation::CheckDoctests {
+            packages: self.doctest_packages,
+        })?
+        else {
+            return Ok(None);
+        };
+        non_production_units.extend(doctest_units);
+
+        let mut production = Vec::with_capacity(production_units.len());
+        for (unit, roots) in production_units {
+            let Some(mut fragment) = unit.read(&cache.directory) else {
+                return Ok(None);
+            };
+            let executable = fragment.is_product_root;
+            let selected = executable && roots.contains(&fragment.crate_name);
+            fragment.is_product_root = selected;
+            fragment.product_root_kind = selected.then_some(protocol::ProductionTargetKind::Binary);
+            fragment.non_production_consumer = executable && !selected;
+            if !selected {
+                fragment.roots.clear();
+            }
+            production.push(fragment);
+        }
+        let mut non_production = read_fragments(scratch.path())?;
+        for unit in non_production_units {
+            let Some(fragment) = unit.read(&cache.directory) else {
+                return Ok(None);
+            };
+            non_production.push(fragment);
+        }
+        // Keep the same crate order as the run-local fragment filenames.
+        production.sort_by_key(|fragment| fragment.crate_id);
+        non_production.sort_by_key(|fragment| fragment.crate_id);
+        Ok(Some(CollectedFragments {
+            production,
+            non_production,
+        }))
     }
 
     fn collect_fragments(
@@ -1453,35 +1573,49 @@ impl InstrumentedCargo<'_> {
         feature_profile: &FeatureProfile,
         production_consumer_packages: &HashSet<String>,
     ) -> Result<CollectedFragments> {
-        // Every production product uses the same compiler mode and feature set. Reuse one
-        // dependency fingerprint across the product builds so Cargo can retain fragments from
-        // shared dependencies instead of compiling them once per configured target.
-        let production_run_id = format!("{run_id}-production");
-        for product in production_products.iter().copied() {
+        let cached = if let Some(cache) = &self.cache {
+            self.collect_cached(cache, production_products, feature_profile)?
+        } else {
+            None
+        };
+        let CollectedFragments {
+            mut production,
+            mut non_production,
+        } = if let Some(fragments) = cached {
+            fragments
+        } else {
+            // Every production product uses the same compiler mode and feature set. Reuse one
+            // dependency fingerprint across the product builds so Cargo can retain fragments from
+            // shared dependencies instead of compiling them once per configured target.
+            let production_run_id = format!("{run_id}-production");
+            for product in production_products.iter().copied() {
+                self.run(
+                    &production_run_id,
+                    production_graph_dir,
+                    CargoInvocation::CheckProduction(product),
+                    feature_profile,
+                )?;
+            }
             self.run(
-                &production_run_id,
-                production_graph_dir,
-                CargoInvocation::CheckProduction(product),
+                &format!("{run_id}-non-production"),
+                non_production_graph_dir,
+                CargoInvocation::CheckNonProduction,
                 feature_profile,
             )?;
-        }
-        self.run(
-            &format!("{run_id}-non-production"),
-            non_production_graph_dir,
-            CargoInvocation::CheckNonProduction,
-            feature_profile,
-        )?;
-        self.run(
-            &format!("{run_id}-doctests"),
-            non_production_graph_dir,
-            CargoInvocation::CheckDoctests {
-                packages: self.doctest_packages,
-            },
-            feature_profile,
-        )?;
+            self.run(
+                &format!("{run_id}-doctests"),
+                non_production_graph_dir,
+                CargoInvocation::CheckDoctests {
+                    packages: self.doctest_packages,
+                },
+                feature_profile,
+            )?;
 
-        let mut production = read_fragments(production_graph_dir)?;
-        let mut non_production = read_fragments(non_production_graph_dir)?;
+            CollectedFragments {
+                production: read_fragments(production_graph_dir)?,
+                non_production: read_fragments(non_production_graph_dir)?,
+            }
+        };
         for fragment in &mut non_production {
             classify_non_production_target(
                 fragment,

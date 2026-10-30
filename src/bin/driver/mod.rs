@@ -34,6 +34,7 @@ use rustc_span::hygiene::{ExpnKind, MacroKind};
 use rustc_span::{BytePos, FileName, Pos};
 
 use crate::protocol;
+use cargo_hawk_internal::fragment_cache;
 use cargo_hawk_internal::graph::{
     CollectionOptions, DeclarationSpan, Definition, DefinitionId, DefinitionIdentity,
     DefinitionKind, Edge, EdgeKind, ExpansionSpan, FindingKind, FixPlan, FixTarget, Fragment, Span,
@@ -187,8 +188,17 @@ impl Callbacks for HawkCallbacks {
         // The workspace root determines every serialized source span, so a
         // change to it has to invalidate cached compilations.
         let workspace_root = workspace_root().to_string_lossy().into_owned();
+        // Only test harnesses collect a different public surface in the two modes.
+        let test_mode = (config.opts.test && env::var_os(protocol::FRAGMENT_CACHE_ENV).is_some())
+            .then_some(self.consumer_mode);
         config.track_state = Some(Box::new(move |session| {
             let mut env_depinfo = session.env_depinfo.borrow_mut();
+            if let Some(mode) = test_mode {
+                env_depinfo.insert((
+                    Symbol::intern(protocol::CONSUMER_MODE_ENV),
+                    Some(Symbol::intern(mode.as_str())),
+                ));
+            }
             env_depinfo.insert((
                 Symbol::intern(protocol::RUN_ID_ENV),
                 Some(Symbol::intern(&run_id)),
@@ -427,13 +437,22 @@ fn emit_fragment(
     let package_name = env::var("CARGO_PKG_NAME").context("read Cargo package name")?;
     let crate_name = tcx.crate_name(LOCAL_CRATE).to_string();
     let crate_id = id(tcx, CRATE_DEF_ID.to_def_id());
-    let classification = classify_fragment(
+    let cache = env::var_os(protocol::FRAGMENT_CACHE_ENV).map(PathBuf::from);
+    // Cache every executable's entry point. The frontend knows which Cargo
+    // invocation selected it and can classify it without changing rustc identities.
+    let mut classification = classify_fragment(
         tcx.crate_types(),
         &crate_name,
         root_crate,
-        consumer_mode,
+        if cache.is_some() {
+            protocol::ConsumerMode::NonProduction
+        } else {
+            consumer_mode
+        },
         tcx.sess.opts.test,
     );
+    classification.test_surface =
+        tcx.sess.opts.test && consumer_mode == protocol::ConsumerMode::NonProduction;
     let suffix = crate_id.to_string();
     let fragment = collect_fragment(
         tcx,
@@ -446,6 +465,19 @@ fn emit_fragment(
         classification.non_production_consumer,
         collection_options,
     );
+    if let Some(cache) = cache {
+        let unit = fragment_cache::fingerprint((
+            crate_id,
+            &tcx.sess.opts.cg.extra_filename,
+            classification.test_surface,
+        ));
+        // An artifact without a reference tells the frontend to collect a
+        // fresh graph, even when the cache becomes unwritable during a build.
+        if let Ok(entry) = fragment_cache::Entry::write(&cache, unit, &fragment) {
+            tcx.dcx().note(entry.note());
+        }
+        return Ok(());
+    }
     let mut file = tempfile::NamedTempFile::new_in(output_dir)
         .with_context(|| format!("create temporary fragment in {}", output_dir.display()))?;
     let temporary_path = file.path().to_path_buf();
@@ -1716,7 +1748,7 @@ mod tests {
 
         assert_eq!(
             error.to_string(),
-            "Hawk frontend uses compiler driver protocol 1, but this driver uses protocol 10; install `cargo-hawk` and `cargo-hawk-driver` from the same release"
+            "Hawk frontend uses compiler driver protocol 1, but this driver uses protocol 11; install `cargo-hawk` and `cargo-hawk-driver` from the same release"
         );
     }
 

@@ -544,6 +544,90 @@ fn workspace_lints_apply_only_to_the_analyzed_crates() {
 }
 
 #[test]
+fn reuses_fragments_and_recovers_from_a_damaged_cache() {
+    let context = HawkTestContext::new("basic");
+    let args = ["--output-format=json"];
+    let first = context.run(&args);
+    context.assert_success(&first);
+    let warm = context.run(&args);
+    context.assert_success(&warm);
+    assert_eq!(first.stdout, warm.stdout);
+    let stderr = String::from_utf8_lossy(&warm.stderr);
+    assert!(!stderr.contains("Checking library v"), "{stderr}");
+
+    let cache = fs::read_dir(context.target_dir().join("hawk-fragments"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let unit = fs::read_dir(&cache)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    fs::write(&unit, b"damaged").unwrap();
+    let recovered = context.run(&args);
+    context.assert_success(&recovered);
+    assert_eq!(first.stdout, recovered.stdout);
+
+    // The recovery run invalidated the cached units. Block the next atomic
+    // write for one of them and verify the same fresh-collection fallback.
+    fs::remove_file(&unit).unwrap();
+    fs::create_dir(&unit).unwrap();
+    let unwritable = context.run(&args);
+    context.assert_success(&unwritable);
+    assert_eq!(first.stdout, unwritable.stdout);
+    fs::remove_dir(unit).unwrap();
+    context.assert_success(&context.run(&args));
+
+    fs::remove_file(context.workspace().join("app/tests/integration.rs")).unwrap();
+    let changed = context.run(&args);
+    context.assert_success(&changed);
+    assert_ne!(first.stdout, changed.stdout);
+    let graphs = tempfile::tempdir().unwrap();
+    let control = context
+        .command()
+        .args(args)
+        .arg("--graph-dir")
+        .arg(graphs.path())
+        .output()
+        .unwrap();
+    context.assert_success(&control);
+    assert_eq!(changed.stdout, control.stdout);
+
+    let cache_root = context.target_dir().join("hawk-fragments");
+    fs::rename(&cache_root, context.target_dir().join("previous-fragments")).unwrap();
+    fs::write(cache_root, b"occupied").unwrap();
+    let unavailable = context.run(&args);
+    context.assert_success(&unavailable);
+    assert_eq!(unavailable.stdout, control.stdout);
+}
+
+#[cfg(unix)]
+#[test]
+fn reuses_fragments_through_a_symlinked_manifest_path() {
+    let context = HawkTestContext::new("basic");
+    let alias = context.target_dir().join("workspace");
+    std::os::unix::fs::symlink(context.workspace(), &alias).unwrap();
+    let args = ["--output-format=json", "-A", "warnings"];
+    let first = context.run(&args);
+    context.assert_success(&first);
+    let warm = Command::new(env!("CARGO_BIN_EXE_cargo-hawk"))
+        .args(["check", "--manifest-path"])
+        .arg(alias.join("Cargo.toml"))
+        .arg("--target-dir")
+        .arg(context.target_dir())
+        .args(args)
+        .output()
+        .unwrap();
+    context.assert_success(&warm);
+    assert_eq!(warm.stdout, first.stdout);
+    assert!(!String::from_utf8_lossy(&warm.stderr).contains("Checking library v"));
+}
+
+#[test]
 fn ignores_stale_fix_plan_during_analysis() {
     let context = HawkTestContext::new("basic");
     let output = context
