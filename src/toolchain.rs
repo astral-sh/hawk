@@ -132,6 +132,10 @@ pub(crate) fn cargo_rustdoc(workspace_root: &Path, host: &str) -> Result<PathBuf
     clear_protocol_environment(&mut command);
     let output = command
         .current_dir(workspace_root)
+        // Only this disposable package is compiled. The workspace's compiler
+        // flags and workspace wrapper apply to the packages Hawk analyzes.
+        .env("CARGO_ENCODED_RUSTFLAGS", "")
+        .env("RUSTC_WORKSPACE_WRAPPER", "")
         .args([
             "check",
             "--quiet",
