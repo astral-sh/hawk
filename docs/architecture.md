@@ -159,15 +159,18 @@ An analysis run proceeds as follows:
 ```
 
 Every Cargo invocation includes the selected profile's feature arguments,
-`--locked`, a shared target directory, and optional `--target`. Each profile
-writes to separate production and non-production fragment directories. The
-frontend combines those fragments before graph analysis. Environment variables
-identify the fragment output directory, selected production-target root,
-analysis mode, and run ID.
+`--locked`, a shared target directory, and optional `--target`. On ordinary
+checks, the compiler driver emits a graph fragment and a diagnostic containing
+its cache key and content fingerprint. Cargo replays that diagnostic for fresh
+units. The frontend collects the references reported by each Cargo invocation,
+classifies the corresponding production roots, and combines the fragments
+before graph analysis.
 For doctests, Hawk additionally uses rustdoc's test-builder wrapper to route
 the generated test crates through the compiler wrapper without executing
-them. The run ID is tracked as compiler dependency input so Cargo does not
-reuse a prior instrumented compilation without producing fresh fragments.
+them. These generated crates write run-local fragments. The driver tracks a
+run ID as a compiler input. It stays stable across cacheable checks with the
+same driver and collection options. Fixes, explicit graph dumps, and recovery
+from an incomplete cache use a fresh run ID.
 
 Clippy follows the first half of this shape: its Cargo frontend invokes Cargo
 with `RUSTC_WORKSPACE_WRAPPER=clippy-driver`, and `clippy-driver` calls

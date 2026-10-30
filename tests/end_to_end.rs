@@ -588,6 +588,28 @@ fn reuses_fragments_and_recovers_from_a_damaged_cache() {
     assert_eq!(changed.stdout, control.stdout);
 }
 
+#[cfg(unix)]
+#[test]
+fn reuses_fragments_through_a_symlinked_manifest_path() {
+    let context = HawkTestContext::new("basic");
+    let alias = context.target_dir().join("workspace");
+    std::os::unix::fs::symlink(context.workspace(), &alias).unwrap();
+    let args = ["--output-format=json", "-A", "warnings"];
+    let first = context.run(&args);
+    context.assert_success(&first);
+    let warm = Command::new(env!("CARGO_BIN_EXE_cargo-hawk"))
+        .args(["check", "--manifest-path"])
+        .arg(alias.join("Cargo.toml"))
+        .arg("--target-dir")
+        .arg(context.target_dir())
+        .args(args)
+        .output()
+        .unwrap();
+    context.assert_success(&warm);
+    assert_eq!(warm.stdout, first.stdout);
+    assert!(!String::from_utf8_lossy(&warm.stderr).contains("Checking library v"));
+}
+
 #[test]
 fn ignores_stale_fix_plan_during_analysis() {
     let context = HawkTestContext::new("basic");

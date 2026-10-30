@@ -58,8 +58,7 @@ impl CachedArtifacts {
                 }
                 Message::CompilerMessage(message) => {
                     let diagnostic = message.message;
-                    if self.members.contains(&message.package_id)
-                        && diagnostic.level == DiagnosticLevel::Note
+                    if diagnostic.level == DiagnosticLevel::Note
                         && diagnostic.spans.is_empty()
                         && let Some(entry) = Entry::from_note(&diagnostic.message)
                     {

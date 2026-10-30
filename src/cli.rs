@@ -334,8 +334,14 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
         lint_levels.overrides.len(),
         args.allow.len() + args.warn.len() + args.deny.len()
     );
+    // Cargo embeds the workspace path in local package IDs. Use the same
+    // manifest spelling for metadata and for the instrumented builds.
+    let manifest_path = args
+        .manifest_path
+        .canonicalize()
+        .with_context(|| format!("resolve manifest path for {}", args.manifest_path.display()))?;
     let metadata = MetadataCommand::new()
-        .manifest_path(&args.manifest_path)
+        .manifest_path(&manifest_path)
         .no_deps()
         .exec()
         .with_context(|| format!("read Cargo metadata from {}", args.manifest_path.display()))?;
@@ -345,10 +351,6 @@ pub(crate) fn run(mut raw_args: Vec<String>) -> Result<ExitCode> {
     let workspace_root = workspace_root
         .canonicalize()
         .with_context(|| format!("resolve workspace root {}", workspace_root.display()))?;
-    let manifest_path = args
-        .manifest_path
-        .canonicalize()
-        .with_context(|| format!("resolve manifest path for {}", args.manifest_path.display()))?;
     let config = Config::load(&workspace_root, args.config.as_deref())?;
     if args.fix && config.feature_profiles().len() > 1 {
         bail!(
@@ -1509,7 +1511,7 @@ impl InstrumentedCargo<'_> {
         let mut production_units = BTreeMap::<Entry, BTreeSet<String>>::new();
         for &product in products {
             let invocation = CargoInvocation::CheckProduction(product);
-            let Some(units) = run(invocation)? else {
+            let Some(units) = run(invocation)?.filter(|units| !units.is_empty()) else {
                 return Ok(None);
             };
             let root = invocation.specification().root_crate;
