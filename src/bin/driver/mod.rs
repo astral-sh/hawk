@@ -30,6 +30,7 @@ use rustc_parse::parser::{AllowConstBlockItems, ForceCollect};
 use rustc_span::Symbol;
 use rustc_span::def_id::LOCAL_CRATE;
 use rustc_span::hygiene::{ExpnKind, MacroKind};
+use rustc_span::symbol::kw;
 use rustc_span::{BytePos, FileName, Pos};
 use rustc_structures::CrateType;
 
@@ -1212,6 +1213,8 @@ fn push_use_tree_leaves(
 ) {
     match tree.kind {
         hir::UseKind::Single(_) | hir::UseKind::Glob => def_ids.push(def_id),
+        // An empty group still resolves and privacy-checks its prefix.
+        hir::UseKind::Nested { items } if items.is_empty() => def_ids.push(def_id),
         hir::UseKind::Nested { items } => {
             for (tree, _, def_id) in items {
                 push_use_tree_leaves(tree, *def_id, def_ids);
@@ -1300,16 +1303,51 @@ fn definition_name(tcx: TyCtxt<'_>, def_id: LocalDefId, kind: DefinitionKind) ->
         return tcx.def_path_str(def_id.to_def_id());
     }
 
-    let Some(ident) = tcx.hir_node_by_def_id(def_id).ident() else {
+    let node = tcx.hir_node_by_def_id(def_id);
+    let Some(ident) = node.ident() else {
         return tcx.def_path_str(def_id.to_def_id());
     };
-    let name = ident.to_string();
+    let name = if ident.name == kw::SelfLower && matches!(node, Node::NestedUseTree(_)) {
+        enclosing_use_segment(tcx, def_id).map_or(ident.name, |segment| segment.ident.name)
+    } else {
+        ident.name
+    };
     let parent = declaration_parent(tcx, def_id);
     if parent == CRATE_DEF_ID {
-        name
+        name.to_string()
     } else {
         format!("{}::{name}", tcx.def_path_str(parent.to_def_id()))
     }
+}
+
+// A grouped import leaf can inherit its path from enclosing use trees.
+fn enclosing_use_segment<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    def_id: LocalDefId,
+) -> Option<&'tcx hir::PathSegment<'tcx>> {
+    let owner = tcx.local_def_id_to_hir_id(def_id).owner;
+    let hir::ItemKind::Use(ref tree) = tcx.hir_expect_item(owner.def_id).kind else {
+        return None;
+    };
+    find_use_segment(tree, def_id, None)
+}
+
+fn find_use_segment<'tcx>(
+    tree: &'tcx hir::UseTree<'tcx>,
+    def_id: LocalDefId,
+    inherited: Option<&'tcx hir::PathSegment<'tcx>>,
+) -> Option<&'tcx hir::PathSegment<'tcx>> {
+    let hir::UseKind::Nested { items } = tree.kind else {
+        return None;
+    };
+    let inherited = tree.prefix.segments.last().or(inherited);
+    items.iter().find_map(|(child, _, child_id)| {
+        if *child_id == def_id {
+            inherited
+        } else {
+            find_use_segment(child, def_id, inherited)
+        }
+    })
 }
 
 fn enclosing_module(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Option<LocalDefId> {
@@ -1650,10 +1688,26 @@ impl<'tcx> ReferenceVisitor<'tcx> {
 
     fn visit_declaration(&mut self, def_id: LocalDefId) {
         match self.tcx.hir_node_by_def_id(def_id) {
-            Node::Item(item) => self.visit_item(item),
-            Node::NestedUseTree(tree) => {
-                intravisit::walk_use(self, tree, self.tcx.local_def_id_to_hir_id(def_id));
+            Node::Item(hir::Item {
+                kind: hir::ItemKind::Use(tree),
+                ..
+            })
+            | Node::NestedUseTree(tree) => {
+                if matches!(tree.kind, hir::UseKind::Nested { items } if items.is_empty()) {
+                    // Rust leaves the empty tree unresolved but resolves its path segments.
+                    if let Some(segment) = tree
+                        .prefix
+                        .segments
+                        .last()
+                        .or_else(|| enclosing_use_segment(self.tcx, def_id))
+                    {
+                        self.record(segment.res);
+                    }
+                } else {
+                    intravisit::walk_use(self, tree, self.tcx.local_def_id_to_hir_id(def_id));
+                }
             }
+            Node::Item(item) => self.visit_item(item),
             Node::ImplItem(item) => self.visit_impl_item(item),
             Node::TraitItem(item) => self.visit_trait_item(item),
             Node::ForeignItem(item) => self.visit_foreign_item(item),

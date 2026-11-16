@@ -2945,6 +2945,72 @@ fn json_locations_include_grouped_reexport_separators() {
 }
 
 #[test]
+fn json_reports_the_exported_name_of_a_grouped_self_import() {
+    let context = HawkTestContext::new("grouped_reexport_fixes");
+    let library_path = context.workspace().join("library/src/lib.rs");
+    let mut source = fs::read_to_string(&library_path).expect("read library source");
+    source.push_str(
+        r#"
+mod nested_enum {
+    pub enum UnusedEnum { Variant }
+}
+
+pub use nested_enum::{UnusedEnum::{{self}}};
+"#,
+    );
+    fs::write(&library_path, &source).expect("add a grouped self import");
+
+    let output = context.run(&["--output-format=json"]);
+    context.assert_success(&output);
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout contains one JSON report");
+    let diagnostic = report["diagnostics"]
+        .as_array()
+        .expect("diagnostics is an array")
+        .iter()
+        .find(|diagnostic| {
+            diagnostic["identity"]["item"] == "UnusedEnum"
+                && diagnostic["identity"]["kind"] == "reexport"
+        })
+        .expect("UnusedEnum re-export diagnostic");
+    let start = diagnostic["location"]["byte_start"]
+        .as_u64()
+        .and_then(|offset| usize::try_from(offset).ok())
+        .expect("declaration start");
+    let end = diagnostic["location"]["byte_end"]
+        .as_u64()
+        .and_then(|offset| usize::try_from(offset).ok())
+        .expect("declaration end");
+    assert_eq!(&source[start..end], "self");
+}
+
+#[test]
+fn empty_use_groups_preserve_cross_crate_visibility() {
+    let context = HawkTestContext::new("grouped_reexport_fixes");
+    let library_path = context.workspace().join("library/src/lib.rs");
+    let mut library = fs::read_to_string(&library_path).expect("read library source");
+    library.push_str("\npub mod empty_import_only {}\n");
+    fs::write(library_path, library).expect("add a public module");
+
+    let app_path = context.workspace().join("app/src/main.rs");
+    let mut app = fs::read_to_string(&app_path).expect("read app source");
+    app.push_str("\nuse library::{empty_import_only::{{}}};\n");
+    fs::write(app_path, app).expect("add an empty import group");
+
+    let output = context.run(&["--output-format=json"]);
+    context.assert_success(&output);
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout contains one JSON report");
+    assert!(
+        report["diagnostics"]
+            .as_array()
+            .expect("diagnostics is an array")
+            .iter()
+            .all(|diagnostic| diagnostic["identity"]["item"] != "empty_import_only")
+    );
+}
+
+#[test]
 fn json_locations_include_separators_after_trivia_and_can_be_deleted() {
     let context = HawkTestContext::new("dead_public_fixes");
     let library_path = context.workspace().join("library/src/lib.rs");
