@@ -2,6 +2,16 @@
 
 <!-- prettier-ignore-start -->
 
+
+## 0.1.18
+
+Released on 2026-11-16.
+
+### Other changes
+
+- Run demudhra first on macOS ([#179](https://github.com/astral-sh/hawk/pull/179))
+- Upgrade to Rust 1.100.0 ([#180](https://github.com/astral-sh/hawk/pull/180))
+
 ## 0.1.17
 
 Released on 2026-10-30.
