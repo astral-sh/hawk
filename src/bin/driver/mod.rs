@@ -21,17 +21,18 @@ use rustc_hir::def_id::{CRATE_DEF_ID, CRATE_MOD_ID, DefId, LocalDefId};
 use rustc_hir::intravisit::{self, Visitor};
 use rustc_interface::interface;
 use rustc_lexer::{FrontmatterAllowed, TokenKind};
+use rustc_lint_defs::Level;
 use rustc_lint_defs::builtin::DEAD_CODE;
 use rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrFlags;
 use rustc_middle::ty::{self, TyCtxt};
 use rustc_parse::lexer::StripTokens;
 use rustc_parse::parser::{AllowConstBlockItems, ForceCollect};
-use rustc_session::config::CrateType;
-use rustc_session::lint::Level;
 use rustc_span::Symbol;
 use rustc_span::def_id::LOCAL_CRATE;
 use rustc_span::hygiene::{ExpnKind, MacroKind};
+use rustc_span::symbol::kw;
 use rustc_span::{BytePos, FileName, Pos};
+use rustc_structures::CrateType;
 
 use crate::protocol;
 use cargo_hawk_internal::fragment_cache;
@@ -285,8 +286,7 @@ fn emit_fixes(tcx: TyCtxt<'_>, fix_plan: &FixPlan) {
     let fix_plan = FixPlanIndex::new(fix_plan);
     let crate_items = tcx.hir_crate_items(());
     let mut visibility_fixes = Vec::new();
-    for owner in crate_items.owners() {
-        let def_id = owner.def_id;
+    for def_id in declaration_def_ids(tcx) {
         let Some(definition_kind) = diagnostic_kind(tcx, def_id) else {
             continue;
         };
@@ -579,8 +579,7 @@ fn collect_fragment(
     let crate_items = tcx.hir_crate_items(());
     let is_proc_macro_crate = tcx.crate_types().contains(&CrateType::ProcMacro);
 
-    for owner in crate_items.owners() {
-        let def_id = owner.def_id;
+    for def_id in declaration_def_ids(tcx) {
         let kind = diagnostic_kind(tcx, def_id);
         let visibility = visibility_modifier(tcx, def_id);
         let public_candidate = kind.is_some()
@@ -712,8 +711,7 @@ fn collect_fragment(
         visitor.visit_body(body);
         visitor.finish(&mut edges);
     }
-    for owner in crate_items.owners() {
-        let def_id = owner.def_id;
+    for def_id in declaration_def_ids(tcx) {
         let edge_start = edges.len();
         let mut visitor = ReferenceVisitor::new(
             tcx,
@@ -726,7 +724,7 @@ fn collect_fragment(
             None,
             false,
         );
-        visitor.visit_node(tcx.hir_node_by_def_id(def_id));
+        visitor.visit_declaration(def_id);
         visitor.finish(&mut edges);
         if let Some(trait_item) = tcx.trait_item_of(def_id.to_def_id())
             && let Some(trait_def_id) = tcx.trait_of_assoc(trait_item)
@@ -767,7 +765,7 @@ fn collect_fragment(
         }
         if matches!(
             tcx.def_kind(def_id),
-            DefKind::AssocFn | DefKind::AssocConst { .. } | DefKind::AssocTy
+            DefKind::AssocFn | DefKind::AssocConst | DefKind::AssocTy
         ) && matches!(tcx.def_kind(tcx.local_parent(def_id)), DefKind::Trait)
         {
             edges.push(Edge {
@@ -843,7 +841,7 @@ fn collect_fragment(
             let impl_def_id = tcx.local_parent(*def_id);
             matches!(
                 tcx.def_kind(*def_id),
-                DefKind::AssocFn | DefKind::AssocConst { .. } | DefKind::AssocTy
+                DefKind::AssocFn | DefKind::AssocConst | DefKind::AssocTy
             ) && matches!(tcx.def_kind(impl_def_id), DefKind::Impl { of_trait: true })
                 && tcx.effective_visibilities(()).is_reachable(impl_def_id)
         })
@@ -926,7 +924,7 @@ fn collect_fragment(
         .filter(|def_id| {
             matches!(
                 tcx.def_kind(*def_id),
-                DefKind::AssocFn | DefKind::AssocConst { .. }
+                DefKind::AssocFn | DefKind::AssocConst
             ) && matches!(
                 tcx.def_kind(tcx.local_parent(*def_id)),
                 DefKind::Trait | DefKind::Impl { of_trait: true }
@@ -1122,6 +1120,10 @@ fn visibility_span(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Option<rustc_span::Sp
         Node::Item(item) => Some(item.vis_span),
         Node::ImplItem(item) => item.vis_span(),
         Node::Field(field) => Some(field.vis_span),
+        Node::NestedUseTree(_) => Some(
+            tcx.hir_expect_item(tcx.local_def_id_to_hir_id(def_id).owner.def_id)
+                .vis_span,
+        ),
         _ => None,
     }
 }
@@ -1174,8 +1176,51 @@ fn is_public_variant(tcx: TyCtxt<'_>, def_id: LocalDefId, test_surface: bool) ->
 fn is_named_reexport(tcx: TyCtxt<'_>, def_id: LocalDefId) -> bool {
     matches!(
         tcx.hir_node_by_def_id(def_id),
-        Node::Item(item) if matches!(item.kind, hir::ItemKind::Use(_, hir::UseKind::Single(_)))
+        Node::Item(hir::Item {
+            kind: hir::ItemKind::Use(hir::UseTree {
+                kind: hir::UseKind::Single(_),
+                ..
+            }),
+            ..
+        }) | Node::NestedUseTree(hir::UseTree {
+            kind: hir::UseKind::Single(_),
+            ..
+        })
     )
+}
+
+// Grouped `use` items are lowered to one owner whose leaf imports are nested
+// definitions without owners, so declarations are owners plus those leaves.
+fn declaration_def_ids(tcx: TyCtxt<'_>) -> Vec<LocalDefId> {
+    let mut def_ids = Vec::new();
+    for owner in tcx.hir_crate_items(()).owners() {
+        let def_id = owner.def_id;
+        match tcx.hir_node_by_def_id(def_id) {
+            Node::Item(hir::Item {
+                kind: hir::ItemKind::Use(tree),
+                ..
+            }) => push_use_tree_leaves(tree, def_id, &mut def_ids),
+            _ => def_ids.push(def_id),
+        }
+    }
+    def_ids
+}
+
+fn push_use_tree_leaves(
+    tree: &hir::UseTree<'_>,
+    def_id: LocalDefId,
+    def_ids: &mut Vec<LocalDefId>,
+) {
+    match tree.kind {
+        hir::UseKind::Single(_) | hir::UseKind::Glob => def_ids.push(def_id),
+        // An empty group still resolves and privacy-checks its prefix.
+        hir::UseKind::Nested { items: [] } => def_ids.push(def_id),
+        hir::UseKind::Nested { items } => {
+            for (tree, _, def_id) in items {
+                push_use_tree_leaves(tree, *def_id, def_ids);
+            }
+        }
+    }
 }
 
 fn definition(
@@ -1230,7 +1275,7 @@ fn diagnostic_kind(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Option<DefinitionKind
         DefKind::Enum => Some(DefinitionKind::Enum),
         DefKind::Union => Some(DefinitionKind::Union),
         DefKind::TyAlias => Some(DefinitionKind::TypeAlias),
-        DefKind::Const { .. } => Some(DefinitionKind::Constant),
+        DefKind::Const => Some(DefinitionKind::Constant),
         DefKind::Static { .. } => Some(DefinitionKind::Static),
         DefKind::Use => Some(DefinitionKind::Reexport),
         DefKind::AssocFn
@@ -1241,7 +1286,7 @@ fn diagnostic_kind(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Option<DefinitionKind
         {
             Some(DefinitionKind::InherentMethod)
         }
-        DefKind::AssocConst { .. }
+        DefKind::AssocConst
             if matches!(
                 tcx.def_kind(tcx.local_parent(def_id)),
                 DefKind::Impl { of_trait: false }
@@ -1258,27 +1303,65 @@ fn definition_name(tcx: TyCtxt<'_>, def_id: LocalDefId, kind: DefinitionKind) ->
         return tcx.def_path_str(def_id.to_def_id());
     }
 
-    let Node::Item(item) = tcx.hir_node_by_def_id(def_id) else {
+    let node = tcx.hir_node_by_def_id(def_id);
+    let Some(ident) = node.ident() else {
         return tcx.def_path_str(def_id.to_def_id());
     };
-    let Some(ident) = item.kind.ident() else {
-        return tcx.def_path_str(def_id.to_def_id());
+    let name = if ident.name == kw::SelfLower && matches!(node, Node::NestedUseTree(_)) {
+        enclosing_use_segment(tcx, def_id).map_or(ident.name, |segment| segment.ident.name)
+    } else {
+        ident.name
     };
-    let name = ident.to_string();
-    let parent = tcx.local_parent(def_id);
+    let parent = declaration_parent(tcx, def_id);
     if parent == CRATE_DEF_ID {
-        name
+        name.to_string()
     } else {
         format!("{}::{name}", tcx.def_path_str(parent.to_def_id()))
     }
+}
+
+// A grouped import leaf can inherit its path from enclosing use trees.
+fn enclosing_use_segment(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Option<&hir::PathSegment<'_>> {
+    let owner = tcx.local_def_id_to_hir_id(def_id).owner;
+    let hir::ItemKind::Use(ref tree) = tcx.hir_expect_item(owner.def_id).kind else {
+        return None;
+    };
+    find_use_segment(tree, def_id, None)
+}
+
+fn find_use_segment<'tcx>(
+    tree: &'tcx hir::UseTree<'tcx>,
+    def_id: LocalDefId,
+    inherited: Option<&'tcx hir::PathSegment<'tcx>>,
+) -> Option<&'tcx hir::PathSegment<'tcx>> {
+    let hir::UseKind::Nested { items } = tree.kind else {
+        return None;
+    };
+    let inherited = tree.prefix.segments.last().or(inherited);
+    items.iter().find_map(|(child, _, child_id)| {
+        if *child_id == def_id {
+            inherited
+        } else {
+            find_use_segment(child, def_id, inherited)
+        }
+    })
 }
 
 fn enclosing_module(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Option<LocalDefId> {
     if def_id == CRATE_DEF_ID {
         return None;
     }
-    let parent = tcx.local_parent(def_id);
+    let parent = declaration_parent(tcx, def_id);
     (parent != CRATE_DEF_ID && tcx.def_kind(parent) == DefKind::Mod).then_some(parent)
+}
+
+// A leaf import of a grouped `use` is parented by the anonymous `use` item.
+fn declaration_parent(tcx: TyCtxt<'_>, def_id: LocalDefId) -> LocalDefId {
+    let mut parent = tcx.local_parent(def_id);
+    while parent != CRATE_DEF_ID && tcx.def_kind(parent) == DefKind::Use {
+        parent = tcx.local_parent(parent);
+    }
+    parent
 }
 
 fn module_scope(tcx: TyCtxt<'_>, mut def_id: LocalDefId) -> Vec<String> {
@@ -1329,10 +1412,15 @@ fn declaration_span(
     def_id: LocalDefId,
     kind: DefinitionKind,
 ) -> Option<DeclarationSpan> {
-    let mut item_span = tcx
-        .hir_node_by_def_id(def_id)
-        .as_owner()
-        .map_or_else(|| tcx.def_span(def_id), |owner| owner.span());
+    let mut item_span = match tcx.hir_node_by_def_id(def_id) {
+        Node::NestedUseTree(hir::UseTree {
+            prefix,
+            kind: hir::UseKind::Single(ident),
+        }) => prefix.span.to(ident.span),
+        node => node
+            .as_owner()
+            .map_or_else(|| tcx.def_span(def_id), |owner| owner.span()),
+    };
     if item_span.is_dummy() || item_span.from_expansion() {
         return None;
     }
@@ -1595,8 +1683,27 @@ impl<'tcx> ReferenceVisitor<'tcx> {
         }
     }
 
-    fn visit_node(&mut self, node: Node<'tcx>) {
-        match node {
+    fn visit_declaration(&mut self, def_id: LocalDefId) {
+        match self.tcx.hir_node_by_def_id(def_id) {
+            Node::Item(hir::Item {
+                kind: hir::ItemKind::Use(tree),
+                ..
+            })
+            | Node::NestedUseTree(tree) => {
+                if matches!(tree.kind, hir::UseKind::Nested { items: [] }) {
+                    // Rust leaves the empty tree unresolved but resolves its path segments.
+                    if let Some(segment) = tree
+                        .prefix
+                        .segments
+                        .last()
+                        .or_else(|| enclosing_use_segment(self.tcx, def_id))
+                    {
+                        self.record(segment.res);
+                    }
+                } else {
+                    intravisit::walk_use(self, tree, self.tcx.local_def_id_to_hir_id(def_id));
+                }
+            }
             Node::Item(item) => self.visit_item(item),
             Node::ImplItem(item) => self.visit_impl_item(item),
             Node::TraitItem(item) => self.visit_trait_item(item),
@@ -1727,7 +1834,7 @@ mod tests {
         uniform_field_group, validate_frontend_protocol_version, write_fragment,
     };
     use cargo_hawk_internal::graph::{CollectionOptions, Edge, EdgeKind, Fragment};
-    use rustc_session::config::CrateType;
+    use rustc_structures::CrateType;
 
     struct FailingWriter;
 
