@@ -2,6 +2,14 @@
 
 <!-- prettier-ignore-start -->
 
+## 0.1.18
+
+Released on 2026-11-16.
+
+### Other changes
+
+- Require Rust 1.100.0 for both prebuilt binaries and source builds ([#180](https://github.com/astral-sh/hawk/pull/180))
+
 ## 0.1.17
 
 Released on 2026-10-30.
