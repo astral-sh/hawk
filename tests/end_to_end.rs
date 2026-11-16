@@ -2950,13 +2950,13 @@ fn json_reports_the_exported_name_of_a_grouped_self_import() {
     let library_path = context.workspace().join("library/src/lib.rs");
     let mut source = fs::read_to_string(&library_path).expect("read library source");
     source.push_str(
-        r#"
+        r"
 mod nested_enum {
     pub enum UnusedEnum { Variant }
 }
 
 pub use nested_enum::{UnusedEnum::{{self}}};
-"#,
+",
     );
     fs::write(&library_path, &source).expect("add a grouped self import");
 

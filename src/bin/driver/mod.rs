@@ -1214,7 +1214,7 @@ fn push_use_tree_leaves(
     match tree.kind {
         hir::UseKind::Single(_) | hir::UseKind::Glob => def_ids.push(def_id),
         // An empty group still resolves and privacy-checks its prefix.
-        hir::UseKind::Nested { items } if items.is_empty() => def_ids.push(def_id),
+        hir::UseKind::Nested { items: [] } => def_ids.push(def_id),
         hir::UseKind::Nested { items } => {
             for (tree, _, def_id) in items {
                 push_use_tree_leaves(tree, *def_id, def_ids);
@@ -1321,10 +1321,7 @@ fn definition_name(tcx: TyCtxt<'_>, def_id: LocalDefId, kind: DefinitionKind) ->
 }
 
 // A grouped import leaf can inherit its path from enclosing use trees.
-fn enclosing_use_segment<'tcx>(
-    tcx: TyCtxt<'tcx>,
-    def_id: LocalDefId,
-) -> Option<&'tcx hir::PathSegment<'tcx>> {
+fn enclosing_use_segment(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Option<&hir::PathSegment<'_>> {
     let owner = tcx.local_def_id_to_hir_id(def_id).owner;
     let hir::ItemKind::Use(ref tree) = tcx.hir_expect_item(owner.def_id).kind else {
         return None;
@@ -1693,7 +1690,7 @@ impl<'tcx> ReferenceVisitor<'tcx> {
                 ..
             })
             | Node::NestedUseTree(tree) => {
-                if matches!(tree.kind, hir::UseKind::Nested { items } if items.is_empty()) {
+                if matches!(tree.kind, hir::UseKind::Nested { items: [] }) {
                     // Rust leaves the empty tree unresolved but resolves its path segments.
                     if let Some(segment) = tree
                         .prefix
